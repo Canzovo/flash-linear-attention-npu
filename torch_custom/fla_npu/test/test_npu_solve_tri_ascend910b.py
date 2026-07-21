@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-test_npu_solve_tri_ascend950.py - Test SolveTri custom operator on ascend950 via fla_npu.ops.ascendc
+test_npu_solve_tri_ascend910b.py - Test SolveTri custom operator on ascend910b (A2) via fla_npu.ops.ascendc
 
 支持四种布局：
   - BSND [B,T,H,BT]              (单 chunk 内数据不连续)
@@ -406,7 +406,7 @@ def run_all_cases(dtype):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("SolveTri NPU Test (ascend950, fla_npu.ops.ascendc) — fp16 + bf16")
+    print("SolveTri NPU Test (ascend910b/A2, fla_npu.ops.ascendc) — fp16 + bf16")
     print("=" * 60)
 
     results = []
