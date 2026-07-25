@@ -6,18 +6,52 @@
  */
 
 #include "kernel_operator.h"
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "kernel_utils/vector/regbase.hpp"
+#endif
 
 using namespace AscendC;
 
 namespace {
 constexpr float RCP_LN2 = 1.4426950408889634f;
-constexpr uint32_t GATE_MTE2_V_EVENT_ID = 0;
-constexpr uint32_t GATE_V_MTE3_EVENT_ID = 1;
-constexpr uint32_t GATE_MTE3_MTE2_EVENT_ID = 2;
-constexpr uint32_t GATE_SCALAR_MTE2_V_EVENT_ID = 3;
-constexpr uint32_t GATE_SCALAR_V_S_EVENT_ID = 4;
-constexpr uint32_t GATE_MTE3_V_EVENT_ID = 5;
 constexpr uint32_t GATE_ROW_ELEMENTS = 256;
+constexpr uint32_t GATE_PIPELINE_DEPTH = 2;
+constexpr uint32_t GATE_BULK_ROWS = 64;
+constexpr uint32_t GATE_BULK_COLS = 128;
+constexpr uint32_t GATE_BULK_ELEMENTS = GATE_BULK_ROWS * GATE_BULK_COLS;
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+static __simd_vf__ inline void AccumulateGateRowRegbase(__ubuf__ float *input, __ubuf__ float *acc,
+                                                        __ubuf__ float *output, uint16_t count)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t FLOAT_ELEMENTS_PER_REG = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+    constexpr uint16_t ELEMENTS_PER_PAIR = 2 * FLOAT_ELEMENTS_PER_REG;
+
+    for (uint16_t offset = 0; offset < count; offset += ELEMENTS_PER_PAIR) {
+        RegTensor<float> inputZeroReg;
+        RegTensor<float> inputOneReg;
+        RegTensor<float> accZeroReg;
+        RegTensor<float> accOneReg;
+        MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+
+        LoadAlign<float, LoadDist::DIST_NORM>(inputZeroReg, input + offset);
+        LoadAlign<float, LoadDist::DIST_NORM>(inputOneReg, input + offset + FLOAT_ELEMENTS_PER_REG);
+        LoadAlign<float, LoadDist::DIST_NORM>(accZeroReg, acc + offset);
+        LoadAlign<float, LoadDist::DIST_NORM>(accOneReg, acc + offset + FLOAT_ELEMENTS_PER_REG);
+
+        Muls(inputZeroReg, inputZeroReg, RCP_LN2, floatMask);
+        Muls(inputOneReg, inputOneReg, RCP_LN2, floatMask);
+        Add(accZeroReg, accZeroReg, inputZeroReg, floatMask);
+        Add(accOneReg, accOneReg, inputOneReg, floatMask);
+
+        StoreAlign(acc + offset, accZeroReg, floatMask);
+        StoreAlign(acc + offset + FLOAT_ELEMENTS_PER_REG, accOneReg, floatMask);
+        StoreAlign(output + offset, accZeroReg, floatMask);
+        StoreAlign(output + offset + FLOAT_ELEMENTS_PER_REG, accOneReg, floatMask);
+    }
+}
+#endif
 
 template <typename T, bool SAFE_GATE>
 class KdaGateCumsumKernel {
@@ -47,11 +81,14 @@ public:
         maxChunks_ = (t_ + chunkSize_ - 1) / chunkSize_;
         pipe_->InitBuffer(rowBuf_, GATE_ROW_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(accBuf_, GATE_ROW_ELEMENTS * sizeof(float));
+        pipe_->InitBuffer(outBuf_, GATE_PIPELINE_DEPTH * GATE_ROW_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(tmpBuf_, GATE_ROW_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(oneBuf_, GATE_ROW_ELEMENTS * sizeof(float));
-        pipe_->InitBuffer(inBuf_, GATE_ROW_ELEMENTS * sizeof(T));
+        pipe_->InitBuffer(inBuf_, GATE_PIPELINE_DEPTH * GATE_ROW_ELEMENTS * sizeof(T));
+        pipe_->InitBuffer(chunkBuf_, 2 * GATE_BULK_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(scalarBuf_, 32);
         pipe_->InitBuffer(scalarI64Buf_, 32);
+        AllocEvents();
     }
 
     __aicore__ inline void Process()
@@ -61,9 +98,36 @@ public:
         for (uint64_t task = coreIdx; task < taskCount; task += usedCoreNum_) {
             ProcessTask(task);
         }
+        ReleaseEvents();
     }
 
 private:
+    __aicore__ inline void AllocEvents()
+    {
+        for (uint32_t slot = 0; slot < GATE_PIPELINE_DEPTH; ++slot) {
+            inputMte2ToVEvent_[slot] = pipe_->AllocEventID<HardEvent::MTE2_V>();
+            inputVToMte2Event_[slot] = pipe_->AllocEventID<HardEvent::V_MTE2>();
+            outputVToMte3Event_[slot] = pipe_->AllocEventID<HardEvent::V_MTE3>();
+            outputMte3ToVEvent_[slot] = pipe_->AllocEventID<HardEvent::MTE3_V>();
+        }
+        auxMte2ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE2_V>();
+        scalarVToSEvent_ = pipe_->AllocEventID<HardEvent::V_S>();
+        bulkMte3ToMte2Event_ = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+    }
+
+    __aicore__ inline void ReleaseEvents()
+    {
+        for (uint32_t slot = 0; slot < GATE_PIPELINE_DEPTH; ++slot) {
+            pipe_->ReleaseEventID<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot]);
+            pipe_->ReleaseEventID<HardEvent::V_MTE2>(inputVToMte2Event_[slot]);
+            pipe_->ReleaseEventID<HardEvent::V_MTE3>(outputVToMte3Event_[slot]);
+            pipe_->ReleaseEventID<HardEvent::MTE3_V>(outputMte3ToVEvent_[slot]);
+        }
+        pipe_->ReleaseEventID<HardEvent::MTE2_V>(auxMte2ToVEvent_);
+        pipe_->ReleaseEventID<HardEvent::V_S>(scalarVToSEvent_);
+        pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+    }
+
     __aicore__ inline uint64_t Offset(uint64_t b, uint64_t t, uint64_t hv, uint64_t k) const
     {
         if (layout_ == 1) {
@@ -115,22 +179,21 @@ private:
         }
     }
 
-    __aicore__ inline void LoadGateRow(uint64_t offset, LocalTensor<float> &row)
+    __aicore__ inline void PrefetchGateRow(uint64_t offset, uint32_t slot)
     {
+        LocalTensor<T> input = inBuf_.Get<T>()[slot * GATE_ROW_ELEMENTS];
+        CopyVectorIn(input, g_, offset, k_);
+        SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot]);
+    }
+
+    __aicore__ inline void MaterializeGateRow(uint32_t slot, LocalTensor<float> &row)
+    {
+        LocalTensor<T> input = inBuf_.Get<T>()[slot * GATE_ROW_ELEMENTS];
         if constexpr (IsSameType<T, float>::value) {
-            CopyVectorIn(row, g_, offset, k_);
+            Adds(row, input, 0.0f, static_cast<uint32_t>(k_));
         } else {
-            LocalTensor<T> inLocal = inBuf_.Get<T>();
-            CopyVectorIn(inLocal, g_, offset, k_);
-            SetFlag<HardEvent::MTE2_V>(GATE_MTE2_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE2_V>(GATE_MTE2_V_EVENT_ID);
-            Cast(row, inLocal, RoundMode::CAST_NONE, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
-            return;
+            Cast(row, input, RoundMode::CAST_NONE, static_cast<uint32_t>(k_));
         }
-        SetFlag<HardEvent::MTE2_V>(GATE_MTE2_V_EVENT_ID);
-        WaitFlag<HardEvent::MTE2_V>(GATE_MTE2_V_EVENT_ID);
-        Adds(row, row, 0.0f, static_cast<uint32_t>(k_));
         PipeBarrier<PIPE_V>();
     }
 
@@ -140,12 +203,12 @@ private:
         DataCopyParams params{1, static_cast<uint16_t>(sizeof(float)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
         DataCopyPad(scalar, tensor[offset], params, padParams);
-        SetFlag<HardEvent::MTE2_V>(GATE_SCALAR_MTE2_V_EVENT_ID);
-        WaitFlag<HardEvent::MTE2_V>(GATE_SCALAR_MTE2_V_EVENT_ID);
+        SetFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
         Adds(scalar, scalar, 0.0f, 1);
         PipeBarrier<PIPE_V>();
-        SetFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
-        WaitFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
+        SetFlag<HardEvent::V_S>(scalarVToSEvent_);
+        WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
         return ptr[0];
     }
@@ -156,10 +219,10 @@ private:
         DataCopyParams params{1, static_cast<uint16_t>(sizeof(int64_t)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
         DataCopyPad(scalar, tensor[offset], params, padParams);
-        SetFlag<HardEvent::MTE2_V>(GATE_SCALAR_MTE2_V_EVENT_ID);
-        WaitFlag<HardEvent::MTE2_V>(GATE_SCALAR_MTE2_V_EVENT_ID);
-        SetFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
-        WaitFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
+        SetFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
+        SetFlag<HardEvent::V_S>(scalarVToSEvent_);
+        WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ int64_t *ptr = (__ubuf__ int64_t *)scalar.GetPhyAddr();
         return ptr[0];
     }
@@ -171,8 +234,8 @@ private:
         PipeBarrier<PIPE_V>();
         Exp(scalar, scalar, 1);
         PipeBarrier<PIPE_V>();
-        SetFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
-        WaitFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
+        SetFlag<HardEvent::V_S>(scalarVToSEvent_);
+        WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
         return ptr[0];
     }
@@ -183,8 +246,8 @@ private:
             if (hasDtBias_) {
                 LocalTensor<float> tmp = tmpBuf_.Get<float>();
                 CopyFloatVectorIn(tmp, dtBias_, hv * k_, k_);
-                SetFlag<HardEvent::MTE2_V>(GATE_MTE2_V_EVENT_ID);
-                WaitFlag<HardEvent::MTE2_V>(GATE_MTE2_V_EVENT_ID);
+                SetFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
                 Add(row, row, tmp, static_cast<uint32_t>(k_));
                 PipeBarrier<PIPE_V>();
             }
@@ -240,25 +303,132 @@ private:
 
     __aicore__ inline void ProcessChunk(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
     {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if constexpr (!SAFE_GATE && IsSameType<T, float>::value) {
+            if (k_ == GATE_BULK_COLS && chunkSize_ == GATE_BULK_ROWS &&
+                (layout_ == 1 || layout_ == 3)) {
+                ProcessChunkBulkFp32(b, hv, start, end);
+                return;
+            }
+        }
+#endif
         LocalTensor<float> acc = accBuf_.Get<float>();
         LocalTensor<float> row = rowBuf_.Get<float>();
         Duplicate(acc, 0.0f, static_cast<uint32_t>(k_));
         PipeBarrier<PIPE_V>();
-        for (uint64_t t = start; t < end; ++t) {
-            LoadGateRow(Offset(b, t, hv, 0), row);
+        uint64_t rows = end - start;
+        if (rows == 0) {
+            return;
+        }
+
+        PrefetchGateRow(Offset(b, start, hv, 0), 0);
+
+        for (uint64_t rowIdx = 0; rowIdx < rows; ++rowIdx) {
+            uint64_t token = start + rowIdx;
+            uint32_t slot = static_cast<uint32_t>(rowIdx & 1);
+            WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot]);
+
+            if (rowIdx + 1 < rows) {
+                uint32_t nextSlot = slot ^ 1;
+                if (rowIdx >= 1) {
+                    WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_[nextSlot]);
+                }
+                PrefetchGateRow(Offset(b, token + 1, hv, 0), nextSlot);
+            }
+
+            uint32_t outputSlot = slot;
+            if (rowIdx >= GATE_PIPELINE_DEPTH) {
+                WaitFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[outputSlot]);
+            }
+            LocalTensor<float> output =
+                outBuf_.Get<float>()[outputSlot * GATE_ROW_ELEMENTS];
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            if constexpr (!SAFE_GATE && IsSameType<T, float>::value) {
+                if ((k_ % 128) == 0) {
+                    LocalTensor<float> input = inBuf_.Get<float>()[slot * GATE_ROW_ELEMENTS];
+                    AccumulateGateRowRegbase(
+                        (__ubuf__ float *)input.GetPhyAddr(), (__ubuf__ float *)acc.GetPhyAddr(),
+                        (__ubuf__ float *)output.GetPhyAddr(), static_cast<uint16_t>(k_));
+                    PipeBarrier<PIPE_V>();
+                } else {
+                    MaterializeGateRow(slot, row);
+                    Muls(row, row, RCP_LN2, static_cast<uint32_t>(k_));
+                    PipeBarrier<PIPE_V>();
+                    Add(acc, acc, row, static_cast<uint32_t>(k_));
+                    PipeBarrier<PIPE_V>();
+                    Adds(output, acc, 0.0f, static_cast<uint32_t>(k_));
+                }
+            } else {
+                MaterializeGateRow(slot, row);
+                ApplyGate(hv, row);
+                Muls(row, row, RCP_LN2, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Add(acc, acc, row, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Adds(output, acc, 0.0f, static_cast<uint32_t>(k_));
+            }
+#else
+            MaterializeGateRow(slot, row);
             ApplyGate(hv, row);
             Muls(row, row, RCP_LN2, static_cast<uint32_t>(k_));
             PipeBarrier<PIPE_V>();
             Add(acc, acc, row, static_cast<uint32_t>(k_));
             PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE3>(GATE_V_MTE3_EVENT_ID);
-            WaitFlag<HardEvent::V_MTE3>(GATE_V_MTE3_EVENT_ID);
-            CopyFloatVectorOut(gk_, Offset(b, t, hv, 0), acc, k_);
-            SetFlag<HardEvent::MTE3_MTE2>(GATE_MTE3_MTE2_EVENT_ID);
-            WaitFlag<HardEvent::MTE3_MTE2>(GATE_MTE3_MTE2_EVENT_ID);
-            SetFlag<HardEvent::MTE3_V>(GATE_MTE3_V_EVENT_ID);
-            WaitFlag<HardEvent::MTE3_V>(GATE_MTE3_V_EVENT_ID);
+            Adds(output, acc, 0.0f, static_cast<uint32_t>(k_));
+#endif
+
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_[slot]);
+            SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[outputSlot]);
+            WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[outputSlot]);
+            CopyFloatVectorOut(gk_, Offset(b, token, hv, 0), output, k_);
+            SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[outputSlot]);
         }
+
+        uint64_t drainStart = rows > GATE_PIPELINE_DEPTH ? rows - GATE_PIPELINE_DEPTH : 0;
+        for (uint64_t rowIdx = drainStart; rowIdx < rows; ++rowIdx) {
+            uint32_t outputSlot = static_cast<uint32_t>(rowIdx & 1);
+            WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_[outputSlot]);
+            WaitFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[outputSlot]);
+        }
+    }
+
+    __aicore__ inline void ProcessChunkBulkFp32(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
+    {
+        uint64_t rows = end - start;
+        if (rows == 0) {
+            return;
+        }
+        uint32_t elems = static_cast<uint32_t>(rows * k_);
+        LocalTensor<float> buffer0 = chunkBuf_.Get<float>();
+        LocalTensor<float> buffer1 = buffer0[GATE_BULK_ELEMENTS];
+        CopyFloatVectorIn(buffer0, g_, Offset(b, start, hv, 0), elems);
+        SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
+        WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
+        Muls(buffer0, buffer0, RCP_LN2, elems);
+        PipeBarrier<PIPE_V>();
+
+        bool sourceIsBuffer0 = true;
+        for (uint32_t stride = 1; stride < rows; stride <<= 1) {
+            LocalTensor<float> src = sourceIsBuffer0 ? buffer0 : buffer1;
+            LocalTensor<float> dst = sourceIsBuffer0 ? buffer1 : buffer0;
+            uint32_t prefixElems = static_cast<uint32_t>(stride * k_);
+            uint32_t suffixElems = elems - prefixElems;
+            Adds(dst, src, 0.0f, prefixElems);
+            Add(dst[prefixElems], src[prefixElems], src, suffixElems);
+            PipeBarrier<PIPE_V>();
+            sourceIsBuffer0 = !sourceIsBuffer0;
+        }
+
+        LocalTensor<float> output = sourceIsBuffer0 ? buffer0 : buffer1;
+        SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
+        WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
+        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), output, elems);
+        SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
+        WaitFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
     }
 
     GlobalTensor<T> g_;
@@ -269,11 +439,20 @@ private:
     TPipe *pipe_ = nullptr;
     TBuf<TPosition::VECCALC> rowBuf_;
     TBuf<TPosition::VECCALC> accBuf_;
+    TBuf<TPosition::VECCALC> outBuf_;
     TBuf<TPosition::VECCALC> tmpBuf_;
     TBuf<TPosition::VECCALC> oneBuf_;
     TBuf<TPosition::VECCALC> inBuf_;
+    TBuf<TPosition::VECCALC> chunkBuf_;
     TBuf<TPosition::VECCALC> scalarBuf_;
     TBuf<TPosition::VECCALC> scalarI64Buf_;
+    TEventID inputMte2ToVEvent_[GATE_PIPELINE_DEPTH];
+    TEventID inputVToMte2Event_[GATE_PIPELINE_DEPTH];
+    TEventID outputVToMte3Event_[GATE_PIPELINE_DEPTH];
+    TEventID outputMte3ToVEvent_[GATE_PIPELINE_DEPTH];
+    TEventID auxMte2ToVEvent_;
+    TEventID scalarVToSEvent_;
+    TEventID bulkMte3ToMte2Event_;
     uint64_t batch_ = 0;
     uint64_t t_ = 0;
     uint64_t hv_ = 0;

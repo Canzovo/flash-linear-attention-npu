@@ -212,7 +212,10 @@ public:
         bool isFinalState,
         bool storeFinalState,
         bool useInitialState,
-        bool isPing
+        bool isPing,
+        bool useDirectFp32Ub,
+        uint64_t directUbFreeFlagBegin,
+        uint64_t directUbReadyFlagBegin
     )
     {
         static constexpr uint32_t ROW_TILE = 16;
@@ -228,7 +231,15 @@ public:
             rowEnd = mActual;
         }
         if (rowBegin >= mActual) {
-            Arch::CrossCoreWaitFlag(cube2Done);
+            if (useDirectFp32Ub) {
+                uint32_t directUbSlot = isPing ? 0 : 1;
+                AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
+                    directUbReadyFlagBegin + directUbSlot);
+                AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
+                    directUbFreeFlagBegin + directUbSlot);
+            } else {
+                Arch::CrossCoreWaitFlag(cube2Done);
+            }
             return;
         }
 
@@ -273,7 +284,13 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
         }
 
-        Arch::CrossCoreWaitFlag(cube2Done);
+        if (useDirectFp32Ub) {
+            uint32_t directUbSlot = isPing ? 0 : 1;
+            AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
+                directUbReadyFlagBegin + directUbSlot);
+        } else {
+            Arch::CrossCoreWaitFlag(cube2Done);
+        }
         // fix: need to adapt kGated. issue: A5 do not have vdim128 branch.
         bool waitHFromV = storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value;
         bool waitUpdateFromMte3 = false;
@@ -287,6 +304,9 @@ public:
             AscendC::GlobalTensor<HElementInput> hInputThisTile = hInput[rowStart * outputStride];
             AscendC::GlobalTensor<float> hUpdateInputThisTile = hUpdateInput[rowStart * nActual];
             AscendC::GlobalTensor<FinalStateElement> finalStateThisTile = finalState[rowStart * outputStride];
+            AscendC::LocalTensor<float> hUpdateUbTensorThisTile = useDirectFp32Ub
+                ? hUpdateUbTensor[(rowStart - rowBegin) * nActual]
+                : hUpdateUbTensor;
 
             if (waitHFromV) {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
@@ -344,21 +364,25 @@ public:
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
             }
-            CopyGmToUb(hUpdateUbTensor, hUpdateInputThisTile, rowsThisTile, nActual, nActual);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
-            AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, rowsThisTile * nActual);
+            if (!useDirectFp32Ub) {
+                CopyGmToUb(hUpdateUbTensorThisTile, hUpdateInputThisTile, rowsThisTile, nActual, nActual);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+            }
+            AscendC::Add<float>(
+                hUpdateUbTensorThisTile, calcUbTensor, hUpdateUbTensorThisTile,
+                rowsThisTile * nActual);
             AscendC::PipeBarrier<PIPE_V>();
 
             if constexpr(std::is_same<FinalStateElement, float>::value) {
                 if (storeFinalState && isFinalState) {
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                    CopyUbToGm(finalStateThisTile, hUpdateUbTensor, rowsThisTile, nActual, outputStride);
+                    CopyUbToGm(finalStateThisTile, hUpdateUbTensorThisTile, rowsThisTile, nActual, outputStride);
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);
                     waitUpdateFromMte3 = true;
                 } else {
-                    AscendC::Cast(hUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, rowsThisTile * nActual);
+                    AscendC::Cast(hUbTensor, hUpdateUbTensorThisTile, AscendC::RoundMode::CAST_RINT, rowsThisTile * nActual);
                     AscendC::PipeBarrier<PIPE_V>();
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
@@ -369,14 +393,14 @@ public:
                 }
             } else {
                 if (storeFinalState && isFinalState) {
-                    AscendC::Cast(finalOutputUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, rowsThisTile * nActual);
+                    AscendC::Cast(finalOutputUbTensor, hUpdateUbTensorThisTile, AscendC::RoundMode::CAST_RINT, rowsThisTile * nActual);
                     AscendC::PipeBarrier<PIPE_V>();
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
                     CopyUbToGm(finalStateThisTile, finalOutputUbTensor, rowsThisTile, nActual, outputStride);
                 } else {
-                    AscendC::Cast(hUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, rowsThisTile * nActual);
+                    AscendC::Cast(hUbTensor, hUpdateUbTensorThisTile, AscendC::RoundMode::CAST_RINT, rowsThisTile * nActual);
                     AscendC::PipeBarrier<PIPE_V>();
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
@@ -397,6 +421,11 @@ public:
         }
         if constexpr (kGated) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
+        }
+        if (useDirectFp32Ub) {
+            uint32_t directUbSlot = isPing ? 0 : 1;
+            AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
+                directUbFreeFlagBegin + directUbSlot);
         }
 
     }

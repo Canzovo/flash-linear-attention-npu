@@ -530,17 +530,28 @@ private:
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
         using LayoutTagC = Catlass::layout::RowMajor;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        using WTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
+                                                                 LayoutTagB, T, LayoutTagC>;
+#else
         using WTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
                                                                  LayoutTagB, float, LayoutTagC>;
+#endif
         using UTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
                                                                  LayoutTagB, OUT_T, LayoutTagC>;
         using PostL1TileShape128 = tla::Shape<KdaInt128, KdaInt128, tla::_256>;
         using PostL0TileShape128 = tla::Shape<KdaInt128, KdaInt128, KdaInt128>;
         using PostL1TileShape256 = tla::Shape<KdaInt128, tla::_256, tla::_256>;
         using PostL0TileShape256 = tla::Shape<KdaInt128, tla::_256, KdaInt64>;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        using WBlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape128,
+                                                               PostL0TileShape128,
+                                                               ElementA, ElementB, T, void, WTileCopy>;
+#else
         using WBlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape128,
                                                                PostL0TileShape128,
                                                                ElementA, ElementB, float, void, WTileCopy>;
+#endif
         using UBlockMmad128 = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape128,
                                                                   PostL0TileShape128,
                                                                   ElementA, ElementB, OUT_T, void, UTileCopy>;
@@ -555,15 +566,24 @@ private:
 
         {
             LayoutTagB tagB = LayoutTagB::template MakeLayout<ElementB>(BT_, K_);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            LayoutTagC tagC = LayoutTagC::template MakeLayout<T>(BT_, K_);
+#else
             LayoutTagC tagC = LayoutTagC::template MakeLayout<float>(BT_, K_);
+#endif
             auto layoutB = tla::MakeLayoutFromTag(tagB);
             auto layoutC = tla::MakeLayoutFromTag(tagC);
             Catlass::GemmCoord shape{static_cast<uint32_t>(curT), static_cast<uint32_t>(K_),
                                      static_cast<uint32_t>(curT)};
             auto tensorB = tla::MakeTensor(preparedQG_[KVOffset(b, hv, start, 0, K_)], layoutB,
                                            Catlass::Arch::PositionGM{});
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            auto tensorC = tla::MakeTensor(w_[KVOffset(b, hv, start, 0, K_)], layoutC,
+                                            Catlass::Arch::PositionGM{});
+#else
             auto tensorC = tla::MakeTensor(h_[WScratchOffset(b, hv, chunkIdx, 0, 0)], layoutC,
                                             Catlass::Arch::PositionGM{});
+#endif
             auto blockA = GetTile(tensorA, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.k()));
             auto blockB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(shape.k(), shape.n()));
             auto blockC = GetTile(tensorC, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.n()));
@@ -632,9 +652,14 @@ private:
                 tileRows = maxRows;
             }
             uint64_t elemCount = tileRows * K_;
+#if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
             uint64_t scratchBase = WScratchOffset(b, hv, chunkIdx, tileRow, 0);
+#else
+            (void)chunkIdx;
+#endif
             uint64_t token = start + tileRow;
 
+#if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
             DataCopy(arena, h_[scratchBase], static_cast<uint32_t>(elemCount));
             SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
@@ -645,6 +670,7 @@ private:
             DataCopy(w_[KVOffset(b, hv, token, 0, K_)], typedLocal, static_cast<uint32_t>(elemCount));
             SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
             WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+#endif
 
             LocalTensor<float> kLocal = arena;
             LocalTensor<float> gLocal = arena[elemCount];
@@ -723,8 +749,13 @@ private:
         if (curT == 0 || !UsePostWuCube(curT)) {
             return;
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        CopyScratchWAndFinalizeKg(b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
+        Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+#else
         Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
         CopyScratchWAndFinalizeKg(b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
+#endif
     }
 
     __aicore__ inline void ProcessChunkPostAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,

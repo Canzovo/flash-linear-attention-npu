@@ -21,7 +21,8 @@ constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
 constexpr size_t ATTR_TOTAL_CHUNKS_IDX = 3;
 constexpr size_t ATTR_SAFE_GATE_IDX = 4;
 constexpr uint64_t KDA_SOLVE_SCRATCH_SLOTS = 5;
-constexpr uint64_t KDA_SCORE_QUEUE_SLOTS = 2;
+constexpr uint64_t KDA_SOLVE_PIPELINE_DEPTH = 4;
+constexpr uint64_t KDA_SCORE_QUEUE_SLOTS = 4;
 constexpr uint64_t KDA_SCORE_SCRATCH_PLANES = 3;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_BATCH_MODE = 1;
@@ -96,7 +97,8 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
     const uint64_t aqkFp32Offset = 0;
     const uint64_t akkFp32Offset = AlignWorkspace(aqkFp32Offset + matrixBytes);
     const uint64_t scratchOffset = AlignWorkspace(akkFp32Offset + matrixBytes);
-    const uint64_t solveBytes = static_cast<uint64_t>(blockDim) * KDA_SOLVE_SCRATCH_SLOTS *
+    const uint64_t solvePipelineDepth = safeGate ? KDA_SOLVE_PIPELINE_DEPTH : 1;
+    const uint64_t solveBytes = static_cast<uint64_t>(blockDim) * solvePipelineDepth * KDA_SOLVE_SCRATCH_SLOTS *
                                 static_cast<uint64_t>(chunkSize) * static_cast<uint64_t>(chunkSize) * sizeof(float);
     const uint64_t scoreBytes = static_cast<uint64_t>(blockDim) * KDA_SCORE_QUEUE_SLOTS *
                                 KDA_SCORE_SCRATCH_PLANES * static_cast<uint64_t>(chunkSize) *

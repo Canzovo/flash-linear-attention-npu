@@ -56,13 +56,15 @@ constexpr uint32_t KDA_SOLVE_SCRATCH_TMP = 2;
 constexpr uint32_t KDA_SOLVE_SCRATCH_Y1 = 3;
 constexpr uint32_t KDA_SOLVE_SCRATCH_IDENTITY = 4;
 constexpr uint32_t KDA_SOLVE_SCRATCH_SLOTS = 5;
+constexpr uint32_t KDA_SOLVE_PIPELINE_DEPTH = 4;
 constexpr uint32_t KDA_SOLVE_DIAG_BT = 16;
 constexpr uint32_t KDA_SOLVE_DIAG_BLOCKS = KDA_SOLVE_BT / KDA_SOLVE_DIAG_BT;
 constexpr uint32_t KDA_SOLVE_DIAG_MCH_ITERS = 3;
-// Raw gate uses two score blocks to reduce AIV/AIC handshakes. Safe gate
-// keeps the smaller reference span needed by large negative cumulative gates.
+// Use two score blocks per reference window to reduce repeated gate-factor work
+// and AIV/AIC handshakes while keeping the safe-gate exponent span bounded.
 constexpr uint32_t KDA_SCORE_REF_BC = 32;
 constexpr uint32_t KDA_SAFE_SCORE_REF_BC = 16;
+constexpr uint32_t KDA_A5_SAFE_SCORE_REF_BC = 64;
 constexpr uint32_t KDA_VEC_ARENA_ELEMENTS = 32768;
 constexpr uint32_t KDA_BITS_PER_MASK_BYTE = 8;
 constexpr uint32_t KDA_SELECT_COL_BLOCKS = 2;
@@ -77,6 +79,8 @@ constexpr uint8_t KDA_SCORE_DONE_FLAG1 = 3;
 constexpr uint8_t KDA_SCORE_READY_FLAG0 = 4;
 constexpr uint8_t KDA_SCORE_READY_FLAG1 = 5;
 constexpr uint32_t KDA_SCORE_QUEUE_DEPTH = 2;
+constexpr uint32_t KDA_SCORE_LANES = 2;
+constexpr uint32_t KDA_SCORE_SCRATCH_SLOTS = KDA_SCORE_QUEUE_DEPTH * KDA_SCORE_LANES;
 constexpr uint32_t KDA_SYNC_REVERSE_DEPTH = 1;
 constexpr uint32_t KDA_SCORE_SCRATCH_PLANES = 3;
 constexpr uint32_t KDA_SCORE_SCRATCH_QG = 0;
@@ -84,7 +88,7 @@ constexpr uint32_t KDA_SCORE_SCRATCH_W = 1;
 constexpr uint32_t KDA_SCORE_SCRATCH_KG = 2;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_GATE_TILE_ROWS = 16;
-constexpr uint32_t KDA_GATE_PIPELINE_DEPTH = 2;
+constexpr uint32_t KDA_GATE_PIPELINE_DEPTH = 3;
 constexpr uint32_t KDA_AIV_UB_BUDGET_BYTES = 192 * 1024;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
@@ -258,6 +262,192 @@ static __simd_vf__ inline void PrepareKdaGateKgRegbase(
         }
     }
 }
+
+template <typename T, typename GK_T, bool USE_REF>
+static __simd_vf__ inline void PrepareKdaGateQwKgRegbase(
+    __ubuf__ T *q, __ubuf__ T *k, __ubuf__ T *kg, __ubuf__ GK_T *gate, __ubuf__ float *ref,
+    uint16_t rows, uint16_t cols, uint16_t validRows)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t ELEMENTS_PER_REG = AscendC::VECTOR_REG_WIDTH / sizeof(T);
+
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    for (uint16_t row = 0; row < rows; ++row) {
+        uint32_t rowOffset = static_cast<uint32_t>(row) * cols;
+        for (uint16_t col = 0; col < cols; col += ELEMENTS_PER_REG) {
+            uint32_t activeCount = static_cast<uint32_t>(cols - col);
+            MaskReg inputMask = UpdateMask<T>(activeCount);
+            uint32_t offset = rowOffset + col;
+
+            RegTensor<float> gateZeroReg;
+            RegTensor<float> gateOneReg;
+            RegTensor<float> posZeroReg;
+            RegTensor<float> posOneReg;
+            RegTensor<float> negZeroReg;
+            RegTensor<float> negOneReg;
+            RegTensor<float> inputZeroReg;
+            RegTensor<float> inputOneReg;
+            RegTensor<float> outputZeroReg;
+            RegTensor<float> outputOneReg;
+
+            LoadKdaGateRegbasePair<GK_T>(gateZeroReg, gateOneReg, gate + offset, inputMask);
+            if constexpr (USE_REF) {
+                RegTensor<float> refZeroReg;
+                RegTensor<float> refOneReg;
+                LoadAlign<float, LoadDist::DIST_DINTLV_B32>(refZeroReg, refOneReg, ref + col);
+                SubFloatTwoReg(posZeroReg, posOneReg, gateZeroReg, gateOneReg,
+                               refZeroReg, refOneReg, floatMask);
+                SubFloatTwoReg(negZeroReg, negOneReg, refZeroReg, refOneReg,
+                               gateZeroReg, gateOneReg, floatMask);
+            } else {
+                Adds(posZeroReg, gateZeroReg, 0.0f, floatMask);
+                Adds(posOneReg, gateOneReg, 0.0f, floatMask);
+                Muls(negZeroReg, gateZeroReg, -1.0f, floatMask);
+                Muls(negOneReg, gateOneReg, -1.0f, floatMask);
+            }
+            Muls(posZeroReg, posZeroReg, LN2, floatMask);
+            Muls(posOneReg, posOneReg, LN2, floatMask);
+            Muls(negZeroReg, negZeroReg, LN2, floatMask);
+            Muls(negOneReg, negOneReg, LN2, floatMask);
+            MinsFloatTwoReg(posZeroReg, posOneReg, posZeroReg, posOneReg,
+                            KDA_EXP_INPUT_MAX, floatMask);
+            MinsFloatTwoReg(negZeroReg, negOneReg, negZeroReg, negOneReg,
+                            KDA_EXP_INPUT_MAX, floatMask);
+            Maxs(posZeroReg, posZeroReg, KDA_EXP_INPUT_MIN, floatMask);
+            Maxs(posOneReg, posOneReg, KDA_EXP_INPUT_MIN, floatMask);
+            Maxs(negZeroReg, negZeroReg, KDA_EXP_INPUT_MIN, floatMask);
+            Maxs(negOneReg, negOneReg, KDA_EXP_INPUT_MIN, floatMask);
+            ExpFloatTwoReg(posZeroReg, posOneReg, posZeroReg, posOneReg, floatMask);
+            ExpFloatTwoReg(negZeroReg, negOneReg, negZeroReg, negOneReg, floatMask);
+
+            LoadKdaGateRegbasePair<T>(inputZeroReg, inputOneReg, q + offset, inputMask);
+            MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
+                           posZeroReg, posOneReg, floatMask);
+            StoreKdaGateRegbasePair<T>(q + offset, outputZeroReg, outputOneReg,
+                                       inputMask, floatMask);
+
+            LoadKdaGateRegbasePair<T>(inputZeroReg, inputOneReg, k + offset, inputMask);
+            MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
+                           posZeroReg, posOneReg, floatMask);
+            StoreKdaGateRegbasePair<T>(k + offset, outputZeroReg, outputOneReg,
+                                       inputMask, floatMask);
+            MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
+                           negZeroReg, negOneReg, floatMask);
+            if constexpr (USE_REF) {
+                if (row >= validRows) {
+                    Duplicate(outputZeroReg, 0.0f, floatMask);
+                    Duplicate(outputOneReg, 0.0f, floatMask);
+                }
+            }
+            StoreKdaGateRegbasePair<T>(kg + offset, outputZeroReg, outputOneReg,
+                                       inputMask, floatMask);
+        }
+    }
+}
+
+static __simd_vf__ inline void ForwardSubDiag16Regbase(__ubuf__ float *diag, uint16_t valid)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t DIAG_SIZE = KDA_SOLVE_DIAG_BT;
+    uint32_t activeCount = DIAG_SIZE;
+    MaskReg rowMask = UpdateMask<float>(activeCount);
+
+    for (uint16_t row = 2; row < valid; ++row) {
+        RegTensor<float> currentReg;
+        RegTensor<float> scaleReg;
+        RegTensor<float> matrixReg;
+        RegTensor<float> productReg;
+        RegTensor<float> sumReg;
+        LoadAlign(currentReg, diag + static_cast<uint32_t>(row) * DIAG_SIZE);
+        Duplicate(sumReg, 0.0f, rowMask);
+
+        for (uint16_t sourceRow = 0; sourceRow < DIAG_SIZE; ++sourceRow) {
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(
+                scaleReg, diag + static_cast<uint32_t>(row) * DIAG_SIZE + sourceRow);
+            LoadAlign(matrixReg, diag + static_cast<uint32_t>(sourceRow) * DIAG_SIZE);
+            Mul(productReg, matrixReg, scaleReg, rowMask);
+            Add(sumReg, sumReg, productReg, rowMask);
+        }
+        Add(currentReg, currentReg, sumReg, rowMask);
+        StoreAlign(diag + static_cast<uint32_t>(row) * DIAG_SIZE, currentReg, rowMask);
+    }
+}
+
+static __simd_vf__ inline void ForwardSubDiag16StridedRegbase(
+    __ubuf__ float *matrix, uint16_t rowStride, uint16_t rowBegin, uint16_t colBegin,
+    uint16_t valid)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t DIAG_SIZE = KDA_SOLVE_DIAG_BT;
+    uint32_t activeCount = DIAG_SIZE;
+    MaskReg rowMask = UpdateMask<float>(activeCount);
+
+    for (uint16_t row = 2; row < valid; ++row) {
+        uint32_t currentOffset =
+            static_cast<uint32_t>(rowBegin + row) * rowStride + colBegin;
+        RegTensor<float> currentReg;
+        RegTensor<float> scaleReg;
+        RegTensor<float> matrixReg;
+        RegTensor<float> productReg;
+        RegTensor<float> sumReg;
+        LoadAlign(currentReg, matrix + currentOffset);
+        Duplicate(sumReg, 0.0f, rowMask);
+
+        for (uint16_t sourceRow = 0; sourceRow < DIAG_SIZE; ++sourceRow) {
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(
+                scaleReg, matrix + currentOffset + sourceRow);
+            uint32_t sourceOffset =
+                static_cast<uint32_t>(rowBegin + sourceRow) * rowStride + colBegin;
+            LoadAlign(matrixReg, matrix + sourceOffset);
+            Mul(productReg, matrixReg, scaleReg, rowMask);
+            Add(sumReg, sumReg, productReg, rowMask);
+        }
+        Add(currentReg, currentReg, sumReg, rowMask);
+        StoreAlign(matrix + currentOffset, currentReg, rowMask);
+    }
+}
+
+static __simd_vf__ inline void ApplyKdaRowScaleRegbase(
+    __ubuf__ float *matrix, __ubuf__ float *rowScale, uint16_t rows, uint16_t cols)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t FP32_PER_REG = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+    RegTensor<float> matrixReg0;
+    RegTensor<float> matrixReg1;
+    RegTensor<float> scaleReg0;
+    RegTensor<float> scaleReg1;
+
+    uint16_t row = 0;
+    for (; row + 1 < rows; row += 2) {
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(scaleReg0, rowScale + row);
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(scaleReg1, rowScale + row + 1);
+        for (uint16_t col = 0; col < cols; col += FP32_PER_REG) {
+            uint32_t activeCount0 = static_cast<uint32_t>(cols - col);
+            uint32_t activeCount1 = activeCount0;
+            MaskReg mask0 = UpdateMask<float>(activeCount0);
+            MaskReg mask1 = UpdateMask<float>(activeCount1);
+            uint32_t offset0 = static_cast<uint32_t>(row) * cols + col;
+            uint32_t offset1 = static_cast<uint32_t>(row + 1) * cols + col;
+            LoadAlign(matrixReg0, matrix + offset0);
+            LoadAlign(matrixReg1, matrix + offset1);
+            Mul(matrixReg0, matrixReg0, scaleReg0, mask0);
+            Mul(matrixReg1, matrixReg1, scaleReg1, mask1);
+            StoreAlign(matrix + offset0, matrixReg0, mask0);
+            StoreAlign(matrix + offset1, matrixReg1, mask1);
+        }
+    }
+    if (row < rows) {
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(scaleReg0, rowScale + row);
+        for (uint16_t col = 0; col < cols; col += FP32_PER_REG) {
+            uint32_t activeCount = static_cast<uint32_t>(cols - col);
+            MaskReg mask = UpdateMask<float>(activeCount);
+            uint32_t offset = static_cast<uint32_t>(row) * cols + col;
+            LoadAlign(matrixReg0, matrix + offset);
+            Mul(matrixReg0, matrixReg0, scaleReg0, mask);
+            StoreAlign(matrix + offset, matrixReg0, mask);
+        }
+    }
+}
 #endif
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
@@ -396,8 +586,9 @@ public:
         hasInitial_ = tiling.hasInitialState;
         isVarLen_ = tiling.isVarLen;
         usedCoreNum_ = tiling.prepareUsedCoreNum;
+        constexpr uint64_t solvePipelineDepth = SAFE_GATE ? KDA_SOLVE_PIPELINE_DEPTH : 1;
         const uint64_t solveBytes =
-            usedCoreNum_ * KDA_SOLVE_SCRATCH_SLOTS * BT_ * BT_ * sizeof(float);
+            usedCoreNum_ * solvePipelineDepth * KDA_SOLVE_SCRATCH_SLOTS * BT_ * BT_ * sizeof(float);
         const uint64_t alignedSolveBytes =
             (solveBytes + KDA_WORKSPACE_ALIGN - 1) / KDA_WORKSPACE_ALIGN * KDA_WORKSPACE_ALIGN;
         scoreWorkspace_.SetGlobalBuffer((__gm__ T *)(workspace + alignedSolveBytes));
@@ -413,7 +604,7 @@ public:
             const uint64_t gateStageElems = GatePipelineRows() * K_;
             const uint64_t gateInputSlotBytes = gateStageElems * (2 * sizeof(T) + sizeof(GK_T));
             const uint64_t gatePipelineBytes =
-                KDA_GATE_PIPELINE_DEPTH * gateInputSlotBytes + gateStageElems * sizeof(T);
+                KDA_GATE_PIPELINE_DEPTH * (gateInputSlotBytes + gateStageElems * sizeof(T));
             pipe_->InitBuffer(gateWritebackBuf_, static_cast<uint32_t>(gatePipelineBytes));
             AllocVectorEvents();
         }
@@ -444,7 +635,9 @@ private:
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
         mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
         mte2ToMte3Event_ = pipe_->AllocEventID<HardEvent::MTE2_MTE3>();
-        mte3ToMte2Event_ = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+        for (uint32_t slot = 0; slot < KDA_GATE_PIPELINE_DEPTH; ++slot) {
+            mte3ToMte2Events_[slot] = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+        }
         vectorEventsAllocated_ = true;
     }
 
@@ -458,7 +651,9 @@ private:
         pipe_->ReleaseEventID<HardEvent::V_MTE3>(vToMte3Event_);
         pipe_->ReleaseEventID<HardEvent::MTE3_V>(mte3ToVEvent_);
         pipe_->ReleaseEventID<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
-        pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        for (uint32_t slot = 0; slot < KDA_GATE_PIPELINE_DEPTH; ++slot) {
+            pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[slot]);
+        }
         vectorEventsAllocated_ = false;
     }
 
@@ -506,16 +701,23 @@ private:
         (void)b;
         (void)hv;
         (void)chunkIdx;
+        constexpr uint64_t solvePipelineDepth = SAFE_GATE ? KDA_SOLVE_PIPELINE_DEPTH : 1;
         uint64_t matrixElements = BT_ * BT_;
-        return solveCoreIdx_ * KDA_SOLVE_SCRATCH_SLOTS * matrixElements + slot * matrixElements;
+        return ((solveCoreIdx_ * solvePipelineDepth + activeSolveSlot_) * KDA_SOLVE_SCRATCH_SLOTS + slot) *
+               matrixElements;
     }
 
     __aicore__ inline uint64_t ScoreScratchOffset(uint64_t slot, uint64_t plane, uint64_t t = 0,
                                                   uint64_t d = 0) const
     {
-        return (((solveCoreIdx_ * KDA_SCORE_QUEUE_DEPTH + slot) * KDA_SCORE_SCRATCH_PLANES + plane) * BT_ + t) *
+        return (((solveCoreIdx_ * KDA_SCORE_SCRATCH_SLOTS + slot) * KDA_SCORE_SCRATCH_PLANES + plane) * BT_ + t) *
                    K_ +
                d;
+    }
+
+    __aicore__ inline uint64_t ScoreScratchSlot(uint64_t queueSlot, uint64_t lane, bool pairHeads) const
+    {
+        return pairHeads ? queueSlot * KDA_SCORE_LANES + lane : queueSlot;
     }
 
 
@@ -523,7 +725,11 @@ private:
     __aicore__ inline uint64_t ScoreRefBlockSize() const
     {
         if constexpr (SAFE_GATE) {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            return KDA_A5_SAFE_SCORE_REF_BC;
+#else
             return KDA_SAFE_SCORE_REF_BC;
+#endif
         }
         return KDA_SCORE_REF_BC;
     }
@@ -631,7 +837,8 @@ private:
         constexpr uint64_t fixedBytes =
             static_cast<uint64_t>(KDA_VEC_ARENA_ELEMENTS) * sizeof(float) + EXP2_UB_BYTES;
         constexpr uint64_t availableBytes = KDA_AIV_UB_BUDGET_BYTES - fixedBytes;
-        uint64_t bytesPerRow = K_ * (5 * sizeof(T) + 2 * sizeof(GK_T));
+        uint64_t bytesPerRow =
+            K_ * KDA_GATE_PIPELINE_DEPTH * (3 * sizeof(T) + sizeof(GK_T));
         uint64_t rows = bytesPerRow == 0 ? 0 : availableBytes / bytesPerRow;
         return rows < KDA_GATE_TILE_ROWS ? rows : KDA_GATE_TILE_ROWS;
     }
@@ -659,9 +866,10 @@ private:
         return gateWritebackBuf_.Get<GK_T>()[byteOffset / sizeof(GK_T)];
     }
 
-    __aicore__ inline LocalTensor<T> GateKgTyped()
+    __aicore__ inline LocalTensor<T> GateKgTyped(uint64_t slot)
     {
-        uint64_t byteOffset = KDA_GATE_PIPELINE_DEPTH * GateInputSlotBytes();
+        uint64_t byteOffset = KDA_GATE_PIPELINE_DEPTH * GateInputSlotBytes() +
+                              slot * GateStageElems() * sizeof(T);
         return gateWritebackBuf_.Get<T>()[byteOffset / sizeof(T)];
     }
 
@@ -692,9 +900,9 @@ private:
         WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
     }
 
-    __aicore__ inline void WaitGateOutputForMte2()
+    __aicore__ inline void WaitGateOutputForMte2(uint64_t slot = 0)
     {
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[slot]);
     }
 
     __aicore__ inline void WaitGateOutputForVector()
@@ -704,8 +912,13 @@ private:
 
     __aicore__ inline void SignalGateOutputDone()
     {
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+    }
+
+    __aicore__ inline void SignalGateOutputDoneForMte2(uint64_t slot)
+    {
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[slot]);
     }
 
     template <typename CopyT>
@@ -769,8 +982,8 @@ private:
             WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
             CopyVectorOut(dst, dstOffset, rowLocal, count);
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1031,7 +1244,7 @@ private:
             uint64_t elems = tileRows * K_;
             LocalTensor<T> qTyped = GateQTyped(gateSlot);
             LocalTensor<T> kTyped = GateKTyped(gateSlot);
-            LocalTensor<T> kgTyped = GateKgTyped();
+            LocalTensor<T> kgTyped = GateKgTyped(gateSlot);
             LocalTensor<GK_T> gateTyped = GateGTyped(gateSlot);
 #if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
             LocalTensor<float> arena = vecBuf_.Get<float>();
@@ -1053,10 +1266,24 @@ private:
                 Cast(gFp32, gateTyped, RoundMode::CAST_NONE, static_cast<uint32_t>(elems));
             }
 #endif
+            uint64_t nextTileRow = tileRow + maxRows;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            uint64_t nextGateSlot = (gateSlot + 1) % KDA_GATE_PIPELINE_DEPTH;
+            if (nextTileRow < rowEnd) {
+                uint64_t tileIndex = (tileRow - rowBegin) / maxRows;
+                if (tileIndex + 1 >= KDA_GATE_PIPELINE_DEPTH) {
+                    WaitGateOutputForMte2(nextGateSlot);
+                }
+                uint64_t nextRows = rowEnd - nextTileRow;
+                if (nextRows > maxRows) {
+                    nextRows = maxRows;
+                }
+                PrefetchQKGate(nextGateSlot, b, h, hv, start + nextTileRow, nextRows * K_);
+            }
+#else
             if (outputPending) {
                 WaitGateOutputForMte2();
             }
-            uint64_t nextTileRow = tileRow + maxRows;
             if (nextTileRow < rowEnd) {
                 uint64_t nextRows = rowEnd - nextTileRow;
                 if (nextRows > maxRows) {
@@ -1064,10 +1291,8 @@ private:
                 }
                 PrefetchQKGate(gateSlot ^ 1, b, h, hv, start + nextTileRow, nextRows * K_);
             }
+#endif
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            if (outputPending) {
-                WaitGateOutputForVector();
-            }
             uint16_t validRows = static_cast<uint16_t>(tileRows);
             if (useRef && tileRow >= validColEnd) {
                 validRows = 0;
@@ -1075,31 +1300,21 @@ private:
                 validRows = static_cast<uint16_t>(validColEnd - tileRow);
             }
             if (useRef) {
-                PrepareKdaGateKgRegbase<T, GK_T, true>(
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
+                PrepareKdaGateQwKgRegbase<T, GK_T, true>(
+                    (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
                     (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
+                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
                     (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
                     (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
                     static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_), validRows);
-                PrepareKdaGateQwRegbase<T, GK_T, true>(
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
-                    (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
-                    (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
-                    static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_));
             } else {
-                PrepareKdaGateKgRegbase<T, GK_T, false>(
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
+                PrepareKdaGateQwKgRegbase<T, GK_T, false>(
+                    (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
                     (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
+                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
                     (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
                     (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
                     static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_), validRows);
-                PrepareKdaGateQwRegbase<T, GK_T, false>(
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
-                    (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
-                    (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
-                    static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_));
             }
 #else
             PipeBarrier<PIPE_V>();
@@ -1175,14 +1390,31 @@ private:
                 CopyVectorOut(w_, KVOffset(b, hv, token, 0, K_), kTyped, elems);
                 CopyVectorOut(kg_, KVOffset(b, hv, token, 0, K_), kgTyped, elems);
             }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            SignalGateOutputDoneForMte2(gateSlot);
+#else
             SignalGateOutputDone();
+#endif
             outputPending = true;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            gateSlot = (gateSlot + 1) % KDA_GATE_PIPELINE_DEPTH;
+#else
             gateSlot ^= 1;
+#endif
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        uint64_t tileCount = (rowEnd - rowBegin + maxRows - 1) / maxRows;
+        uint64_t firstPending =
+            tileCount > KDA_GATE_PIPELINE_DEPTH ? tileCount - KDA_GATE_PIPELINE_DEPTH : 0;
+        for (uint64_t tile = firstPending; tile < tileCount; ++tile) {
+            WaitGateOutputForMte2(tile % KDA_GATE_PIPELINE_DEPTH);
+        }
+#else
         if (outputPending) {
             WaitGateOutputForMte2();
             WaitGateOutputForVector();
         }
+#endif
         return;
     }
 
@@ -1198,6 +1430,13 @@ private:
         if (validColEnd == 0 || validColEnd > curT) {
             validColEnd = curT;
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if (writeScoreScratch && scoreRowBegin == 0 && scoreRowCount == curT && validColEnd == curT) {
+            PrepareGateProductsBulk(b, h, hv, start, curT, subBlockIdx, subBlockNum, useRef, refToken,
+                                    validColEnd, writeScoreScratch, scoreSlot);
+            return;
+        }
+#endif
         if (writeScoreScratch) {
             PrepareScoreFactorsBulk(b, h, hv, start, subBlockIdx, subBlockNum, refToken, scoreRowBegin,
                                     scoreRowCount, validColEnd, scoreSlot);
@@ -1299,6 +1538,138 @@ private:
         }
         Duplicate(dst, value, static_cast<uint32_t>(count));
         PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void ForwardSubDiag16(LocalTensor<float> diag, LocalTensor<float> row,
+                                             LocalTensor<float> prod, LocalTensor<float> rowBrcb,
+                                             LocalTensor<float> reduced, uint64_t valid)
+    {
+        constexpr uint32_t brcbStride = 8;
+        constexpr uint32_t diagSize = KDA_SOLVE_DIAG_BT;
+        constexpr uint8_t rowBlk = diagSize * sizeof(float) / 32;
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        ForwardSubDiag16Regbase(
+            (__ubuf__ float *)reinterpret_cast<uint64_t>(diag.GetPhyAddr()),
+            static_cast<uint16_t>(valid));
+#else
+        for (uint64_t i = 2; i < valid; ++i) {
+            uint32_t rowOffset = static_cast<uint32_t>(i * diagSize);
+            DataCopy(row, diag[rowOffset], diagSize);
+            PipeBarrier<PIPE_V>();
+
+            Brcb(rowBrcb, row, diagSize / brcbStride, {1, 8});
+            PipeBarrier<PIPE_V>();
+            for (uint32_t col = 0; col < diagSize; col += brcbStride) {
+                Mul(prod[col], diag[col], rowBrcb, brcbStride, static_cast<uint8_t>(diagSize),
+                    {1, 1, 0, rowBlk, rowBlk, 1});
+            }
+            PipeBarrier<PIPE_V>();
+
+            uint32_t remain = diagSize;
+            while (remain > 1) {
+                uint32_t calcCount = (remain / 2) * diagSize;
+                remain = (remain + 1) / 2;
+                Add(prod, prod, prod[remain * diagSize], calcCount);
+                PipeBarrier<PIPE_V>();
+            }
+            DataCopy(reduced, prod, diagSize);
+            PipeBarrier<PIPE_V>();
+            Add(row, row, reduced, diagSize);
+            PipeBarrier<PIPE_V>();
+            DataCopy(diag[rowOffset], row, diagSize);
+            PipeBarrier<PIPE_V>();
+        }
+#endif
+
+        SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        for (uint32_t i = 0; i < diagSize; ++i) {
+            uint32_t diagOffset = i * diagSize + i;
+            if (i < valid) {
+                diag.SetValue(diagOffset, diag.GetValue(diagOffset) + 1.0f);
+            } else {
+                diag.SetValue(diagOffset, 1.0f);
+            }
+        }
+        SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+    }
+
+    __aicore__ inline void SolveDiagonalBlocksInRows(LocalTensor<float> akkMat, LocalTensor<float> xMat,
+                                                      LocalTensor<float> arena, uint64_t scratchBase,
+                                                      uint64_t curT, uint64_t rowBegin, uint64_t rowCount)
+    {
+        constexpr uint32_t diagSize = KDA_SOLVE_DIAG_BT;
+        constexpr uint32_t diagElements = diagSize * diagSize;
+        constexpr uint32_t brcbElements = diagSize * 8;
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        (void)akkMat;
+        (void)arena;
+        (void)scratchBase;
+        uint64_t rowEnd = rowBegin + rowCount;
+        for (uint64_t blockBegin = 0; blockBegin < BT_; blockBegin += diagSize) {
+            if (blockBegin < rowBegin || blockBegin + diagSize > rowEnd) {
+                continue;
+            }
+            uint64_t localBlockRow = blockBegin - rowBegin;
+            uint64_t valid = blockBegin < curT ? curT - blockBegin : 0;
+            if (valid > diagSize) {
+                valid = diagSize;
+            }
+            ForwardSubDiag16StridedRegbase(
+                (__ubuf__ float *)reinterpret_cast<uint64_t>(xMat.GetPhyAddr()),
+                static_cast<uint16_t>(BT_), static_cast<uint16_t>(localBlockRow),
+                static_cast<uint16_t>(blockBegin), static_cast<uint16_t>(valid));
+            SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+            for (uint32_t rowIdx = 0; rowIdx < diagSize; ++rowIdx) {
+                uint32_t diagOffset =
+                    static_cast<uint32_t>((localBlockRow + rowIdx) * BT_ + blockBegin + rowIdx);
+                if (rowIdx < valid) {
+                    xMat.SetValue(diagOffset, xMat.GetValue(diagOffset) + 1.0f);
+                } else {
+                    xMat.SetValue(diagOffset, 1.0f);
+                }
+            }
+            SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+        }
+#else
+        LocalTensor<float> diag = arena[scratchBase];
+        LocalTensor<float> row = diag[diagElements];
+        LocalTensor<float> prod = row[diagSize];
+        LocalTensor<float> rowBrcb = prod[diagElements];
+        LocalTensor<float> reduced = rowBrcb[brcbElements];
+
+        uint64_t rowEnd = rowBegin + rowCount;
+        for (uint64_t blockBegin = 0; blockBegin < BT_; blockBegin += diagSize) {
+            if (blockBegin < rowBegin || blockBegin + diagSize > rowEnd) {
+                continue;
+            }
+            Duplicate(diag, 0.0f, diagElements);
+            PipeBarrier<PIPE_V>();
+
+            uint64_t localBlockRow = blockBegin - rowBegin;
+            uint64_t valid = blockBegin < curT ? curT - blockBegin : 0;
+            if (valid > diagSize) {
+                valid = diagSize;
+            }
+            for (uint32_t rowIdx = 0; rowIdx < diagSize; ++rowIdx) {
+                uint64_t srcOffset = (localBlockRow + rowIdx) * BT_ + blockBegin;
+                Muls(diag[rowIdx * diagSize], akkMat[srcOffset], -1.0f, diagSize);
+            }
+            PipeBarrier<PIPE_V>();
+
+            ForwardSubDiag16(diag, row, prod, rowBrcb, reduced, valid);
+            for (uint32_t rowIdx = 0; rowIdx < diagSize; ++rowIdx) {
+                uint64_t dstOffset = (localBlockRow + rowIdx) * BT_ + blockBegin;
+                Adds(xMat[dstOffset], diag[rowIdx * diagSize], 0.0f, diagSize);
+            }
+            PipeBarrier<PIPE_V>();
+        }
+#endif
     }
 
     __aicore__ inline void BuildPrefixMask(LocalTensor<float> dst, uint64_t prefix, uint64_t count)
@@ -1412,8 +1783,8 @@ private:
         DataCopy(akk_[AOffset(b, hv, start, 0)], akkMat, KDA_SOLVE_MATRIX_ELEMENTS);
         DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)], xMat,
                  KDA_SOLVE_MATRIX_ELEMENTS);
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1478,8 +1849,8 @@ private:
                  KDA_SOLVE_MATRIX_ELEMENTS);
         DataCopy(h_[SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_Y0)], akkMat,
                  KDA_SOLVE_MATRIX_ELEMENTS);
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1524,9 +1895,11 @@ private:
 
         uint64_t token = start + rowBegin;
 
-        FillLocalFloat(aqkMat, 0.0f, elemCount);
-        FillLocalFloat(akkMat, 0.0f, elemCount);
-        FillLocalFloat(betaLocal, 0.0f, rowCount);
+        if (validRowCount < rowCount) {
+            FillLocalFloat(aqkMat, 0.0f, elemCount);
+            FillLocalFloat(akkMat, 0.0f, elemCount);
+            FillLocalFloat(betaLocal, 0.0f, rowCount);
+        }
         SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
         WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
         if (validRowCount > 0) {
@@ -1536,29 +1909,40 @@ private:
             SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        ApplyKdaRowScaleRegbase(
+            (__ubuf__ float *)reinterpret_cast<uint64_t>(akkMat.GetPhyAddr()),
+            (__ubuf__ float *)reinterpret_cast<uint64_t>(betaLocal.GetPhyAddr()),
+            static_cast<uint16_t>(rowCount), static_cast<uint16_t>(BT_));
+#else
         Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
         PipeBarrier<PIPE_V>();
-
         uint8_t rowStride = static_cast<uint8_t>(BT_ * sizeof(float) / 32);
         for (uint64_t col = 0; col < BT_; col += 8) {
             Mul(akkMat[col], akkMat[col], betaBrcb, 8, static_cast<uint8_t>(rowCount),
                 {1, 1, 0, rowStride, rowStride, 1});
-            PipeBarrier<PIPE_V>();
         }
+        PipeBarrier<PIPE_V>();
+#endif
         if (validRowCount > 0) {
             SelectCausalRows(aqkMat, akkMat, rowBegin, validRowCount);
         }
 
         Muls(xMat, akkMat, -1.0f, static_cast<uint32_t>(elemCount));
         PipeBarrier<PIPE_V>();
-        for (uint64_t localRow = 0; localRow < rowCount; ++localRow) {
-            uint64_t row = rowBegin + localRow;
-            BuildPrefixMask(maskLocal, row + 1, BT_);
-            BuildPrefixMask(oneHotLocal, row, BT_);
-            Sub(maskLocal, maskLocal, oneHotLocal, static_cast<uint32_t>(BT_));
-            PipeBarrier<PIPE_V>();
-            Add(xMat[localRow * BT_], xMat[localRow * BT_], maskLocal, static_cast<uint32_t>(BT_));
-            PipeBarrier<PIPE_V>();
+        if constexpr (SAFE_GATE) {
+            uint64_t scratchBase = 3 * elemCount + BT_ + 512 + 2 * BT_;
+            SolveDiagonalBlocksInRows(akkMat, xMat, arena, scratchBase, curT, rowBegin, rowCount);
+        } else {
+            for (uint64_t localRow = 0; localRow < rowCount; ++localRow) {
+                uint64_t row = rowBegin + localRow;
+                BuildPrefixMask(maskLocal, row + 1, BT_);
+                BuildPrefixMask(oneHotLocal, row, BT_);
+                Sub(maskLocal, maskLocal, oneHotLocal, static_cast<uint32_t>(BT_));
+                PipeBarrier<PIPE_V>();
+                Add(xMat[localRow * BT_], xMat[localRow * BT_], maskLocal, static_cast<uint32_t>(BT_));
+                PipeBarrier<PIPE_V>();
+            }
         }
 
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X) + rowBegin * BT_;
@@ -1575,8 +1959,8 @@ private:
         if (storeLToScratch) {
             DataCopy(solveWorkspace_[lBase], akkMat, static_cast<uint32_t>(elemCount));
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1636,8 +2020,8 @@ private:
         if (storeAkk) {
             DataCopy(akk_[AOffset(b, hv, start, 0)], xLocal, KDA_SOLVE_MATRIX_ELEMENTS);
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1667,8 +2051,8 @@ private:
         if (storeAkk) {
             DataCopyPad(akk_[AOffset(b, hv, start, 0)], xLocal, validParams);
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1708,8 +2092,8 @@ private:
         if (storeAkk && validRowCount > 0) {
             DataCopyPad(akk_[AOffset(b, hv, token, 0)], xLocal, validParams);
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1749,8 +2133,8 @@ private:
         if (storeAkk) {
             DataCopyPad(akk_[AOffset(b, hv, token, 0)], xLocal, validParams);
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1775,8 +2159,8 @@ private:
         SetFlag<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
         WaitFlag<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
         DataCopyPad(akk_[AOffset(b, hv, start + rowBegin, 0)], xLocal, validParams);
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
     }
 
     __aicore__ inline void ComputeAkkMergeCube(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start)
@@ -1835,7 +2219,7 @@ private:
                                  solveWorkspace_, tmpBase, off, off,
                                  KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT);
             }
-            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(mchSyncDoneFlag_);
             if (iter + 1 < KDA_SOLVE_DIAG_MCH_ITERS) {
                 for (uint32_t block = 0; block < diagBlocks; ++block) {
                     uint32_t off = block * KDA_SOLVE_DIAG_BT;
@@ -1844,7 +2228,7 @@ private:
                                      KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT);
                 }
             }
-            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(syncReadyFlag_);
+            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(mchSyncReadyFlag_);
             if (iter + 1 < KDA_SOLVE_DIAG_MCH_ITERS) {
                 uint64_t oldYBase = yBase;
                 yBase = yNextBase;
@@ -1852,7 +2236,7 @@ private:
             }
         }
         ComputeAkkMergeCube(b, hv, chunkIdx, start);
-        Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+        Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(mchSyncDoneFlag_);
     }
 
     __aicore__ inline void ComputeAkkInverseMchTail(uint64_t b, uint64_t hv, uint64_t chunkIdx,
@@ -1880,7 +2264,7 @@ private:
                                  solveWorkspace_, tmpBase, off, off,
                                  KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT);
             }
-            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(mchSyncDoneFlag_);
             if (iter + 1 < KDA_SOLVE_DIAG_MCH_ITERS) {
                 for (uint32_t block = 0; block < diagBlocks; ++block) {
                     uint32_t off = block * KDA_SOLVE_DIAG_BT;
@@ -1889,7 +2273,7 @@ private:
                                      KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT, KDA_SOLVE_DIAG_BT);
                 }
             }
-            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(syncReadyFlag_);
+            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(mchSyncReadyFlag_);
             if (iter + 1 < KDA_SOLVE_DIAG_MCH_ITERS) {
                 uint64_t oldYBase = yBase;
                 yBase = yNextBase;
@@ -1897,14 +2281,15 @@ private:
             }
         }
         ComputeAkkMergeCubeWorkspace(b, hv, chunkIdx);
-        Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+        Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(mchSyncDoneFlag_);
     }
 
 
 
     __aicore__ inline void ScaleRowsByBeta(GlobalTensor<T> &src, GlobalTensor<T> &dst, uint64_t b, uint64_t hv,
                                            uint64_t start, uint64_t rowBegin, uint64_t rowCount, uint64_t dim,
-                                           LocalTensor<float> &betaBrcb, LocalTensor<float> &matrixLocal)
+                                           LocalTensor<float> &betaLocal, LocalTensor<float> &betaBrcb,
+                                           LocalTensor<float> &matrixLocal)
     {
         constexpr uint64_t vecElemsPerRepeat = 64;
         constexpr uint64_t typedOffsetFloats = 20480;
@@ -1925,6 +2310,12 @@ private:
             PipeBarrier<PIPE_V>();
         }
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        ApplyKdaRowScaleRegbase(
+            (__ubuf__ float *)reinterpret_cast<uint64_t>(matrixLocal.GetPhyAddr()),
+            (__ubuf__ float *)reinterpret_cast<uint64_t>(betaLocal.GetPhyAddr()),
+            static_cast<uint16_t>(rowCount), static_cast<uint16_t>(dim));
+#else
         uint8_t repeatStride = static_cast<uint8_t>(dim * sizeof(float) / 32);
         for (uint64_t col = 0; col < dim; col += vecElemsPerRepeat) {
             uint64_t mask = dim - col;
@@ -1933,8 +2324,9 @@ private:
             }
             Mul(matrixLocal[col], matrixLocal[col], betaBrcb, mask, static_cast<uint8_t>(rowCount),
                 {1, 1, 0, repeatStride, repeatStride, 1});
-            PipeBarrier<PIPE_V>();
         }
+        PipeBarrier<PIPE_V>();
+#endif
 
         if constexpr (IsSameType<T, float>::value) {
             SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
@@ -1948,8 +2340,8 @@ private:
             WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
             DataCopy(dst[baseOffset], matrixTyped, static_cast<uint32_t>(elemCount));
         }
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1971,10 +2363,12 @@ private:
         LocalTensor<float> betaBrcb = arena[KDA_SOLVE_BT];
         LocalTensor<float> matrixLocal = arena[KDA_SOLVE_BT + 512];
         LoadAsFloatRow(beta_, BetaOffset(b, hv, start + rowBegin), betaLocal, rowCount);
+#if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
         Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
         PipeBarrier<PIPE_V>();
-        ScaleRowsByBeta(w_, w_, b, hv, start, rowBegin, rowCount, K_, betaBrcb, matrixLocal);
-        ScaleRowsByBeta(v_, vNew_, b, hv, start, rowBegin, rowCount, V_, betaBrcb, matrixLocal);
+#endif
+        ScaleRowsByBeta(w_, w_, b, hv, start, rowBegin, rowCount, K_, betaLocal, betaBrcb, matrixLocal);
+        ScaleRowsByBeta(v_, vNew_, b, hv, start, rowBegin, rowCount, V_, betaLocal, betaBrcb, matrixLocal);
     }
 
     __aicore__ inline void FinalizePrepareIntermediates(uint64_t b, uint64_t hv, uint64_t start,
@@ -2031,8 +2425,8 @@ private:
             CopyVectorOut(o_, AOffset(b, hv, start + tileRow, 0), aqkTyped, matrixElems);
             CopyVectorOut(u_, AOffset(b, hv, start + tileRow, 0), akkTyped, matrixElems);
             CopyVectorOut(kg_, KVOffset(b, hv, start + tileRow, 0, K_), qgTyped, qgElems);
-            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
-            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
             SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
             WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         }
@@ -2087,14 +2481,37 @@ private:
         if constexpr (CORE_TYPE == AscendC::AIV) {
             (void)subBlockIdx;
             (void)subBlockNum;
-            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(syncReadyFlag_);
-            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+            if constexpr (SAFE_GATE) {
+                Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncReadyFlag_);
+                Catlass::Arch::CrossCoreWaitFlag(syncDoneFlag_);
+            } else {
+                Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(mchSyncReadyFlag_);
+                Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(mchSyncDoneFlag_);
+            }
+        }
+    }
+
+    template <int32_t CORE_TYPE = g_coreType>
+    __aicore__ inline void SignalAicSolveReady()
+    {
+        if constexpr (CORE_TYPE == AscendC::AIV) {
+            Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncReadyFlag_);
+        }
+    }
+
+    template <int32_t CORE_TYPE = g_coreType>
+    __aicore__ inline void WaitAicSolveDone()
+    {
+        if constexpr (CORE_TYPE == AscendC::AIV) {
+            Catlass::Arch::CrossCoreWaitFlag(syncDoneFlag_);
         }
     }
 
     __aicore__ inline void ProcessChunkPreAivFp32(uint64_t b, uint64_t h, uint64_t hv, uint64_t chunkIdx,
                                                   uint64_t start, uint64_t end, uint64_t subBlockIdx,
-                                                  uint64_t subBlockNum)
+                                                  uint64_t subBlockNum, bool deferSafeSolve = false,
+                                                  bool waitPendingSafeSolve = false,
+                                                  uint64_t scoreLane = 0, bool pairHeads = false)
     {
         uint64_t curT = end - start;
         if (curT == 0) {
@@ -2121,12 +2538,20 @@ private:
                 uint64_t rowBegin = block * scoreBlockSize;
                 uint64_t rowCount = ScoreRowBlockCount(curT, rowBegin);
                 uint64_t refToken = ScoreRefToken(start, curT, rowBegin, rowCount);
+                uint64_t scoreSlot =
+                    ScoreScratchSlot(block % KDA_SCORE_QUEUE_DEPTH, scoreLane, pairHeads);
                 PrepareGateProducts(b, h, hv, start, curT, subBlockIdx, subBlockNum, true, refToken,
-                                    rowBegin + rowCount, true, block % KDA_SCORE_QUEUE_DEPTH,
+                                    rowBegin + rowCount, true, scoreSlot,
                                     rowBegin, rowCount);
             }
             Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(scoreReadyFlag_);
             if (block > 0) {
+                if constexpr (SAFE_GATE) {
+                    if (waitPendingSafeSolve) {
+                        WaitAicSolveDone();
+                        waitPendingSafeSolve = false;
+                    }
+                }
                 Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(scoreDoneFlag_);
             }
         }
@@ -2136,25 +2561,52 @@ private:
         if (pipelineBlockCount > 0) {
             Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(scoreDoneFlag_);
         }
-        if (useAkkCubeSolve) {
-            bool fullChunk = curT == BT_;
-            PrepareAqkAkkSolveInputRows(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd,
-                                        fullChunk, !fullChunk);
+        if constexpr (SAFE_GATE) {
+            if (waitPendingSafeSolve) {
+                WaitAicSolveDone();
+                waitPendingSafeSolve = false;
+            }
         }
         if (useAkkCubeSolve) {
             bool fullChunk = curT == BT_;
-            uint32_t solveIters = KDA_SOLVE_DIAG_MCH_ITERS;
-            RunAicAfterBothAivReady(subBlockIdx, subBlockNum);
-            for (uint32_t iter = 0; iter < solveIters; ++iter) {
-                AddSolveTmpToXDiagRows(b, hv, chunkIdx, start, solveRowBegin, solveRowEnd,
-                                       fullChunk && iter + 1 == solveIters);
+            if constexpr (SAFE_GATE) {
+                PrepareAqkAkkSolveInputRows(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd,
+                                            false, false);
+                if (deferSafeSolve) {
+                    SignalAicSolveReady();
+                    return;
+                }
                 RunAicAfterBothAivReady(subBlockIdx, subBlockNum);
-            }
-            if (!fullChunk) {
                 StoreSolveXRowsToAkk(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd);
+            } else {
+                PrepareAqkAkkSolveInputRows(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd,
+                                            fullChunk, !fullChunk);
+                uint32_t solveIters = KDA_SOLVE_DIAG_MCH_ITERS;
+                RunAicAfterBothAivReady(subBlockIdx, subBlockNum);
+                for (uint32_t iter = 0; iter < solveIters; ++iter) {
+                    AddSolveTmpToXDiagRows(b, hv, chunkIdx, start, solveRowBegin, solveRowEnd,
+                                           fullChunk && iter + 1 == solveIters);
+                    RunAicAfterBothAivReady(subBlockIdx, subBlockNum);
+                }
+                if (!fullChunk) {
+                    StoreSolveXRowsToAkk(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd);
+                }
             }
         }
         // Host validation guarantees every accepted shape has enough workspace for this cube path.
+        PrepareWuCubeInputs(b, hv, start, curT, subBlockIdx, subBlockNum);
+        FinalizePrepareIntermediates(b, hv, start, curT, subBlockIdx, subBlockNum);
+    }
+
+    __aicore__ inline void FinishDeferredSafeChunk(uint64_t b, uint64_t hv, uint64_t chunkIdx,
+                                                   uint64_t start, uint64_t end, uint64_t subBlockIdx,
+                                                   uint64_t subBlockNum)
+    {
+        uint64_t curT = end - start;
+        uint64_t solveRowBegin = 0;
+        uint64_t solveRowEnd = 0;
+        GetSolveRowRange(BT_, subBlockIdx, subBlockNum, solveRowBegin, solveRowEnd);
+        StoreSolveXRowsToAkk(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd);
         PrepareWuCubeInputs(b, hv, start, curT, subBlockIdx, subBlockNum);
         FinalizePrepareIntermediates(b, hv, start, curT, subBlockIdx, subBlockNum);
     }
@@ -2191,15 +2643,173 @@ private:
         bool usePostWuCube = UsePostWuCube(curT);
         bool useAkkCubeSolve = UseAkkCubeSolve(curT);
         if (useAkkCubeSolve) {
-            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(syncReadyFlag_);
-            if (curT == BT_) {
-                ComputeAkkInverseMchFull(b, hv, chunkIdx, start);
+            if constexpr (SAFE_GATE) {
+                Catlass::Arch::CrossCoreWaitFlag(syncReadyFlag_);
+                ComputeAkkMergeCubeWorkspace(b, hv, chunkIdx);
+                Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(syncDoneFlag_);
             } else {
-                ComputeAkkInverseMchTail(b, hv, chunkIdx, start, curT);
+                Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(mchSyncReadyFlag_);
+                if (curT == BT_) {
+                    ComputeAkkInverseMchFull(b, hv, chunkIdx, start);
+                } else {
+                    ComputeAkkInverseMchTail(b, hv, chunkIdx, start, curT);
+                }
             }
         }
         (void)usePostWuCube;
         (void)chunkIdx;
+    }
+
+    __aicore__ inline void ProcessChunkPreAicHeadPairFp32(
+        uint64_t b, uint64_t hvBase, uint64_t chunkIdx, uint64_t start, uint64_t end,
+        uint64_t localTaskIdx)
+    {
+        uint64_t curT = end - start;
+        if (curT == 0 || K_ < 16) {
+            return;
+        }
+        uint64_t scoreBlockSize = ScoreRefBlockSize();
+        uint64_t scoreBlockCount = (curT + scoreBlockSize - 1) / scoreBlockSize;
+        uint64_t pipelineBlockCount =
+            (scoreBlockCount + KDA_SCORE_QUEUE_DEPTH - 1) / KDA_SCORE_QUEUE_DEPTH * KDA_SCORE_QUEUE_DEPTH;
+        for (uint64_t block = 0; block < pipelineBlockCount; ++block) {
+            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_FIX>(scoreReadyFlag_);
+            if (block < scoreBlockCount) {
+                uint64_t rowBegin = block * scoreBlockSize;
+                uint64_t rowCount = ScoreRowBlockCount(curT, rowBegin);
+                for (uint64_t lane = 0; lane < KDA_SCORE_LANES; ++lane) {
+                    uint64_t hv = hvBase + lane;
+                    uint64_t scoreSlot =
+                        ScoreScratchSlot(block % KDA_SCORE_QUEUE_DEPTH, lane, true);
+                    ComputeRawAqkAkkCubeBlock(b, hv, start, curT, rowBegin, rowCount, true,
+                                              scoreSlot, rowBegin + rowCount);
+                }
+            }
+            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(scoreDoneFlag_);
+        }
+
+        if (UseAkkCubeSolve(curT)) {
+            Catlass::Arch::CrossCoreWaitFlag(syncReadyFlag_);
+            for (uint64_t lane = 0; lane < KDA_SCORE_LANES; ++lane) {
+                activeSolveSlot_ =
+                    (localTaskIdx % (KDA_SOLVE_PIPELINE_DEPTH / KDA_SCORE_LANES)) * KDA_SCORE_LANES + lane;
+                ComputeAkkMergeCubeWorkspace(b, hvBase + lane, chunkIdx);
+            }
+            Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(syncDoneFlag_);
+        }
+    }
+
+    __aicore__ inline bool ResolveFlatChunkForHv(
+        uint64_t flatChunk, uint64_t hv, uint64_t &seq, uint64_t &b, uint64_t &h,
+        uint64_t &chunkIdx, uint64_t &start, uint64_t &end)
+    {
+        if (!isVarLen_) {
+            seq = flatChunk / NT_;
+            b = seq;
+            chunkIdx = flatChunk % NT_;
+            start = chunkIdx * BT_;
+            end = start + BT_;
+            if (end > T_) {
+                end = T_;
+            }
+        } else {
+            if (!hasChunkIndices_) {
+                return false;
+            }
+            const uint64_t metadataOffset = flatChunk * 4;
+            seq = static_cast<uint64_t>(chunkIndicesAddr_[metadataOffset]);
+            start = static_cast<uint64_t>(chunkIndicesAddr_[metadataOffset + 1]);
+            end = static_cast<uint64_t>(chunkIndicesAddr_[metadataOffset + 2]);
+            b = 0;
+            chunkIdx = flatChunk;
+            if (seq >= N_ || start >= end || end > T_) {
+                return false;
+            }
+        }
+        h = hv / (HV_ / H_);
+        return start < end;
+    }
+
+    __aicore__ inline void ProcessPreAivHeadPair()
+    {
+        const uint64_t subBlockIdx = static_cast<uint64_t>(GetSubBlockIdx());
+        const uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
+        const uint64_t coreNum = usedCoreNum_;
+        const uint64_t coreIdx = static_cast<uint64_t>(GetBlockIdx()) / subBlockNum;
+        const uint64_t chunkCount = isVarLen_ ? NT_ : B_ * NT_;
+        const uint64_t headWindows = HV_ / KDA_SCORE_LANES;
+        const uint64_t taskNum = chunkCount * headWindows;
+        bool pendingValid = false;
+        uint64_t pendingB = 0;
+        uint64_t pendingHv = 0;
+        uint64_t pendingChunkIdx = 0;
+        uint64_t pendingStart = 0;
+        uint64_t pendingEnd = 0;
+        uint64_t pendingSlot = 0;
+        uint64_t localTaskIdx = 0;
+
+        for (uint64_t task = coreIdx; task < taskNum; task += coreNum, ++localTaskIdx) {
+            uint64_t flatChunk = task / headWindows;
+            uint64_t hv = (task % headWindows) * KDA_SCORE_LANES + subBlockIdx;
+            uint64_t seq = 0;
+            uint64_t b = 0;
+            uint64_t h = 0;
+            uint64_t chunkIdx = 0;
+            uint64_t start = 0;
+            uint64_t end = 0;
+            if (!ResolveFlatChunkForHv(flatChunk, hv, seq, b, h, chunkIdx, start, end)) {
+                continue;
+            }
+            (void)seq;
+            uint64_t currentSlot =
+                (localTaskIdx % (KDA_SOLVE_PIPELINE_DEPTH / KDA_SCORE_LANES)) * KDA_SCORE_LANES + subBlockIdx;
+            activeSolveSlot_ = currentSlot;
+            bool deferSolve = UseAkkCubeSolve(end - start);
+            ProcessChunkPreAivFp32(b, h, hv, chunkIdx, start, end, 0, 1, deferSolve,
+                                  pendingValid, subBlockIdx, true);
+            if (pendingValid) {
+                activeSolveSlot_ = pendingSlot;
+                FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd, 0, 1);
+            }
+            pendingValid = deferSolve;
+            if (pendingValid) {
+                pendingB = b;
+                pendingHv = hv;
+                pendingChunkIdx = chunkIdx;
+                pendingStart = start;
+                pendingEnd = end;
+                pendingSlot = currentSlot;
+            }
+        }
+        if (pendingValid) {
+            WaitAicSolveDone();
+            activeSolveSlot_ = pendingSlot;
+            FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd, 0, 1);
+        }
+    }
+
+    __aicore__ inline void ProcessPreAicHeadPair()
+    {
+        const uint64_t chunkCount = isVarLen_ ? NT_ : B_ * NT_;
+        const uint64_t headWindows = HV_ / KDA_SCORE_LANES;
+        const uint64_t taskNum = chunkCount * headWindows;
+        const uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
+        uint64_t localTaskIdx = 0;
+        for (uint64_t task = GetBlockIdx(); task < taskNum; task += coreNum, ++localTaskIdx) {
+            uint64_t flatChunk = task / headWindows;
+            uint64_t hvBase = (task % headWindows) * KDA_SCORE_LANES;
+            uint64_t seq = 0;
+            uint64_t b = 0;
+            uint64_t h = 0;
+            uint64_t chunkIdx = 0;
+            uint64_t start = 0;
+            uint64_t end = 0;
+            if (ResolveFlatChunkForHv(flatChunk, hvBase, seq, b, h, chunkIdx, start, end)) {
+                (void)seq;
+                (void)h;
+                ProcessChunkPreAicHeadPairFp32(b, hvBase, chunkIdx, start, end, localTaskIdx);
+            }
+        }
     }
 
     __aicore__ inline void ProcessPreAiv()
@@ -2207,6 +2817,14 @@ private:
         if constexpr (IsSameType<T, float>::value) {
             isAivOnly_ = true;
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if constexpr (SAFE_GATE && !IsSameType<T, float>::value) {
+            if (!isAivOnly_ && HV_ % KDA_SCORE_LANES == 0) {
+                ProcessPreAivHeadPair();
+                return;
+            }
+        }
+#endif
         uint64_t subBlockNum = isAivOnly_ ? 1 : static_cast<uint64_t>(GetSubBlockNum());
         if (subBlockNum == 0) {
             return;
@@ -2216,6 +2834,63 @@ private:
         uint64_t coreIdx = isAivOnly_ ? static_cast<uint64_t>(GetBlockIdx()) :
                                         static_cast<uint64_t>(GetBlockIdx()) / subBlockNum;
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
+        if constexpr (SAFE_GATE && !IsSameType<T, float>::value) {
+            bool pendingValid = false;
+            uint64_t pendingB = 0;
+            uint64_t pendingHv = 0;
+            uint64_t pendingChunkIdx = 0;
+            uint64_t pendingStart = 0;
+            uint64_t pendingEnd = 0;
+            uint64_t pendingSlot = 0;
+            uint64_t localTaskIdx = 0;
+            for (uint64_t task = coreIdx; task < taskNum; task += coreNum, ++localTaskIdx) {
+                uint64_t seq = 0;
+                uint64_t b = 0;
+                uint64_t h = 0;
+                uint64_t hv = 0;
+                uint64_t chunkIdx = 0;
+                uint64_t start = 0;
+                uint64_t end = 0;
+                if (!ResolveFlatChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
+                    continue;
+                }
+                (void)seq;
+                uint64_t currentSlot = localTaskIdx % KDA_SOLVE_PIPELINE_DEPTH;
+                activeSolveSlot_ = currentSlot;
+                bool deferSolve = UseAkkCubeSolve(end - start);
+                if (!deferSolve && pendingValid) {
+                    WaitAicSolveDone();
+                    activeSolveSlot_ = pendingSlot;
+                    FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd,
+                                            subBlockIdx, subBlockNum);
+                    pendingValid = false;
+                    activeSolveSlot_ = currentSlot;
+                }
+                ProcessChunkPreAivFp32(b, h, hv, chunkIdx, start, end, subBlockIdx, subBlockNum,
+                                      deferSolve, pendingValid);
+                if (pendingValid) {
+                    activeSolveSlot_ = pendingSlot;
+                    FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd,
+                                            subBlockIdx, subBlockNum);
+                }
+                pendingValid = deferSolve;
+                if (pendingValid) {
+                    pendingB = b;
+                    pendingHv = hv;
+                    pendingChunkIdx = chunkIdx;
+                    pendingStart = start;
+                    pendingEnd = end;
+                    pendingSlot = currentSlot;
+                }
+            }
+            if (pendingValid) {
+                WaitAicSolveDone();
+                activeSolveSlot_ = pendingSlot;
+                FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd,
+                                        subBlockIdx, subBlockNum);
+            }
+            return;
+        }
         for (uint64_t task = coreIdx; task < taskNum; task += coreNum) {
             uint64_t seq = 0;
             uint64_t b = 0;
@@ -2236,9 +2911,18 @@ private:
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if constexpr (SAFE_GATE) {
+            if (HV_ % KDA_SCORE_LANES == 0) {
+                ProcessPreAicHeadPair();
+                return;
+            }
+        }
+#endif
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
-        for (uint64_t task = GetBlockIdx(); task < taskNum; task += coreNum) {
+        uint64_t localTaskIdx = 0;
+        for (uint64_t task = GetBlockIdx(); task < taskNum; task += coreNum, ++localTaskIdx) {
             uint64_t seq = 0;
             uint64_t b = 0;
             uint64_t h = 0;
@@ -2247,6 +2931,9 @@ private:
             uint64_t start = 0;
             uint64_t end = 0;
             if (ResolveFlatChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
+                if constexpr (SAFE_GATE) {
+                    activeSolveSlot_ = localTaskIdx % KDA_SOLVE_PIPELINE_DEPTH;
+                }
                 (void)seq;
                 (void)h;
                 ProcessChunkPreAic(b, hv, chunkIdx, start, end);
@@ -2287,18 +2974,20 @@ private:
     TEventID vToMte3Event_ = 0;
     TEventID mte3ToVEvent_ = 0;
     TEventID mte2ToMte3Event_ = 0;
-    TEventID mte3ToMte2Event_ = 0;
+    TEventID mte3ToMte2Events_[KDA_GATE_PIPELINE_DEPTH] = {0, 0, 0};
     bool vectorEventsAllocated_ = false;
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SCORE_QUEUE_DEPTH> scoreReadyFlag_{KDA_SCORE_READY_FLAG0,
                                                                                   KDA_SCORE_READY_FLAG1};
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SCORE_QUEUE_DEPTH> scoreDoneFlag_{KDA_SCORE_DONE_FLAG0,
                                                                                  KDA_SCORE_DONE_FLAG1};
-    // Score production is fully drained before solve starts, so the solve handshake can safely reuse
-    // the A2/A5-proven score flags without consuming additional hardware flag IDs.
-    Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> syncReadyFlag_{KDA_SCORE_READY_FLAG0,
-                                                                                  KDA_SCORE_READY_FLAG1};
-    Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> syncDoneFlag_{KDA_SCORE_DONE_FLAG0,
-                                                                                 KDA_SCORE_DONE_FLAG1};
+    // Solve has one outstanding task per core. Reuse the primary score IDs as an ordered token stream;
+    // score credits remain on the reverse IDs, so no additional hardware flag IDs are consumed.
+    Catlass::Arch::CrossCoreFlag syncReadyFlag_{KDA_SCORE_READY_FLAG0};
+    Catlass::Arch::CrossCoreFlag syncDoneFlag_{KDA_SCORE_DONE_FLAG0};
+    Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> mchSyncReadyFlag_{
+        KDA_SCORE_READY_FLAG0, KDA_SCORE_READY_FLAG1};
+    Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> mchSyncDoneFlag_{
+        KDA_SCORE_DONE_FLAG0, KDA_SCORE_DONE_FLAG1};
     uint64_t B_ = 0;
     uint64_t N_ = 0;
     uint64_t H_ = 0;
@@ -2316,6 +3005,7 @@ private:
     bool outputSequenceMajor_ = false;
     uint64_t usedCoreNum_ = 1;
     uint64_t solveCoreIdx_ = 0;
+    uint64_t activeSolveSlot_ = 0;
     __gm__ int64_t *chunkIndicesAddr_ = nullptr;
 };
 } // namespace

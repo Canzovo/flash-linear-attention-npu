@@ -258,7 +258,10 @@ public:
         bool isFinalState,
         bool storeFinalState,
         bool waitWsFromMte3,
-        bool isPing
+        bool isPing,
+        bool useDirectFp32Ub,
+        uint64_t directUbFreeFlagBegin,
+        uint64_t directUbReadyFlagBegin
     )
     {
         static constexpr uint32_t ROW_TILE = 16;
@@ -283,7 +286,15 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(
                     EVENT_ID0 + pingpongFlag);
             }
-            Arch::CrossCoreWaitFlag(cube1Done);
+            if (useDirectFp32Ub) {
+                uint32_t directUbSlot = isPing ? 0 : 1;
+                AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
+                    directUbReadyFlagBegin + directUbSlot);
+                AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
+                    directUbFreeFlagBegin + directUbSlot);
+            } else {
+                Arch::CrossCoreWaitFlag(cube1Done);
+            }
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
             return;
         }
@@ -325,16 +336,21 @@ public:
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag);
             }
-            Arch::CrossCoreWaitFlag(cube1Done);
-
             if (waitWsFromMte3) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
             }
-            AscendC::DataCopy(wsUbTensor, wsInputThisSubBlock, mActualThisSubBlock * nvActual);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+            if (useDirectFp32Ub) {
+                uint32_t directUbSlot = isPing ? 0 : 1;
+                AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
+                    directUbReadyFlagBegin + directUbSlot);
+            } else {
+                Arch::CrossCoreWaitFlag(cube1Done);
+                AscendC::DataCopy(wsUbTensor, wsInputThisSubBlock, mActualThisSubBlock * nvActual);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+            }
 
             if constexpr (scalarGated) {
                 AscendC::Sub<float>(wsUbTensor, calcUbTensor, wsUbTensor, mActualThisSubBlock * nvActual);
@@ -396,6 +412,11 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pingpongFlag);
 
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+            }
+            if (useDirectFp32Ub) {
+                uint32_t directUbSlot = isPing ? 0 : 1;
+                AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
+                    directUbFreeFlagBegin + directUbSlot);
             }
             return;
         }
