@@ -97,6 +97,12 @@ python -m pip install --force-reinstall --no-deps dist/flash_linear_attention_np
 
 如果使用 Release 下载的 wheel，将命令中的 `dist/flash_linear_attention_npu-*.whl` 替换为实际下载路径。
 
+方式 A wheel 不安装或执行 shell 环境钩子。无论使用系统 Python、Conda、venv
+还是 Docker，每次进入新的 shell 后都需要先按 Step 1 手工 source CANN 的
+`set_env.sh`。调用 `fla_npu.ops.ascendc` 算子时会在当前 Python 进程内定位并加载
+wheel 内嵌 OPP；wheel 通过绝对路径加载 `libcust_opapi.so`，不会再生成或加载
+可能覆盖 CANN 运行库的自定义 `libopapi.so`。
+
 #### 方式 B 产物安装
 
 先确认方式 A 的完整 wheel 已经安装到当前 Python 环境，然后安装 run 包。安装器会在覆盖前列出当前 run 包携带的算子，并标出安装后的算子状态：`WARNING` 表示安装后不可用，包括不在当前 run 包范围内但会受局部 `libcust_opapi.so`、tiling so、proto so 整体替换影响的算子，以及当前 run 包内但 aclnn ABI 修改或删除的算子；`NOTICE` 表示新增或无法完整确认的 ABI，需要确认当前 Python wheel 是否已有对应 wrapper；`OK` 表示当前 run 包内且 aclnn ABI 一致的算子。`op_api/include/aclnnop` 中新增、删除、修改的 aclnn ABI 头文件会合并显示到对应算子的状态原因里；删除只按当前 run 包携带的算子范围判断，非 `--quiet` 模式只在状态表后确认一次。
@@ -114,6 +120,8 @@ python -m pip install --force-reinstall --no-deps torch_custom/fla_npu/dist/flas
 安装 run 包后需要重启 Python 进程，已经 `dlopen` 的 `libcust_opapi.so` 不会在同一进程内热替换。
 
 `import fla_npu` 是轻量导入，不会自动导入 `torch` / `torch_npu`，也不会自动注册 `torch.ops.npu`。默认 wheel 通过 Python ctypes 直调 aclnn/opapi，推荐使用 `fla_npu.ops.ascendc`；`torch_npu.ops.*` 会在导入 `fla_npu.ops.ascendc` 后挂到同一套 Python wrapper。只有用 `FLA_NPU_BUILD_LEGACY_EXTENSION=1` 额外编出 legacy 扩展时，才可显式调用 `fla_npu.load_legacy_torch_ops()` 兼容旧 `torch.ops.npu.*`。
+
+`fla_npu.ops.ascendc` 调用会优先使用 wheel 内嵌 OPP，找不到时会继续从 `FLA_NPU_OPP_PATH`、`ASCEND_CUSTOM_OPP_PATH` 和 `ASCEND_OPP_PATH` 查找已安装 OPP。外部 OPP 的 `op_api/lib` 目录同样不得包含自定义 `libopapi.so`；如果残留该文件并可能遮蔽 CANN 运行库，调用时会明确报错并要求清理旧别名。
 
 ### Step 4. 测试安装成功
 

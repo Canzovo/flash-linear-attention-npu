@@ -141,6 +141,8 @@ PY
 fi
 export PYTORCH_VERSION
 
+python3 tests/test_wheel_environment.py
+
 bash ci/prepare_ci_cache.sh
 
 cleanup_installed_fla_npu_python_packages() {
