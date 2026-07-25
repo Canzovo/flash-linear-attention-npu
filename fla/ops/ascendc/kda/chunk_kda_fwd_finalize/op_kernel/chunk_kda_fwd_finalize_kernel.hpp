@@ -927,9 +927,11 @@ private:
                                              uint64_t curT)
     {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        ComputeOutputCubeFusedA5(b, hv, chunkIdx, start, curT);
-        return;
-#else
+        if (BT_ == 64) {
+            ComputeOutputCubeFusedA5(b, hv, chunkIdx, start, curT);
+            return;
+        }
+#endif
         using ElementA = T;
         using ElementB = T;
         using ElementC = OUT_T;
@@ -962,9 +964,7 @@ private:
                 auto blockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(shapeQH.k(), shapeQH.n()));
                 auto blockO = GetTile(tensorO, tla::MakeCoord(0, 0), tla::MakeShape(shapeQH.m(), shapeQH.n()));
                 blockMmad(blockQ, blockH, blockO, shapeQH);
-#if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
                 PipeBarrier<PIPE_ALL>();
-#endif
             }
         }
 
@@ -985,12 +985,9 @@ private:
                 auto blockVNew = GetTile(tensorVNew, tla::MakeCoord(0, 0), tla::MakeShape(shapeAV.k(), shapeAV.n()));
                 auto blockLocal = GetTile(tensorLocal, tla::MakeCoord(0, 0), tla::MakeShape(shapeAV.m(), shapeAV.n()));
                 blockMmad(blockAqk, blockVNew, blockLocal, shapeAV);
-#if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
                 PipeBarrier<PIPE_ALL>();
-#endif
             }
         }
-#endif
     }
 
     __aicore__ inline void FinalizeOutputRows(uint64_t b, uint64_t hv, uint64_t start, uint64_t curT,
