@@ -1,23 +1,13 @@
-# -----------------------------------------------------------------------------------------------------------
-# Copyright (c) 2026 Tianjin University, Ltd.
-# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-# CANN Open Software License Agreement Version 2.0 (the "License").
-# Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-# See LICENSE in the root of the software repository for the full text of the License.
-# -----------------------------------------------------------------------------------------------------------
-
 import torch
+import torch_npu
 import os
 from typing import Optional
 import pickle
 import math
 import ct
 import random
-from fla_npu.ops import ascendc as ascendc_ops
-
-torch.npu.set_device(int(os.environ.get("TEST_DEVICE_ID", 0)))
+import fla_npu
+torch.npu.set_device(int(os.environ.get("TEST_DEVICE_ID", 3)))
 
 def get_bos_eos(idx, T, chunk_size, cu_seqlens, chunk_indices):
     if cu_seqlens != None:
@@ -52,17 +42,16 @@ def compute_w_golden(
     Hk: int = 0,  # GVA: key head count, 0 means Hk == H
 ) -> torch.Tensor:
     """
-    CPU golden implementation for w computation (变长序列)
-    A的形状为 [B, H, T, chunk_size]
+    CPU golden implementation for dv computation (变长序列)
+    A的形状为 [B, T, H, chunk_size]
     算法:
     1. 对于每个chunk (由chunk_indices指定)
     2. 获取对应的seq_idx, chunk_indices
-    3. 计算该chunk内的w: w_chunk = A_chunk @ (k_chunk * beta_chunk)
+    3. 计算该chunk内的dv: dv_chunk = A_chunk @ du_chunk * beta_chunk
     """
     if Hk == 0:
         Hk = H
     hvPerHk = H // Hk
-    # 初始化w，形状为 [B, H, T, D]（W输出K维）
     w = torch.zeros(B, H, T, D, dtype=v.dtype, device=v.device)
     for i_b in range(B):
         for idx in range(NT):
@@ -72,12 +61,12 @@ def compute_w_golden(
             for i_h in range(H):
                 # print("hello?")
             # 遍历所有head 
-                hk = i_h // hvPerHk
                 # 获取当前chunk的A向量
                 # A形状: [B, T, H, chunk_size]
                 # 我们需要获取这个chunk对应的A向量
                 # 注意: A的每个位置存储的是该chunk对应的A向量
                 A_chunk = A[i_b,i_h, bos:eos,:eos - bos]
+                hk = i_h // hvPerHk
                 k_chunk = k[i_b,hk, bos:eos,:]
                 
                 # 获取当前chunk的beta
@@ -112,17 +101,18 @@ def compute_u_golden(
     NT: int,  # T / chunk_size
 ) -> torch.Tensor:
     """
-    CPU golden implementation for u computation (变长序列)
-    A的形状为 [B, H, T, chunk_size]
+    CPU golden implementation for dv computation (变长序列)
+    A的形状为 [B, T, H, chunk_size]
     算法:
     1. 对于每个chunk (由chunk_indices指定)
     2. 获取对应的seq_idx, chunk_indices
-    3. 计算该chunk内的u: u_chunk = A_chunk @ (v_chunk * beta_chunk)
+    3. 计算该chunk内的dv: dv_chunk = A_chunk @ du_chunk * beta_chunk
     """
     u = torch.zeros_like(v)
     for i_b in range(B):
         for idx in range(NT):
             bos,eos = get_bos_eos(idx, T, chunk_size, cu_seqlens, chunk_indices)
+        # 遍历所有batch
             for i_h in range(Hv):
             # 遍历所有head 
                 # 获取当前chunk的A向量
@@ -287,7 +277,7 @@ def test_recompute_w_u_fwd(
 
     # 将张量移到 NPU 并调用反向算子
     if chunk_indices != None:
-        w, u = ascendc_ops.npu_recompute_w_u_fwd(
+        w, u = torch.ops.npu.npu_recompute_w_u_fwd(
             k.npu(),
             v.npu(),
             beta.npu(),
@@ -299,7 +289,7 @@ def test_recompute_w_u_fwd(
             chunk_indices=chunk_indices
         )
     else:
-        w, u = ascendc_ops.npu_recompute_w_u_fwd(
+        w, u = torch.ops.npu.npu_recompute_w_u_fwd(
             k.npu(),
             v.npu(),
             beta.npu(),
@@ -310,83 +300,21 @@ def test_recompute_w_u_fwd(
             cu_seqlens=None,
             chunk_indices=None
         )
-
-    print("================== w ==================")
+    print(f"==================w=========================\n")
     cpu_w = compute_w_golden(k, v, beta, A, g, cu_seqlens, chunk_indices, B, Hv, T, K, chunk_size, NT, Hk=Hk)
+    print(f"==================cpu=========================\n")
     ct.isclose(w.cpu(), cpu_w.cpu(), diff_thd=0.1)
-
-    print("================== u ==================")
+    print(f"==================ct=========================\n")
+    
+    print(f"==================u=========================\n")
     cpu_u = compute_u_golden(v, beta, A, cu_seqlens, chunk_indices, B, Hv, T, chunk_size, NT)
     ct.isclose(u.cpu(), cpu_u.cpu(), diff_thd=0.1)
 
+    
     print(f"test_recompute_w_u_fwd 被调用了第 {test_recompute_w_u_fwd.call_count} 次")
     return w, u
 
 if __name__ == "__main__":
-    # test_recompute_w_u_fwd(B = 1, H = 4, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
-    # #F1
-    # test_recompute_w_u_fwd(B = 64, H = 8, T = 1024, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
-    # #F2
-    # test_recompute_w_u_fwd(B = 32, H = 16, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F3
-    # test_recompute_w_u_fwd(B = 16, H = 32, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float32)
-    # #F4
-    # test_recompute_w_u_fwd(B = 8, H = 32, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F5
-    # test_recompute_w_u_fwd(B = 128, H = 4, T = 1024, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
-    # #F6
-    # test_recompute_w_u_fwd(B = 64, H = 8, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.float32)
-    # #F7
-    # test_recompute_w_u_fwd(B = 32, H = 16, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float16)
-    # #F8    
-    # test_recompute_w_u_fwd(B = 16, H = 32, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F9
-    # test_recompute_w_u_fwd(B = 64, H = 8, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float16)
-    # #F10
-    # test_recompute_w_u_fwd(B = 32, H = 16, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F11
-    # test_recompute_w_u_fwd(B = 16, H = 32, T = 16384, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float32)
-    # #F12
-    # test_recompute_w_u_fwd(B = 8, H = 32, T = 32768, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F13
-    # test_recompute_w_u_fwd(B = 64, H = 8, T = 1024, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
-    # #F14
-    # test_recompute_w_u_fwd(B = 32, H = 16, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F15
-    # test_recompute_w_u_fwd(B = 16, H = 32, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float32)
-    # #F16
-    # test_recompute_w_u_fwd(B = 8, H = 32, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F17
-    # test_recompute_w_u_fwd(B = 64, H = 8, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
-    # #F18
-    # test_recompute_w_u_fwd(B = 32, H = 16, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float16)
-    # #L1
-    # cu_seqlens = prepare_cu_seqlens(T = 2048, L = 500)
-    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 128)
-    # print(cu_seqlens)
-    # print(chunk_indices)
-    # test_recompute_w_u_fwd(B = 1, Hk = 4, Hv = 4, T = 2048, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
-    # #L2
-    # cu_seqlens = prepare_cu_seqlens(T = 65536, L = 33)
-    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
-    # test_recompute_w_u_fwd(B = 1, H = 16, T = 65536, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
-    # #L3
-    # cu_seqlens = prepare_cu_seqlens(T = 131072, L = 333)
-    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
-    # test_recompute_w_u_fwd(B = 1, H = 8, T = 131072, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
-    # # L4
-    # cu_seqlens = prepare_cu_seqlens(T = 262144, L = 567)
-    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
-    # test_recompute_w_u_fwd(B = 1, H = 4, T = 262144, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float32, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
-    # #L5
-    # cu_seqlens = prepare_cu_seqlens(T = 32768, L = 7)
-    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
-    # test_recompute_w_u_fwd(B = 1, H = 16, T = 32768, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
-    # #L6
-    # cu_seqlens = prepare_cu_seqlens(T = 65536, L = 25)
-    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
-    # test_recompute_w_u_fwd(B = 1, H = 8, T = 65536, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
-
     # === GVA / VDIM256 quick cases ===
     # 默认只打开一个小的 GVA + VDIM256 smoke，用于快速确认主路径。
     test_recompute_w_u_fwd(B=1, Hk=2, Hv=4, T=256, K=128, V=256, chunk_size=64,
@@ -451,3 +379,67 @@ if __name__ == "__main__":
     # test_recompute_w_u_fwd(B=1, Hk=4, Hv=32, T=65536, K=128, V=128, chunk_size=128,
     #                       ktype=torch.float16, btype=torch.float16,
     #                       cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+
+    # test_recompute_w_u_fwd(B = 1, H = 4, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
+    # #F1
+    # test_recompute_w_u_fwd(B = 64, H = 8, T = 1024, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
+    # #F2
+    # test_recompute_w_u_fwd(B = 32, H = 16, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F3
+    # test_recompute_w_u_fwd(B = 16, H = 32, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float32)
+    # #F4
+    # test_recompute_w_u_fwd(B = 8, H = 32, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F5
+    # test_recompute_w_u_fwd(B = 128, H = 4, T = 1024, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
+    # #F6
+    # test_recompute_w_u_fwd(B = 64, H = 8, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.float32)
+    # #F7
+    # test_recompute_w_u_fwd(B = 32, H = 16, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float16)
+    # #F8    
+    # test_recompute_w_u_fwd(B = 16, H = 32, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F9
+    # test_recompute_w_u_fwd(B = 64, H = 8, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float16)
+    # #F10
+    # test_recompute_w_u_fwd(B = 32, H = 16, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F11
+    # test_recompute_w_u_fwd(B = 16, H = 32, T = 16384, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float32)
+    # #F12
+    # test_recompute_w_u_fwd(B = 8, H = 32, T = 32768, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F13
+    # test_recompute_w_u_fwd(B = 64, H = 8, T = 1024, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16)
+    # #F14
+    # test_recompute_w_u_fwd(B = 32, H = 16, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F15
+    # test_recompute_w_u_fwd(B = 16, H = 32, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float32)
+    # #F16
+    # test_recompute_w_u_fwd(B = 8, H = 32, T = 8192, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F17
+    # test_recompute_w_u_fwd(B = 64, H = 8, T = 2048, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16)
+    # #F18
+    # test_recompute_w_u_fwd(B = 32, H = 16, T = 4096, K = 128, V = 128, chunk_size = 128, ktype=torch.float16, btype=torch.float16)
+    # #L1
+    # cu_seqlens = prepare_cu_seqlens(T = 2048, L = 500)
+    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 128)
+    # print(cu_seqlens)
+    # print(chunk_indices)
+    # test_recompute_w_u_fwd(B = 1, Hk = 4, Hv = 4, T = 2048, K = 128, V = 128, chunk_size = 128, ktype=torch.bfloat16, btype=torch.bfloat16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
+    # #L2
+    # cu_seqlens = prepare_cu_seqlens(T = 65536, L = 33)
+    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
+    # test_recompute_w_u_fwd(B = 1, H = 16, T = 65536, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
+    # #L3
+    # cu_seqlens = prepare_cu_seqlens(T = 131072, L = 333)
+    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
+    # test_recompute_w_u_fwd(B = 1, H = 8, T = 131072, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
+    # # L4
+    # cu_seqlens = prepare_cu_seqlens(T = 262144, L = 567)
+    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
+    # test_recompute_w_u_fwd(B = 1, H = 4, T = 262144, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float32, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
+    # #L5
+    # cu_seqlens = prepare_cu_seqlens(T = 32768, L = 7)
+    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
+    # test_recompute_w_u_fwd(B = 1, H = 16, T = 32768, K = 128, V = 128, chunk_size = 64, ktype=torch.bfloat16, btype=torch.bfloat16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
+    # #L6
+    # cu_seqlens = prepare_cu_seqlens(T = 65536, L = 25)
+    # chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size = 64)
+    # test_recompute_w_u_fwd(B = 1, H = 8, T = 65536, K = 128, V = 128, chunk_size = 64, ktype=torch.float16, btype=torch.float16, cu_seqlens = cu_seqlens, chunk_indices=chunk_indices)
