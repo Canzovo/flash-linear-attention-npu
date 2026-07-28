@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # -----------------------------------------------------------------------------------------------------------
 set(chunk_kda_fwd_depends
-    "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h;fla/ops/ascendc/kda/kda_layout_swap12;fla/ops/ascendc/kda/chunk_kda_fwd_prepare;fla/ops/ascendc/kda/chunk_kda_fwd_post_wu;fla/ops/ascendc/kda/chunk_kda_fwd_finalize"
+    "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h;fla/ops/ascendc/kda/kda_gate_cumsum;fla/ops/ascendc/kda/chunk_kda_fwd_prepare;fla/ops/ascendc/kda/chunk_kda_fwd_post_wu;fla/ops/ascendc/kda/chunk_kda_fwd_finalize"
     CACHE STRING "Kernel source dependencies for chunk_kda_fwd" FORCE)
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE

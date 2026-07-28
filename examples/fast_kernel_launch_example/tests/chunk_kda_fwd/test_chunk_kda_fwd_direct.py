@@ -29,7 +29,8 @@ def test_chunk_kda_fwd_direct_matches_aclnn(dtype, safe_gate):
     k = (torch.randn(batch, h_k, seqlen, kdim) * 0.08).to(dtype).to(device)
     v = (torch.randn(batch, h_v, seqlen, vdim) * 0.08).to(dtype).to(device)
     gate_steps = -(torch.rand(batch, h_v, seqlen // chunk_size, chunk_size, kdim) * 0.01 + 0.002)
-    gk = gate_steps.cumsum(dim=3).reshape(batch, h_v, seqlen, kdim).to(device)
+    raw_gate = (gate_steps.reshape(batch, h_v, seqlen, kdim) * torch.log(torch.tensor(2.0))).to(device)
+    gk = fla_ascendc.kda_gate_cumsum(raw_gate, chunk_size)
     beta = torch.sigmoid(torch.randn(batch, h_v, seqlen)).to(device)
     initial_state = (torch.randn(batch, h_v, kdim, vdim) * 0.02).float().to(device)
 
@@ -38,17 +39,21 @@ def test_chunk_kda_fwd_direct_matches_aclnn(dtype, safe_gate):
         initial_state=initial_state, output_final_state=True, safe_gate=safe_gate,
     )
     aclnn = fla_ascendc.chunk_kda_fwd(
-        q, k, v, gk, beta, scale, chunk_size, layout="BNSD",
-        initial_state=initial_state, output_final_state=True, return_intermediate=True,
+        q, k, v, raw_gate, beta, scale, chunk_size, layout="BNSD",
+        initial_state=initial_state, output_final_state=True, disable_recompute=True,
+        return_intermediate_states=True,
         safe_gate=safe_gate,
     )
     for name, actual, reference in zip(
         (
-            "o", "final_state", "g", "Aqk", "Akk", "w", "u", "qg", "kg",
+            "attn_out", "final_state", "gk", "Aqk", "Akk", "w", "u", "qg", "kg",
             "v_new", "h", "initial_state_out",
         ),
         direct,
         aclnn,
     ):
-        assert torch.isfinite(actual).all().item(), f"direct {name} contains NaN or Inf"
-        torch.testing.assert_close(actual, reference, rtol=2e-2, atol=2e-2)
+        if actual is None or reference is None:
+            assert actual is reference, name
+        else:
+            assert torch.isfinite(actual).all().item(), f"direct {name} contains NaN or Inf"
+            torch.testing.assert_close(actual, reference, rtol=2e-2, atol=2e-2, msg=name)

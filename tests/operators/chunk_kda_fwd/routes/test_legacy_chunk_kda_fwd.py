@@ -26,12 +26,12 @@ def test_legacy_route_case(safe_gate):
     q = torch.randn(B, H_k, T, K, device="npu", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn(B, H_v, T, V, device="npu", dtype=torch.bfloat16)
-    gk = -torch.rand(B, H_v, T, K, device="npu", dtype=torch.float32).cumsum(2)
+    g = -torch.rand(B, H_v, T, K, device="npu", dtype=torch.float32) * 0.01
     beta = torch.sigmoid(torch.randn(B, H_v, T, device="npu", dtype=torch.float32))
     outputs = torch.ops.npu.npu_chunk_kda_fwd(
-        q, k, v, gk, beta, K ** -0.5, C,
+        q, k, v, g, beta, K ** -0.5, C,
         layout="BNSD", output_final_state=True, safe_gate=safe_gate,
     )
     o, final_state = outputs[:2]
     torch.npu.synchronize()
-    assert o.shape == v.shape and final_state.dtype == torch.float32
+    assert o.shape == (B, T, H_v, V) and final_state.dtype == torch.float32

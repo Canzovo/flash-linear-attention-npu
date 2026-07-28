@@ -13,24 +13,23 @@ namespace optiling {
 namespace {
 constexpr size_t INPUT_Q_IDX = 0;
 constexpr size_t INPUT_V_IDX = 2;
-constexpr size_t INPUT_INITIAL_IDX = 5;
-constexpr size_t INPUT_CU_SEQLENS_IDX = 6;
-constexpr size_t INPUT_CHUNK_INDICES_IDX = 7;
+constexpr size_t INPUT_CU_SEQLENS_IDX = 5;
+constexpr size_t INPUT_CHUNK_INDICES_IDX = 6;
 constexpr size_t ATTR_SCALE_IDX = 0;
 constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
-constexpr size_t ATTR_TOTAL_CHUNKS_IDX = 3;
-constexpr size_t ATTR_SAFE_GATE_IDX = 4;
+constexpr size_t ATTR_SAFE_GATE_IDX = 2;
+constexpr size_t ATTR_LOGICAL_BATCH_IDX = 3;
+constexpr size_t ATTR_LOGICAL_SEQLEN_IDX = 4;
+constexpr size_t ATTR_LOGICAL_Q_HEADS_IDX = 5;
+constexpr size_t ATTR_LOGICAL_V_HEADS_IDX = 6;
+constexpr size_t ATTR_LOGICAL_K_DIM_IDX = 7;
+constexpr size_t ATTR_LOGICAL_V_DIM_IDX = 8;
 constexpr uint64_t KDA_SOLVE_SCRATCH_SLOTS = 5;
 constexpr uint64_t KDA_SOLVE_PIPELINE_DEPTH = 4;
 constexpr uint64_t KDA_SCORE_QUEUE_SLOTS = 4;
 constexpr uint64_t KDA_SCORE_SCRATCH_PLANES = 3;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_BATCH_MODE = 1;
-constexpr size_t DIM_B = 0;
-constexpr size_t DIM_H = 1;
-constexpr size_t DIM_T = 2;
-constexpr size_t DIM_D = 3;
-
 uint64_t AlignWorkspace(uint64_t bytes)
 {
     return (bytes + KDA_WORKSPACE_ALIGN - 1) / KDA_WORKSPACE_ALIGN * KDA_WORKSPACE_ALIGN;
@@ -73,13 +72,24 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
     if (qDesc == nullptr || attrPtr == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    auto qShape = context->GetOptionalInputShape(INPUT_Q_IDX)->GetStorageShape();
-    auto vShape = context->GetOptionalInputShape(INPUT_V_IDX)->GetStorageShape();
     const float scale = static_cast<float>(*(attrPtr->GetAttrPointer<double>(ATTR_SCALE_IDX)));
     const int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
-    const int64_t totalChunks = *(attrPtr->GetAttrPointer<int64_t>(ATTR_TOTAL_CHUNKS_IDX));
     const bool safeGate = *(attrPtr->GetAttrPointer<bool>(ATTR_SAFE_GATE_IDX));
-    const int64_t batch = qShape.GetDim(DIM_B);
+    const int64_t batch = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_BATCH_IDX));
+    const int64_t seqlen = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_SEQLEN_IDX));
+    const int64_t qHeads = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_Q_HEADS_IDX));
+    const int64_t vHeads = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_HEADS_IDX));
+    const int64_t kDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_K_DIM_IDX));
+    const int64_t vDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_DIM_IDX));
+    if (batch <= 0 || seqlen <= 0 || qHeads <= 0 || vHeads <= 0 ||
+        kDim <= 0 || vDim <= 0 || vHeads % qHeads != 0) {
+        return ge::GRAPH_FAILED;
+    }
+    const bool hasCuSeqlens = context->GetOptionalInputTensor(INPUT_CU_SEQLENS_IDX) != nullptr;
+    const auto chunkMetadata = context->GetOptionalInputShape(INPUT_CHUNK_INDICES_IDX);
+    const int64_t totalChunks = hasCuSeqlens
+        ? (chunkMetadata == nullptr ? 0 : chunkMetadata->GetStorageShape().GetShapeSize() / 4)
+        : (seqlen + chunkSize - 1) / chunkSize;
     bool isVarLen = false;
     int64_t seqNum = 0;
     if (!ResolveSequenceInfo(context, chunkSize, totalChunks, batch, isVarLen, seqNum)) {
@@ -91,8 +101,8 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
     context->SetBlockDim(blockDim);
     const uint64_t dataBytes = qDesc->GetDataType() == ge::DT_FLOAT ? sizeof(float) : sizeof(uint16_t);
     const uint64_t tokenHeadCount = static_cast<uint64_t>(batch) *
-                                    static_cast<uint64_t>(vShape.GetDim(DIM_H)) *
-                                    static_cast<uint64_t>(qShape.GetDim(DIM_T));
+                                    static_cast<uint64_t>(vHeads) *
+                                    static_cast<uint64_t>(seqlen);
     const uint64_t matrixBytes = tokenHeadCount * static_cast<uint64_t>(chunkSize) * sizeof(float);
     const uint64_t aqkFp32Offset = 0;
     const uint64_t akkFp32Offset = AlignWorkspace(aqkFp32Offset + matrixBytes);
@@ -102,22 +112,22 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
                                 static_cast<uint64_t>(chunkSize) * static_cast<uint64_t>(chunkSize) * sizeof(float);
     const uint64_t scoreBytes = static_cast<uint64_t>(blockDim) * KDA_SCORE_QUEUE_SLOTS *
                                 KDA_SCORE_SCRATCH_PLANES * static_cast<uint64_t>(chunkSize) *
-                                static_cast<uint64_t>(qShape.GetDim(DIM_D)) * dataBytes;
+                                static_cast<uint64_t>(kDim) * dataBytes;
     const uint64_t userWorkspaceBytes = AlignWorkspace(scratchOffset + AlignWorkspace(solveBytes) + scoreBytes);
     context->GetWorkspaceSizes(1)[0] = platform.GetLibApiWorkSpaceSize() + userWorkspaceBytes;
 
     ChunkKdaFwdPrepareTilingData tiling;
     tiling.set_batch(batch);
     tiling.set_seqNum(seqNum);
-    tiling.set_qHeadNum(qShape.GetDim(DIM_H));
-    tiling.set_vHeadNum(vShape.GetDim(DIM_H));
-    tiling.set_seqlen(qShape.GetDim(DIM_T));
-    tiling.set_kHeadDim(qShape.GetDim(DIM_D));
-    tiling.set_vHeadDim(vShape.GetDim(DIM_D));
+    tiling.set_qHeadNum(qHeads);
+    tiling.set_vHeadNum(vHeads);
+    tiling.set_seqlen(seqlen);
+    tiling.set_kHeadDim(kDim);
+    tiling.set_vHeadDim(vDim);
     tiling.set_chunkSize(chunkSize);
     tiling.set_totalChunks(totalChunks);
     tiling.set_scale(scale);
-    tiling.set_hasInitialState(context->GetOptionalInputTensor(INPUT_INITIAL_IDX) != nullptr);
+    tiling.set_hasInitialState(false);
     tiling.set_isVarLen(isVarLen);
     tiling.set_safeGate(safeGate);
     tiling.set_prepareUsedCoreNum(blockDim);

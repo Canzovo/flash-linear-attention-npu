@@ -26,6 +26,12 @@ def main():
     parser.add_argument("--output", default="outputs/chunk_kda_fwd_msopprof")
     parser.add_argument("--launch-count", type=int, default=20)
     parser.add_argument("--warm-up", type=int, default=5)
+    parser.add_argument(
+        "--replay-mode",
+        choices=("application", "kernel", "range"),
+        default="application",
+    )
+    parser.add_argument("--kill", choices=("on", "off"), default="on")
     args = parser.parse_args()
     ids = case_ids(tag="performance", route="ascendc")
     if not ids:
@@ -41,7 +47,8 @@ def main():
     command = [
         "msopprof", f"--application={application}", f"--output={args.output}",
         "--aic-metrics=BasicInfo", f"--launch-count={args.launch_count}",
-        f"--warm-up={args.warm_up}", "--kill=off",
+        f"--warm-up={args.warm_up}", f"--replay-mode={args.replay_mode}",
+        f"--kill={args.kill}",
     ]
     if args.dry_run:
         print(" ".join(shlex.quote(part) for part in command))

@@ -31,8 +31,10 @@
       "定长/变长序列",
       "四种显式 layout",
       "可选初始/最终状态",
-      "可选中间量",
-      "safe_gate 数值稳定模式"
+      "FLA 重计算输出策略",
+      "raw gate 和已激活 gate",
+      "safe_gate true/false",
+      "state_v_first true/false"
     ],
     "routes": [
       "ascendc",
@@ -65,20 +67,17 @@
     ],
     "known_limits": [
       "chunk_size 仅支持 64/128；K/V 均须在 [16,256] 且为 16 的倍数；交付矩阵覆盖 K=128、V=128/256。",
-      "H_k/H_v 必须在 [1,128] 且 H_v % H_k == 0；TND 仅支持 H_k=1，多 head rank3 使用 NTD。",
+      "H_k/H_v 必须在 [1,128] 且 H_v % H_k == 0；TND/NTD 均支持多 head。",
       "变长序列的 cu_seqlens 至少含首尾、非递减且末项等于 T；单次最多 1024 条逻辑序列。",
       "显式 chunk_indices 必须完整、合法并严格采用 sequence-major 规范顺序。",
-      "safe_gate 支持 false/true；raw gate 仍应先调用 kda_gate_cumsum，transpose_state_layout 当前必须为 false。"
+      "use_gate_in_kernel=true 时内部计算 -exp(A_log)*softplus(g+dt_bias) 或 lower_bound*sigmoid(exp(A_log)*(g+dt_bias))；false 时 g 为已激活的自然对数门控。",
+      "attn_out 固定为 BSND/TND，final_state 为 sequence-major；反向中间量固定为 BNSD/NTD，h 的末两维服从 state_v_first。"
     ],
     "required_outputs": [
-      "o",
-      "final_state",
-      "g",
+      "attn_out",
       "Aqk/Akk",
-      "w/qg/kg",
-      "u/v_new",
-      "h",
-      "initial_state_out"
+      "按属性可选的 final_state/gk/w/u/qg/kg/v_new/h",
+      "Python initial_state 透传"
     ],
     "accuracy_case_ids": [
       "chunk_kda_fwd_main_accuracy",
@@ -141,7 +140,7 @@
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BNSD",
       "attrs": {
@@ -149,9 +148,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": true,
-        "return_intermediate": true,
-        "safe_gate": true,
-        "transpose_state_layout": false
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": true
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -174,9 +173,9 @@
         "return_code": "ACLNN_SUCCESS",
         "finite_outputs": true,
         "compare_outputs": [
-          "o",
+          "attn_out",
           "final_state",
-          "g",
+          "gk",
           "Aqk/Akk",
           "w/qg/kg",
           "u/v_new",
@@ -205,7 +204,7 @@
       },
       "dtype": {
         "q_k_v": "bfloat16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BSND",
       "attrs": {
@@ -213,9 +212,9 @@
         "scale": 0.0883883476,
         "chunk_size": 128,
         "output_final_state": true,
-        "return_intermediate": false,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": false,
+        "return_intermediate_states": false,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -235,9 +234,9 @@
         "return_code": "ACLNN_SUCCESS",
         "finite_outputs": true,
         "compare_outputs": [
-          "o",
+          "attn_out",
           "final_state",
-          "g",
+          "gk",
           "Aqk/Akk",
           "w/qg/kg",
           "u/v_new",
@@ -267,7 +266,7 @@
       },
       "dtype": {
         "q_k_v": "bfloat16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "NTD",
       "attrs": {
@@ -275,9 +274,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": true,
-        "return_intermediate": true,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -310,9 +309,9 @@
         "return_code": "ACLNN_SUCCESS",
         "finite_outputs": true,
         "compare_outputs": [
-          "o",
+          "attn_out",
           "final_state",
-          "g",
+          "gk",
           "Aqk/Akk",
           "w/qg/kg",
           "u/v_new",
@@ -341,7 +340,7 @@
       },
       "dtype": {
         "q_k_v": "bfloat16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "TND",
       "attrs": {
@@ -349,9 +348,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": true,
-        "return_intermediate": true,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -372,9 +371,9 @@
         "return_code": "ACLNN_SUCCESS",
         "finite_outputs": true,
         "compare_outputs": [
-          "o",
+          "attn_out",
           "final_state",
-          "g",
+          "gk",
           "Aqk/Akk",
           "w/qg/kg",
           "u/v_new",
@@ -397,25 +396,36 @@
         "K": 128,
         "V": 128,
         "chunk_size": 64,
-        "N_c": 128
+        "N_c": 132
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "NTD",
       "attrs": {
         "layout": "NTD",
         "scale": 0.0883883476,
         "chunk_size": 64,
-        "output_final_state": true,
-        "return_intermediate": true,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "output_final_state": false,
+        "disable_recompute": false,
+        "return_intermediate_states": false,
+        "safe_gate": true,
+        "use_gate_in_kernel": false
       },
       "optional_inputs": {
-        "initial_state": "present",
-        "cu_seqlens": null,
+        "initial_state": null,
+        "cu_seqlens": [
+          0,
+          731,
+          1621,
+          2644,
+          3751,
+          5040,
+          5817,
+          6762,
+          8192
+        ],
         "chunk_indices": null
       },
       "soc": [
@@ -431,7 +441,7 @@
       "expect": {
         "return_code": "ACLNN_SUCCESS",
         "metric": "msopprof",
-        "requirement": "no_regression"
+        "requirement": "KdaGateCumsum 与完整 ChunkKdaFwd 总耗时不回退于 3.6 ms 基线"
       },
       "seed": 2029
     },
@@ -451,7 +461,7 @@
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "TND",
       "attrs": {
@@ -459,9 +469,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": false,
-        "return_intermediate": false,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": false,
+        "return_intermediate_states": false,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -504,7 +514,7 @@
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BNSD",
       "attrs": {
@@ -512,9 +522,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": true,
-        "return_intermediate": true,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -568,7 +578,7 @@
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BNSD",
       "attrs": {
@@ -576,9 +586,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": true,
-        "return_intermediate": "partial",
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": false,
+        "return_intermediate_states": true,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": null,
@@ -619,7 +629,7 @@
       },
       "dtype": {
         "q_k_v": "bfloat16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "NTD",
       "attrs": {
@@ -627,9 +637,9 @@
         "scale": 0.0883883476,
         "chunk_size": 64,
         "output_final_state": true,
-        "return_intermediate": true,
-        "safe_gate": false,
-        "transpose_state_layout": false
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -683,7 +693,7 @@
       },
       "dtype": {
         "q_k_v": "bfloat16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BSND",
       "attrs": {
@@ -742,7 +752,7 @@
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BSND",
       "attrs": {
@@ -804,7 +814,7 @@
       },
       "dtype": {
         "q_k_v": "bfloat16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BSND",
       "attrs": {
@@ -863,7 +873,7 @@
       },
       "dtype": {
         "q_k_v": "float16",
-        "gk_beta_state": "float32"
+        "g_beta_state": "float32"
       },
       "layout": "BSND",
       "attrs": {

@@ -38,7 +38,8 @@ namespace {
 
 constexpr uint64_t WORKSPACE_ALIGN = 512;
 constexpr uint64_t SOLVE_SCRATCH_SLOTS = 5;
-constexpr uint64_t SCORE_QUEUE_SLOTS = 2;
+constexpr uint64_t SOLVE_PIPELINE_DEPTH = 4;
+constexpr uint64_t SCORE_QUEUE_SLOTS = 4;
 constexpr uint64_t SCORE_SCRATCH_PLANES = 3;
 
 struct DirectKdaTilingData {
@@ -90,11 +91,10 @@ struct DirectKdaTilingData {
     int64_t outputUsedCoreNum;
     int64_t outputQgScaledOffset;
     int64_t outputScratchOffset;
-    bool outputSequenceMajor;
 };
 
 struct DirectOutputs {
-    at::Tensor o;
+    at::Tensor attnOut;
     at::Tensor finalState;
     at::Tensor aqk;
     at::Tensor akk;
@@ -153,7 +153,7 @@ __global__ __aicore__ void ChunkKdaPrepareDirectKernel(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta, GM_ADDR initialState,
     GM_ADDR aqk, GM_ADDR akk, GM_ADDR qg, GM_ADDR workspace, DirectKdaTilingData tiling)
 {
-    KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::SetSysWorkspaceForce(workspace);
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     if (userWorkspace == nullptr) {
@@ -161,7 +161,7 @@ __global__ __aicore__ void ChunkKdaPrepareDirectKernel(
     }
     AscendC::TPipe pipe;
     KdaPrepare::RunChunkKdaPrepare<SAFE_GATE, T, float, float>(
-        q, k, v, gk, beta, initialState, nullptr, nullptr, aqk, akk, qg,
+        q, k, v, gk, beta, nullptr, nullptr, nullptr, aqk, akk, qg,
         userWorkspace + tiling.prepareQgScaledOffset,
         userWorkspace + tiling.prepareWSeedOffset,
         userWorkspace + tiling.prepareUSeedOffset,
@@ -174,7 +174,7 @@ __global__ __aicore__ void ChunkKdaPostWuDirectKernel(
     GM_ADDR akk, GM_ADDR w, GM_ADDR u, GM_ADDR kg, GM_ADDR vNew,
     GM_ADDR workspace, DirectKdaTilingData tiling)
 {
-    KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::SetSysWorkspaceForce(workspace);
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     if (userWorkspace == nullptr) {
@@ -215,7 +215,6 @@ __aicore__ inline void RunChunkKdaFwdHDirect(
     stateTiling.numChunksWorkspaceOffset = tiling.fwdHNumChunksWorkspaceOffset;
     stateTiling.useG = false;
     stateTiling.useGk = true;
-    stateTiling.useExp2 = true;
 
     using FwdHKernel = Catlass::Gemm::Kernel::GDNFwdHKernel<
         T, float, float, float, TileShapes, true, false, true>;
@@ -232,7 +231,7 @@ __global__ __aicore__ void ChunkKdaFwdHDirectKernel(
     GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR workspace,
     DirectKdaTilingData tiling)
 {
-    KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::SetSysWorkspaceForce(workspace);
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     if (userWorkspace == nullptr) {
@@ -250,10 +249,10 @@ __global__ __aicore__ void ChunkKdaFwdHDirectKernel(
 template <typename T>
 __global__ __aicore__ void ChunkKdaOutputDirectKernel(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta, GM_ADDR initialState,
-    GM_ADDR aqk, GM_ADDR vNew, GM_ADDR h, GM_ADDR o, GM_ADDR workspace,
+    GM_ADDR aqk, GM_ADDR vNew, GM_ADDR h, GM_ADDR attnOut, GM_ADDR workspace,
     DirectKdaTilingData tiling)
 {
-    KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::SetSysWorkspaceForce(workspace);
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     if (userWorkspace == nullptr) {
@@ -262,7 +261,7 @@ __global__ __aicore__ void ChunkKdaOutputDirectKernel(
     AscendC::TPipe pipe;
     KdaFinalize::RunChunkKdaOutput<T, float, float>(
         q, k, v, gk, beta, initialState, nullptr, nullptr,
-        userWorkspace + tiling.outputQgScaledOffset, aqk, vNew, h, o,
+        userWorkspace + tiling.outputQgScaledOffset, aqk, vNew, h, attnOut,
         userWorkspace, tiling, pipe);
 }
 
@@ -292,7 +291,7 @@ void LaunchStages(
         (GM_ADDR)workspace.Get(), tiling);
     ChunkKdaOutputDirectKernel<T><<<blockDim, nullptr, stream>>>(
         ptr(q), ptr(k), ptr(v), ptr(gk), ptr(beta), initialPtr,
-        ptr(outputs.aqk), ptr(outputs.vNew), ptr(outputs.h), ptr(outputs.o),
+        ptr(outputs.aqk), ptr(outputs.vNew), ptr(outputs.h), ptr(outputs.attnOut),
         (GM_ADDR)workspace.Get(), tiling);
 }
 
@@ -307,7 +306,7 @@ DirectOutputs MakeOutputs(
     int64_t totalChunks = (seqlen + chunkSize - 1) / chunkSize;
     auto fp32 = q.options().dtype(at::kFloat);
     return {
-        at::empty({batch, hv, seqlen, vdim}, q.options()),
+        at::empty({batch, seqlen, hv, vdim}, q.options()),
         outputFinalState ? at::empty({batch, hv, kdim, vdim}, fp32) : at::empty({1}, fp32),
         at::empty({batch, hv, seqlen, chunkSize}, q.options()),
         at::empty({batch, hv, seqlen, chunkSize}, q.options()),
@@ -373,7 +372,7 @@ ChunkKdaFwdDirectMeta(
     auto outputs = MakeOutputs(q, v, chunkSize, outputFinalState);
     c10::optional<at::Tensor> finalState = outputFinalState ?
         c10::optional<at::Tensor>(outputs.finalState) : c10::nullopt;
-    return {outputs.o, finalState, gk, outputs.aqk, outputs.akk, outputs.w,
+    return {outputs.attnOut, finalState, gk, outputs.aqk, outputs.akk, outputs.w,
             outputs.u, outputs.qg, outputs.kg, outputs.vNew, outputs.h, initialState};
 }
 
@@ -406,8 +405,9 @@ ChunkKdaFwdDirectNpu(
     const uint64_t matrixFp32Bytes = tokenHeadCount * chunkSize * sizeof(float);
     const uint64_t akkFp32Offset = AlignUp(aqkFp32Offset + matrixFp32Bytes);
     const uint64_t prepareScratchOffset = AlignUp(akkFp32Offset + matrixFp32Bytes);
-    const uint64_t solveScratch = static_cast<uint64_t>(blockDim) * SOLVE_SCRATCH_SLOTS *
-                                  chunkSize * chunkSize * sizeof(float);
+    const uint64_t solvePipelineDepth = safeGate ? SOLVE_PIPELINE_DEPTH : 1;
+    const uint64_t solveScratch = static_cast<uint64_t>(blockDim) * solvePipelineDepth *
+                                  SOLVE_SCRATCH_SLOTS * chunkSize * chunkSize * sizeof(float);
     const uint64_t scoreScratch = static_cast<uint64_t>(blockDim) * SCORE_QUEUE_SLOTS *
                                   SCORE_SCRATCH_PLANES * chunkSize * q.size(3) * dataBytes;
     const uint64_t prepareEnd = prepareScratchOffset + AlignUp(solveScratch) + scoreScratch;
@@ -432,7 +432,6 @@ ChunkKdaFwdDirectNpu(
     stateContext.stateDataType = optiling::GDN_FWD_H_DTYPE_FP32;
     stateContext.useG = false;
     stateContext.useGk = true;
-    stateContext.useExp2 = true;
     stateContext.storeFinalState = outputFinalState;
     stateContext.chunkSize = chunkSize;
     stateContext.aicCoreNum = blockDim;
@@ -462,7 +461,7 @@ ChunkKdaFwdDirectNpu(
     tiling.chunkSize = chunkSize;
     tiling.totalChunks = totalChunks;
     tiling.scale = static_cast<float>(scale);
-    tiling.hasInitialState = initialState.has_value();
+    tiling.hasInitialState = false;
     tiling.outputFinalState = outputFinalState;
     tiling.isVarLen = false;
     tiling.safeGate = safeGate;
@@ -500,7 +499,6 @@ ChunkKdaFwdDirectNpu(
     tiling.outputUsedCoreNum = static_cast<int64_t>(blockDim);
     tiling.outputQgScaledOffset = static_cast<int64_t>(qgScaledOffset);
     tiling.outputScratchOffset = static_cast<int64_t>(outputScratchOffset);
-    tiling.outputSequenceMajor = false;
 
     auto stream = c10_npu::getCurrentNPUStream().stream(false);
     auto ret = aclrtMemsetAsync(workspace.Get(), workspace.Size(), 0, workspace.Size(), stream);
@@ -529,7 +527,7 @@ ChunkKdaFwdDirectNpu(
 
     c10::optional<at::Tensor> finalState = outputFinalState ?
         c10::optional<at::Tensor>(outputs.finalState) : c10::nullopt;
-    return {outputs.o, finalState, gk, outputs.aqk, outputs.akk, outputs.w, outputs.u,
+    return {outputs.attnOut, finalState, gk, outputs.aqk, outputs.akk, outputs.w, outputs.u,
             outputs.qg, outputs.kg, outputs.vNew, outputs.h, initialState};
 }
 

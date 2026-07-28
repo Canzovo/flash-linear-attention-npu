@@ -19,8 +19,6 @@
 using namespace op;
 
 namespace l0op {
-const aclTensor *ZerosLike(const aclTensor *self, aclOpExecutor *executor);
-
 OP_TYPE_REGISTER(ChunkKdaFwdPrepare);
 OP_TYPE_REGISTER(ChunkKdaFwdPostWu);
 OP_TYPE_REGISTER(ChunkKdaFwdFinalize);
@@ -98,8 +96,7 @@ KdaCoreOutputs KdaChunkForward(
     bool outputFinalState,
     int64_t totalChunks,
     bool safeGate,
-    bool outputSequenceMajor,
-    const aclTensor *oOut,
+    const aclTensor *attnOut,
     const aclTensor *finalStateOut,
     const aclTensor *aqkOut,
     const aclTensor *akkOut,
@@ -113,7 +110,7 @@ KdaCoreOutputs KdaChunkForward(
 {
     L0_DFX(KdaChunkForward, q, k, v, gk, beta, initialStateOptional, cuSeqlensOptional, chunkIndicesOptional,
            scale, chunkSize,
-           outputFinalState, totalChunks, safeGate, outputSequenceMajor, oOut, finalStateOut, aqkOut, akkOut,
+           outputFinalState, totalChunks, safeGate, attnOut, finalStateOut, aqkOut, akkOut,
            wOut, uOut, qgOut, kgOut, vNewOut, hOut);
 
     const aclTensor *actualCuSeqlens = nullptr;
@@ -150,11 +147,21 @@ KdaCoreOutputs KdaChunkForward(
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     }
 
+    const auto &qShape = q->GetViewShape();
+    const auto &vShape = v->GetViewShape();
+    const int64_t logicalBatch = qShape.GetDim(0);
+    const int64_t logicalQHeads = qShape.GetDim(1);
+    const int64_t logicalSeqlen = qShape.GetDim(2);
+    const int64_t logicalKDim = qShape.GetDim(3);
+    const int64_t logicalVHeads = vShape.GetDim(1);
+    const int64_t logicalVDim = vShape.GetDim(3);
+
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkKdaFwdPrepare,
-        OP_INPUT(q, k, v, gk, beta, initialStateOptional, actualCuSeqlens, actualChunkIndices),
+        OP_INPUT(q, k, v, gk, beta, actualCuSeqlens, actualChunkIndices),
         OP_OUTPUT(aqkOut, akkOut, qgOut, qgScaled, wSeed, uSeed),
-        OP_ATTR(scale, chunkSize, outputFinalState, totalChunks, safeGate));
+        OP_ATTR(scale, chunkSize, safeGate, logicalBatch, logicalSeqlen,
+                logicalQHeads, logicalVHeads, logicalKDim, logicalVDim));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwdPrepare failed.");
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -162,23 +169,18 @@ KdaCoreOutputs KdaChunkForward(
 
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkKdaFwdPostWu,
-        OP_INPUT(q, k, v, gk, beta, initialStateOptional, actualCuSeqlens, actualChunkIndices,
-                 wSeed, akkOut, uSeed),
+        OP_INPUT(k, gk, wSeed, akkOut, uSeed, actualCuSeqlens, actualChunkIndices),
         OP_OUTPUT(wOut, uOut, kgOut, vNewOut),
-        OP_ATTR(scale, chunkSize, outputFinalState, totalChunks, safeGate));
+        OP_ATTR(chunkSize, logicalBatch, logicalSeqlen, logicalQHeads,
+                logicalVHeads, logicalKDim, logicalVDim));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwdPostWu failed.");
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     }
 
-    const aclTensor *neutralGForH = ZerosLike(beta, executor);
-    if (neutralGForH == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "failed to allocate neutral scalar gate for fwd_h.");
-        return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-    }
     auto hResult = ChunkGatedDeltaRuleFwdH(
-        kgOut, wOut, uOut, neutralGForH, gk, initialStateOptional, cuSeqlensOptional,
-        chunkIndicesOptional, true, chunkSize, false, hOut, vNewOut,
+        kgOut, wOut, uOut, nullptr, gk, initialStateOptional, cuSeqlensOptional,
+        chunkIndicesOptional, outputFinalState, chunkSize, hOut, vNewOut,
         finalStateOut, executor);
     if (hResult[0] == nullptr || hResult[1] == nullptr || hResult[2] == nullptr) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ChunkGatedDeltaRuleFwdH launch failed.");
@@ -187,15 +189,15 @@ KdaCoreOutputs KdaChunkForward(
 
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkKdaFwdFinalize,
-        OP_INPUT(q, k, v, gk, beta, initialStateOptional, actualCuSeqlens, actualChunkIndices,
-                 qgScaled, aqkOut, vNewOut, hOut),
-        OP_OUTPUT(oOut),
-        OP_ATTR(scale, chunkSize, outputFinalState, totalChunks, safeGate, outputSequenceMajor));
+        OP_INPUT(qgScaled, aqkOut, vNewOut, hOut, actualCuSeqlens, actualChunkIndices),
+        OP_OUTPUT(attnOut),
+        OP_ATTR(chunkSize, logicalBatch, logicalSeqlen, logicalVHeads,
+                logicalVHeads, logicalKDim, logicalVDim, totalChunks));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwdFinalize failed.");
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     }
-    return {oOut, finalStateOut, aqkOut, akkOut, wOut, uOut, qgOut, kgOut, vNewOut, hOut};
+    return {attnOut, finalStateOut, aqkOut, akkOut, wOut, uOut, qgOut, kgOut, vNewOut, hOut};
 }
 
 } // namespace l0op

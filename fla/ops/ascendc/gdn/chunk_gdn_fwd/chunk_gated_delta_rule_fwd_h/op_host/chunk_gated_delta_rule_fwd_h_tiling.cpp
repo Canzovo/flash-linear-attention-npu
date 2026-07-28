@@ -42,12 +42,12 @@ static constexpr size_t INPUT_CHUNK_INDICES_IDX = 7;
 
 static constexpr size_t ATTR_STORE_FINAL_STATE_IDX = 0;
 static constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
-static constexpr size_t ATTR_USE_EXP2_IDX = 2;
-
-static constexpr size_t DIM_BATCH = 0;
-static constexpr size_t DIM_HEAD_NUM = 1;
-static constexpr size_t DIM_SEQLEN = 2;
-static constexpr size_t DIM_HEAD_DIM = 3;
+static constexpr size_t ATTR_LOGICAL_BATCH_IDX = 2;
+static constexpr size_t ATTR_LOGICAL_SEQLEN_IDX = 3;
+static constexpr size_t ATTR_LOGICAL_K_HEADS_IDX = 4;
+static constexpr size_t ATTR_LOGICAL_V_HEADS_IDX = 5;
+static constexpr size_t ATTR_LOGICAL_K_DIM_IDX = 6;
+static constexpr size_t ATTR_LOGICAL_V_DIM_IDX = 7;
 
 static constexpr uint32_t TILING_KEY_V128 = 1;
 static constexpr uint32_t TILING_KEY_V256 = 2;
@@ -69,7 +69,6 @@ static void ChunkGatedDeltaRuleFwdHTilingDataPrint(gert::TilingContext *context,
     OP_LOGD(nodeName, "=== storeFinalState: %ld", tiling.get_storeFinalState());
     OP_LOGD(nodeName, "=== useG: %d", tiling.get_useG());
     OP_LOGD(nodeName, "=== useGk: %d", tiling.get_useGk());
-    OP_LOGD(nodeName, "=== useExp2: %d", tiling.get_useExp2());
     OP_LOGD(nodeName, "=== dataType: %ld", tiling.get_dataType());
     OP_LOGD(nodeName, "=== isVariedLen: %ld", tiling.get_isVariedLen());
     OP_LOGD(nodeName, "=== shapeBatch: %ld", tiling.get_shapeBatch());
@@ -81,9 +80,6 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
 {
     OP_LOGD(context->GetNodeName(), "Tiling4ChunkGatedDeltaRuleFwdH start.");
     ChunkGatedDeltaRuleFwdHTilingData tiling;
-
-    gert::Shape kStorageShape = context->GetOptionalInputShape(INPUT_K_IDX)->GetStorageShape();
-    gert::Shape uStorageShape = context->GetOptionalInputShape(INPUT_U_IDX)->GetStorageShape();
 
     auto cuSeqlensTensor = context->GetOptionalInputTensor(INPUT_SEQLENS_IDX);
     auto initialStateTensor = context->GetOptionalInputTensor(INPUT_INITIAL_STATE_IDX);
@@ -100,20 +96,25 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     auto attrPtr = context->GetAttrs();
     bool storeFinalState = *(attrPtr->GetAttrPointer<bool>(ATTR_STORE_FINAL_STATE_IDX));
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
-    bool useExp2 = *(attrPtr->GetAttrPointer<bool>(ATTR_USE_EXP2_IDX));
+    int64_t logicalBatch = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_BATCH_IDX));
+    int64_t logicalSeqlen = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_SEQLEN_IDX));
+    int64_t logicalKHeads = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_K_HEADS_IDX));
+    int64_t logicalVHeads = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_HEADS_IDX));
+    int64_t logicalKDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_K_DIM_IDX));
+    int64_t logicalVDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_DIM_IDX));
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
 
     ChunkGatedDeltaRuleFwdHTilingContext tilingCtx{};
-    tilingCtx.seqlen = kStorageShape.GetDim(DIM_SEQLEN);
-    tilingCtx.kNumHead = kStorageShape.GetDim(DIM_HEAD_NUM);
-    tilingCtx.kHeadDim = kStorageShape.GetDim(DIM_HEAD_DIM);
-    tilingCtx.vNumHead = uStorageShape.GetDim(DIM_HEAD_NUM);
-    tilingCtx.vHeadDim = uStorageShape.GetDim(DIM_HEAD_DIM);
-    tilingCtx.shapeBatchDim = kStorageShape.GetDim(DIM_BATCH);
+    tilingCtx.seqlen = logicalSeqlen;
+    tilingCtx.kNumHead = logicalKHeads;
+    tilingCtx.kHeadDim = logicalKDim;
+    tilingCtx.vNumHead = logicalVHeads;
+    tilingCtx.vHeadDim = logicalVDim;
+    tilingCtx.shapeBatchDim = logicalBatch;
     tilingCtx.hasCuSeqlens = cuSeqlensTensor != nullptr;
     tilingCtx.cuSeqlensDim0 =
-        cuSeqlensTensor != nullptr ? cuSeqlensTensor->GetStorageShape().GetDim(DIM_BATCH) : 0;
+        cuSeqlensTensor != nullptr ? cuSeqlensTensor->GetStorageShape().GetDim(0) : 0;
     tilingCtx.dataType = GdnFwdHDtypeToEnum(context->GetInputTensor(0)->GetDataType());
     tilingCtx.gDataType = GdnFwdHDtypeToEnum(gateTensor->GetDataType());
     tilingCtx.useInitialState = useInitialState;
@@ -123,12 +124,17 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tilingCtx.storeFinalState = storeFinalState;
     tilingCtx.chunkSize = chunkSize;
     tilingCtx.useGk = useGk;
-    tilingCtx.useExp2 = useExp2;
     tilingCtx.aicCoreNum = ascendcPlatform.GetCoreNumAic();
     tilingCtx.libApiWorkSpaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
 
-    if (tilingCtx.vNumHead % tilingCtx.kNumHead != 0) {
-        OP_LOGE(context->GetNodeName(), "Check head num failed, vNumHead should be divisible by kNumHead.");
+    if (logicalBatch <= 0 || logicalSeqlen <= 0 || logicalKHeads <= 0 ||
+        logicalVHeads <= 0 || logicalKDim <= 0 || logicalVDim <= 0 ||
+        tilingCtx.vNumHead % tilingCtx.kNumHead != 0) {
+        OP_LOGE(context->GetNodeName(),
+                "Check logical shape failed: batch=%ld, seqlen=%ld, kDim=%ld, vDim=%ld; "
+                "vNumHead (%ld) must be divisible by kNumHead (%ld).",
+                logicalBatch, logicalSeqlen, logicalKDim, logicalVDim,
+                tilingCtx.vNumHead, tilingCtx.kNumHead);
         return ge::GRAPH_FAILED;
     }
     if (tilingCtx.vHeadDim > V_DIM_256) {
@@ -168,7 +174,6 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tiling.set_tokenBatch(plainTiling.tokenBatch);
     tiling.set_useG(plainTiling.useG);
     tiling.set_useGk(plainTiling.useGk);
-    tiling.set_useExp2(plainTiling.useExp2);
     tiling.set_vWorkspaceOffset(plainTiling.vWorkspaceOffset);
     tiling.set_vUpdateWorkspaceOffset(plainTiling.vUpdateWorkspaceOffset);
     tiling.set_kDecayWorkspaceOffset(plainTiling.kDecayWorkspaceOffset);

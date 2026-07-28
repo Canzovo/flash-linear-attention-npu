@@ -53,7 +53,7 @@ static __simd_vf__ inline void AccumulateGateRowRegbase(__ubuf__ float *input, _
 }
 #endif
 
-template <typename T, bool SAFE_GATE>
+template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE>
 class KdaGateCumsumKernel {
 public:
     __aicore__ inline void Init(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
@@ -70,7 +70,6 @@ public:
         hv_ = static_cast<uint64_t>(tiling.hv);
         k_ = static_cast<uint64_t>(tiling.k);
         rank_ = static_cast<uint64_t>(tiling.rank);
-        layout_ = static_cast<uint64_t>(tiling.layout);
         chunkSize_ = static_cast<uint64_t>(tiling.chunkSize);
         seqNum_ = static_cast<uint64_t>(tiling.seqNum);
         hasCuSeqlens_ = tiling.hasCuSeqlens != 0;
@@ -84,6 +83,7 @@ public:
         pipe_->InitBuffer(outBuf_, GATE_PIPELINE_DEPTH * GATE_ROW_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(tmpBuf_, GATE_ROW_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(oneBuf_, GATE_ROW_ELEMENTS * sizeof(float));
+        pipe_->InitBuffer(biasBuf_, GATE_ROW_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(inBuf_, GATE_PIPELINE_DEPTH * GATE_ROW_ELEMENTS * sizeof(T));
         pipe_->InitBuffer(chunkBuf_, 2 * GATE_BULK_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(scalarBuf_, 32);
@@ -130,16 +130,10 @@ private:
 
     __aicore__ inline uint64_t Offset(uint64_t b, uint64_t t, uint64_t hv, uint64_t k) const
     {
-        if (layout_ == 1) {
+        if (rank_ == 4) {
             return ((b * hv_ + hv) * t_ + t) * k_ + k;
         }
-        if (layout_ == 3) {
-            return (hv * t_ + t) * k_ + k;
-        }
-        if (rank_ == 4) {
-            return ((b * t_ + t) * hv_ + hv) * k_ + k;
-        }
-        return (t * hv_ + hv) * k_ + k;
+        return (hv * t_ + t) * k_ + k;
     }
 
     __aicore__ inline void CopyVectorIn(LocalTensor<T> &dst, GlobalTensor<T> &src, uint64_t offset, uint64_t count)
@@ -240,45 +234,74 @@ private:
         return ptr[0];
     }
 
-    __aicore__ inline void ApplyGate(uint64_t hv, LocalTensor<float> &row)
+    __aicore__ inline void PrepareGate(uint64_t hv)
     {
-        if constexpr (SAFE_GATE) {
+        if constexpr (USE_GATE_IN_KERNEL) {
+            expA_ = ExpScalar(ReadFloat(aLog_, hv));
             if (hasDtBias_) {
-                LocalTensor<float> tmp = tmpBuf_.Get<float>();
-                CopyFloatVectorIn(tmp, dtBias_, hv * k_, k_);
+                LocalTensor<float> bias = biasBuf_.Get<float>();
+                CopyFloatVectorIn(bias, dtBias_, hv * k_, k_);
                 SetFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
                 WaitFlag<HardEvent::MTE2_V>(auxMte2ToVEvent_);
-                Add(row, row, tmp, static_cast<uint32_t>(k_));
+            }
+        }
+    }
+
+    __aicore__ inline void ApplyGate(LocalTensor<float> &row)
+    {
+        if constexpr (USE_GATE_IN_KERNEL) {
+            if (hasDtBias_) {
+                LocalTensor<float> bias = biasBuf_.Get<float>();
+                Add(row, row, bias, static_cast<uint32_t>(k_));
                 PipeBarrier<PIPE_V>();
             }
+            if constexpr (SAFE_GATE) {
+                Muls(row, row, expA_, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
 
-            float expA = hasALog_ ? ExpScalar(ReadFloat(aLog_, hv)) : 1.0f;
-            Muls(row, row, expA, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
+                LocalTensor<float> tmp = tmpBuf_.Get<float>();
+                Muls(tmp, row, -1.0f, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Exp(tmp, tmp, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Adds(tmp, tmp, 1.0f, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
 
-            LocalTensor<float> tmp = tmpBuf_.Get<float>();
-            Muls(tmp, row, -1.0f, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
-            Exp(tmp, tmp, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
-            Adds(tmp, tmp, 1.0f, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
-
-            LocalTensor<float> one = oneBuf_.Get<float>();
-            Duplicate(one, 1.0f, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
-            Div(row, one, tmp, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
-            Muls(row, row, lowerBound_, static_cast<uint32_t>(k_));
-            PipeBarrier<PIPE_V>();
+                LocalTensor<float> one = oneBuf_.Get<float>();
+                Duplicate(one, 1.0f, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Div(row, one, tmp, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Muls(row, row, lowerBound_, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+            } else {
+                LocalTensor<float> positive = oneBuf_.Get<float>();
+                LocalTensor<float> tmp = tmpBuf_.Get<float>();
+                Maxs(positive, row, 0.0f, static_cast<uint32_t>(k_));
+                Abs(tmp, row, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Muls(tmp, tmp, -1.0f, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Exp(tmp, tmp, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Adds(tmp, tmp, 1.0f, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Ln(tmp, tmp, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Add(row, positive, tmp, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+                Muls(row, row, -expA_, static_cast<uint32_t>(k_));
+                PipeBarrier<PIPE_V>();
+            }
         }
     }
 
     __aicore__ inline void ProcessTask(uint64_t task)
     {
+        uint64_t hv = hasCuSeqlens_ ? task % hv_ : (task / maxChunks_) % hv_;
+        PrepareGate(hv);
         if (!hasCuSeqlens_) {
             uint64_t chunk = task % maxChunks_;
-            uint64_t hv = (task / maxChunks_) % hv_;
             uint64_t b = task / (maxChunks_ * hv_);
             uint64_t start = chunk * chunkSize_;
             uint64_t end = start + chunkSize_;
@@ -288,7 +311,6 @@ private:
             ProcessChunk(b, hv, start, end);
             return;
         }
-        uint64_t hv = task % hv_;
         uint64_t seq = task / hv_;
         uint64_t seqStart = static_cast<uint64_t>(ReadInt64(cuSeqlens_, seq));
         uint64_t seqEnd = static_cast<uint64_t>(ReadInt64(cuSeqlens_, seq + 1));
@@ -304,9 +326,8 @@ private:
     __aicore__ inline void ProcessChunk(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
     {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        if constexpr (!SAFE_GATE && IsSameType<T, float>::value) {
-            if (k_ == GATE_BULK_COLS && chunkSize_ == GATE_BULK_ROWS &&
-                (layout_ == 1 || layout_ == 3)) {
+        if constexpr (!USE_GATE_IN_KERNEL && IsSameType<T, float>::value) {
+            if (k_ == GATE_BULK_COLS && chunkSize_ == GATE_BULK_ROWS) {
                 ProcessChunkBulkFp32(b, hv, start, end);
                 return;
             }
@@ -344,7 +365,7 @@ private:
                 outBuf_.Get<float>()[outputSlot * GATE_ROW_ELEMENTS];
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            if constexpr (!SAFE_GATE && IsSameType<T, float>::value) {
+            if constexpr (!USE_GATE_IN_KERNEL && IsSameType<T, float>::value) {
                 if ((k_ % 128) == 0) {
                     LocalTensor<float> input = inBuf_.Get<float>()[slot * GATE_ROW_ELEMENTS];
                     AccumulateGateRowRegbase(
@@ -361,7 +382,7 @@ private:
                 }
             } else {
                 MaterializeGateRow(slot, row);
-                ApplyGate(hv, row);
+                ApplyGate(row);
                 Muls(row, row, RCP_LN2, static_cast<uint32_t>(k_));
                 PipeBarrier<PIPE_V>();
                 Add(acc, acc, row, static_cast<uint32_t>(k_));
@@ -370,7 +391,7 @@ private:
             }
 #else
             MaterializeGateRow(slot, row);
-            ApplyGate(hv, row);
+            ApplyGate(row);
             Muls(row, row, RCP_LN2, static_cast<uint32_t>(k_));
             PipeBarrier<PIPE_V>();
             Add(acc, acc, row, static_cast<uint32_t>(k_));
@@ -442,6 +463,7 @@ private:
     TBuf<TPosition::VECCALC> outBuf_;
     TBuf<TPosition::VECCALC> tmpBuf_;
     TBuf<TPosition::VECCALC> oneBuf_;
+    TBuf<TPosition::VECCALC> biasBuf_;
     TBuf<TPosition::VECCALC> inBuf_;
     TBuf<TPosition::VECCALC> chunkBuf_;
     TBuf<TPosition::VECCALC> scalarBuf_;
@@ -458,35 +480,38 @@ private:
     uint64_t hv_ = 0;
     uint64_t k_ = 0;
     uint64_t rank_ = 0;
-    uint64_t layout_ = 0;
     uint64_t chunkSize_ = 0;
     uint64_t seqNum_ = 0;
     uint64_t maxChunks_ = 0;
     bool hasCuSeqlens_ = false;
     bool hasALog_ = false;
     bool hasDtBias_ = false;
+    float expA_ = 1.0f;
     float lowerBound_ = -5.0f;
     uint64_t usedCoreNum_ = 1;
 };
 
-template <typename T, bool SAFE_GATE>
+template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE>
 __aicore__ inline void RunKdaGateCumsum(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens, GM_ADDR gk,
                                         const KdaGateCumsumTilingData &tilingData, TPipe *pipe)
 {
-    KdaGateCumsumKernel<T, SAFE_GATE> op;
+    KdaGateCumsumKernel<T, USE_GATE_IN_KERNEL, SAFE_GATE> op;
     op.Init(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     op.Process();
 }
 
 template <typename T>
-__aicore__ inline void DispatchKdaGateCumsumBySafeGate(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens,
-                                                       GM_ADDR gk, const KdaGateCumsumTilingData &tilingData,
-                                                       TPipe *pipe)
+__aicore__ inline void DispatchKdaGateCumsum(GM_ADDR g, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR cuSeqlens,
+                                             GM_ADDR gk, const KdaGateCumsumTilingData &tilingData, TPipe *pipe)
 {
-    if (tilingData.safeGate != 0) {
-        RunKdaGateCumsum<T, true>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+    if (tilingData.useGateInKernel != 0) {
+        if (tilingData.safeGate != 0) {
+            RunKdaGateCumsum<T, true, true>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+        } else {
+            RunKdaGateCumsum<T, true, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+        }
     } else {
-        RunKdaGateCumsum<T, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
+        RunKdaGateCumsum<T, false, false>(g, aLog, dtBias, cuSeqlens, gk, tilingData, pipe);
     }
 }
 } // namespace
@@ -500,10 +525,10 @@ extern "C" __global__ __aicore__ void kda_gate_cumsum(GM_ADDR g, GM_ADDR aLog, G
     GET_TILING_DATA(tilingData, tiling);
     TPipe pipe;
     if (tilingData.dataType == 2) {
-        DispatchKdaGateCumsumBySafeGate<float>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
+        DispatchKdaGateCumsum<float>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
     } else if (tilingData.dataType == 1) {
-        DispatchKdaGateCumsumBySafeGate<bfloat16_t>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
+        DispatchKdaGateCumsum<bfloat16_t>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
     } else {
-        DispatchKdaGateCumsumBySafeGate<half>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
+        DispatchKdaGateCumsum<half>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);
     }
 }

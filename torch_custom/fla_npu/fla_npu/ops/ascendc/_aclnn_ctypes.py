@@ -50,7 +50,6 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.c_void_p,
         ctypes.c_void_p,
         ctypes.c_void_p,
-        ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_void_p),
     ],
@@ -64,30 +63,18 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.POINTER(ctypes.c_void_p),
     ],
     "aclnnChunkKdaFwd": [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
+        *([ctypes.c_void_p] * 10),
         ctypes.c_char_p,
         ctypes.c_double,
         ctypes.c_int64,
         ctypes.c_bool,
         ctypes.c_bool,
-        ctypes.c_int64,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
+        ctypes.c_double,
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_bool,
+        *([ctypes.c_void_p] * 11),
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_void_p),
     ],
@@ -100,7 +87,6 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.c_bool,
         ctypes.c_bool,
         ctypes.c_double,
-        ctypes.c_char_p,
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_void_p),
@@ -393,39 +379,39 @@ def npu_chunk_gated_delta_rule_fwd_h(
     initial_state=None,
     output_final_state=False,
     chunk_size=None,
-    save_new_value=True,
     cu_seqlens=None,
     chunk_indices=None,
-    use_exp2=False,
-    transpose_state_layout=False,
+    state_v_first=False,
 ):
     import torch
 
     if g is None and gk is None:
         raise RuntimeError("npu_chunk_gated_delta_rule_fwd_h: either g or gk must be provided.")
-    save_new_value = _optional_bool(save_new_value, True)
-    use_exp2 = _optional_bool(use_exp2, False)
-    transpose_state_layout = _optional_bool(transpose_state_layout, False)
-    if not save_new_value:
-        raise RuntimeError("npu_chunk_gated_delta_rule_fwd_h: save_new_value must be True.")
-    if transpose_state_layout:
-        raise RuntimeError("npu_chunk_gated_delta_rule_fwd_h: transpose_state_layout must be False.")
-
     output_final_state = _optional_bool(output_final_state, False)
+    state_v_first = _optional_bool(state_v_first, False)
     chunk_size = _optional_int(chunk_size, 64)
     B, _, T, K = _shape(k)
     _, HV, _, V = _shape(u)
-    NT = _chunk_num(T, chunk_size, chunk_indices)
-    h_out = _zeros((B, HV, NT, K, V), k)
+    cu = None if cu_seqlens is None else tuple(int(value) for value in cu_seqlens)
+    indices = None if chunk_indices is None else tuple(int(value) for value in chunk_indices)
+    if indices is None and cu is not None:
+        indices = _kda_build_chunk_indices(cu, chunk_size)
+    NT = _kda_total_chunks(B, T, chunk_size, cu, indices)
+    N = len(cu) - 1 if cu is not None else B
+    state_tail = (V, K) if state_v_first else (K, V)
+    if initial_state is not None and _shape(initial_state) != (N, HV, *state_tail):
+        raise RuntimeError(
+            "npu_chunk_gated_delta_rule_fwd_h: initial_state shape does not match state_v_first."
+        )
+    h_out = _empty((B, HV, NT, *state_tail), k)
     v_new_out = _empty_like(u)
     if output_final_state:
-        N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
         if initial_state is not None:
-            final_state_out = _empty((N, HV, K, V), initial_state)
+            final_state_out = _empty((N, HV, *state_tail), initial_state)
         else:
-            final_state_out = _empty((N, HV, K, V), k, dtype=torch.float32)
+            final_state_out = _empty((N, HV, *state_tail), k, dtype=torch.float32)
     else:
-        final_state_out = _empty((1,), k)
+        final_state_out = None
     outputs = (h_out, v_new_out, final_state_out if output_final_state else None)
     return _call_aclnn(
         "aclnnChunkGatedDeltaRuleFwdH",
@@ -438,11 +424,9 @@ def npu_chunk_gated_delta_rule_fwd_h(
             ctx.tensor(initial_state, "initial_state"),
             ctypes.c_bool(output_final_state),
             ctypes.c_int64(chunk_size),
-            ctypes.c_bool(save_new_value),
-            ctx.int_array(cu_seqlens),
-            ctx.int_array(chunk_indices),
-            ctypes.c_bool(use_exp2),
-            ctypes.c_bool(transpose_state_layout),
+            ctx.int_array(cu),
+            ctx.int_array(indices),
+            ctypes.c_bool(state_v_first),
             ctx.tensor(h_out, "h"),
             ctx.tensor(v_new_out, "v_new"),
             ctx.tensor(final_state_out, "final_state"),
@@ -618,179 +602,160 @@ def npu_chunk_kda_fwd(
     q,
     k,
     v,
-    gk,
+    g,
     beta,
     scale,
-    chunk_size,
+    chunk_size=64,
     *,
     layout="BSND",
     initial_state=None,
     output_final_state=False,
     cu_seqlens=None,
     chunk_indices=None,
-    return_intermediate=False,
     safe_gate=False,
-    transpose_state_layout=False,
+    lower_bound=None,
+    use_gate_in_kernel=False,
+    A_log=None,
+    dt_bias=None,
+    disable_recompute=False,
+    return_intermediate_states=False,
+    state_v_first=False,
 ):
     import torch
 
-    return_intermediate = _optional_bool(return_intermediate, False)
     layout = str(layout)
     if layout not in {"BSND", "BNSD", "TND", "NTD"}:
-        raise RuntimeError("npu_chunk_kda_fwd: layout must be one of BSND, BNSD, TND, NTD and must be uppercase.")
-    safe_gate = _optional_bool(safe_gate, False)
-    if _optional_bool(transpose_state_layout, False):
-        raise RuntimeError("npu_chunk_kda_fwd: transpose_state_layout=True is not supported.")
-
+        raise RuntimeError("npu_chunk_kda_fwd: layout must be uppercase and one of BSND, BNSD, TND, NTD.")
     chunk_size = int(chunk_size)
     if chunk_size not in {64, 128}:
         raise RuntimeError("npu_chunk_kda_fwd: chunk_size must be 64 or 128.")
 
-    q_shape = _shape(q)
-    k_shape = _shape(k)
-    v_shape = _shape(v)
-    gk_shape = _shape(gk)
-    beta_shape = _shape(beta)
-    is_tnd = layout == "TND"
-    is_ntd = layout == "NTD"
-    is_bsnd = layout == "BSND"
-    is_bnsd = layout == "BNSD"
-    is_rank3 = is_tnd or is_ntd
-    rank_ok = (
-        (is_rank3 and len(q_shape) == 3 and len(k_shape) == 3 and len(v_shape) == 3 and
-         len(gk_shape) == 3 and len(beta_shape) == 2) or
-        (not is_rank3 and len(q_shape) == 4 and len(k_shape) == 4 and len(v_shape) == 4 and
-         len(gk_shape) == 4 and len(beta_shape) == 3)
+    is_rank3 = layout in {"TND", "NTD"}
+    is_sequence_major = layout in {"BSND", "TND"}
+    q_shape, k_shape, v_shape, g_shape, beta_shape = map(
+        _shape, (q, k, v, g, beta)
     )
-    if not rank_ok:
-        raise RuntimeError(
-            "npu_chunk_kda_fwd: layout/rank mismatch. TND/NTD require q/k/v/gk rank3 with beta rank2; "
-            "BSND/BNSD require q/k/v/gk rank4 with beta rank3."
-        )
-    if q_shape != k_shape:
-        raise RuntimeError("npu_chunk_kda_fwd: q and k must have identical shape.")
-    if gk.dtype not in {torch.float32, torch.bfloat16} or beta.dtype not in {torch.float32, torch.bfloat16}:
-        raise RuntimeError("npu_chunk_kda_fwd: gk and beta must be float32 or bfloat16.")
+    expected_rank = 3 if is_rank3 else 4
+    if any(len(shape) != expected_rank for shape in (q_shape, k_shape, v_shape, g_shape)):
+        raise RuntimeError("npu_chunk_kda_fwd: q/k/v/g rank does not match layout.")
+    if len(beta_shape) != expected_rank - 1 or q_shape != k_shape:
+        raise RuntimeError("npu_chunk_kda_fwd: beta rank must match layout and q/k shapes must be identical.")
 
-    batch = 1 if is_rank3 else q_shape[0]
-    seqlen = q_shape[0] if is_tnd else (q_shape[1] if is_ntd else (q_shape[2] if is_bnsd else q_shape[1]))
-    h_num = q_shape[1] if is_tnd else (q_shape[0] if is_ntd else (q_shape[1] if is_bnsd else q_shape[2]))
-    k_dim = q_shape[2] if is_rank3 else q_shape[3]
-    hv_num = v_shape[1] if is_tnd else (v_shape[0] if is_ntd else (v_shape[1] if is_bnsd else v_shape[2]))
-    v_dim = v_shape[2] if is_rank3 else v_shape[3]
-    if h_num <= 0 or hv_num < h_num:
-        raise RuntimeError("npu_chunk_kda_fwd: H and HV must be positive and H must be <= HV.")
-    if h_num > 128 or hv_num > 128:
-        raise RuntimeError("npu_chunk_kda_fwd: H and HV must be <= 128.")
-    if is_tnd and h_num > 1:
-        raise RuntimeError(
-            "npu_chunk_kda_fwd: TND layout with H > 1 is not supported; use NTD [H,T,D] layout "
-            "for multi-head rank3 input."
-        )
-    if hv_num % h_num != 0:
-        raise RuntimeError("npu_chunk_kda_fwd: HV must be divisible by H.")
-    split_cube_supported = (
-        q.dtype in {torch.float16, torch.bfloat16} and k.dtype == q.dtype and v.dtype == q.dtype and
-        k_dim >= 16 and v_dim >= 16 and k_dim % 16 == 0 and v_dim % 16 == 0 and v_dim <= 256
-    )
-    if not split_cube_supported:
-        raise RuntimeError("npu_chunk_kda_fwd: shape is outside the supported split cube/vector template.")
-    if (is_tnd and (v_shape[0] != seqlen or gk_shape != (seqlen, hv_num, k_dim) or
-                   beta_shape != (seqlen, hv_num))) or (
-        is_ntd and (v_shape[1] != seqlen or gk_shape != (hv_num, seqlen, k_dim) or
-                    beta_shape != (hv_num, seqlen))
-    ) or (
-        is_bsnd and (v_shape[0] != batch or v_shape[1] != seqlen or
-                     gk_shape != (batch, seqlen, hv_num, k_dim) or beta_shape != (batch, seqlen, hv_num))
-    ) or (
-        is_bnsd and (v_shape[0] != batch or v_shape[2] != seqlen or
-                     gk_shape != (batch, hv_num, seqlen, k_dim) or beta_shape != (batch, hv_num, seqlen))
-    ):
-        raise RuntimeError("npu_chunk_kda_fwd: v/gk/beta shape mismatch for the selected layout.")
-
-    cu_seqlens_for_call = None if cu_seqlens is None else tuple(int(value) for value in cu_seqlens)
-    if cu_seqlens_for_call is not None and (len(cu_seqlens_for_call) < 2 or cu_seqlens_for_call[0] != 0 or
-                                            cu_seqlens_for_call[-1] != seqlen):
-        raise RuntimeError("npu_chunk_kda_fwd: cu_seqlens must start at 0 and end at sequence length.")
-    seq_num = len(cu_seqlens_for_call) - 1 if cu_seqlens_for_call is not None else batch
-    chunk_indices_for_call = (
-        tuple(int(value) for value in chunk_indices)
-        if chunk_indices is not None
-        else _kda_build_chunk_indices(cu_seqlens_for_call, chunk_size)
-    )
-    if chunk_indices_for_call is not None:
-        if cu_seqlens_for_call is None:
-            raise RuntimeError("npu_chunk_kda_fwd: chunk_indices requires cu_seqlens.")
-        if len(chunk_indices_for_call) % 2 != 0:
-            raise RuntimeError("npu_chunk_kda_fwd: chunk_indices must contain (seq_id, chunk_id) pairs.")
-        expected_chunks = sum(
-            (cu_seqlens_for_call[idx + 1] - cu_seqlens_for_call[idx] + chunk_size - 1) // chunk_size
-            for idx in range(len(cu_seqlens_for_call) - 1)
-        )
-        if len(chunk_indices_for_call) // 2 != expected_chunks:
-            raise RuntimeError("npu_chunk_kda_fwd: chunk_indices must contain exactly one pair per chunk.")
-        for idx in range(0, len(chunk_indices_for_call), 2):
-            seq_idx, local_chunk = chunk_indices_for_call[idx:idx + 2]
-            if seq_idx < 0 or seq_idx >= len(cu_seqlens_for_call) - 1:
-                raise RuntimeError("npu_chunk_kda_fwd: chunk_indices seq_id is out of range.")
-            seq_len = cu_seqlens_for_call[seq_idx + 1] - cu_seqlens_for_call[seq_idx]
-            seq_chunks = (seq_len + chunk_size - 1) // chunk_size
-            if local_chunk < 0 or local_chunk >= seq_chunks:
-                raise RuntimeError("npu_chunk_kda_fwd: chunk_indices chunk_id is out of range.")
-        canonical_chunk_indices = _kda_build_chunk_indices(cu_seqlens_for_call, chunk_size)
-        if chunk_indices_for_call != canonical_chunk_indices:
-            raise RuntimeError(
-                "npu_chunk_kda_fwd: chunk_indices must use canonical sequence-major chunk order."
-            )
-    total_chunks = _kda_total_chunks(batch, seqlen, chunk_size, cu_seqlens_for_call, chunk_indices_for_call)
-    if cu_seqlens_for_call is not None and seq_num > 1024:
-        raise RuntimeError(
-            "npu_chunk_kda_fwd: varlen input supports at most 1024 sequences in one call; "
-            "split a larger request at sequence boundaries."
-        )
-    if initial_state is not None:
-        initial_state_shape = _shape(initial_state)
-        if initial_state.dtype != torch.float32:
-            raise RuntimeError("npu_chunk_kda_fwd: initial_state must be float32 when provided.")
-        if initial_state_shape != (seq_num, hv_num, k_dim, v_dim):
-            raise RuntimeError(
-                "npu_chunk_kda_fwd: initial_state must be [seq_num,Hv,K,V], where seq_num is batch "
-                "for dense input or len(cu_seqlens)-1 for varlen input."
-            )
-
-    o = _empty_like(v)
-    final_state_work = _empty((seq_num, hv_num, k_dim, v_dim), q, dtype=torch.float32)
-    if is_rank3:
-        bnst_shape = (hv_num, seqlen, chunk_size)
-        bnsd_k_shape = (hv_num, seqlen, k_dim)
-        bnsd_v_shape = (hv_num, seqlen, v_dim)
-        h_shape = (hv_num, total_chunks, k_dim, v_dim)
+    if layout == "TND":
+        batch, seqlen, h_num, k_dim = 1, q_shape[0], q_shape[1], q_shape[2]
+        hv_num, v_dim = v_shape[1], v_shape[2]
+        expected_v = (seqlen, hv_num, v_dim)
+        expected_g = (seqlen, hv_num, k_dim)
+        expected_beta = (seqlen, hv_num)
+    elif layout == "NTD":
+        batch, h_num, seqlen, k_dim = 1, q_shape[0], q_shape[1], q_shape[2]
+        hv_num, v_dim = v_shape[0], v_shape[2]
+        expected_v = (hv_num, seqlen, v_dim)
+        expected_g = (hv_num, seqlen, k_dim)
+        expected_beta = (hv_num, seqlen)
+    elif layout == "BSND":
+        batch, seqlen, h_num, k_dim = q_shape
+        hv_num, v_dim = v_shape[2], v_shape[3]
+        expected_v = (batch, seqlen, hv_num, v_dim)
+        expected_g = (batch, seqlen, hv_num, k_dim)
+        expected_beta = (batch, seqlen, hv_num)
     else:
-        bnst_shape = (batch, hv_num, seqlen, chunk_size)
-        bnsd_k_shape = (batch, hv_num, seqlen, k_dim)
-        bnsd_v_shape = (batch, hv_num, seqlen, v_dim)
-        h_shape = (batch, hv_num, total_chunks, k_dim, v_dim)
-    if return_intermediate:
-        kernel_aqk = aqk = _empty(bnst_shape, q)
-        kernel_akk = akk = _empty(bnst_shape, q)
-        kernel_w = w = _empty(bnsd_k_shape, q)
-        kernel_u = u = _empty(bnsd_v_shape, q)
-        kernel_qg = qg = _empty(bnsd_k_shape, q)
-        kernel_kg = kg = _empty(bnsd_k_shape, q)
-        kernel_v_new = v_new = _empty(bnsd_v_shape, q)
-        kernel_h = h = _empty(h_shape, q)
-    else:
-        kernel_aqk, kernel_akk, kernel_w, kernel_u = (_empty((0,), q) for _ in range(4))
-        kernel_qg, kernel_kg, kernel_v_new, kernel_h = (_empty((0,), q) for _ in range(4))
-        aqk = akk = w = u = None
-        qg = kg = v_new = h = None
-    empty = _empty((0,), q)
-    final_state = final_state_work if _optional_bool(output_final_state, False) else _empty((0,), q, dtype=torch.float32)
-    g = gk if gk.dtype == torch.float32 else gk.to(torch.float32)
-    initial_state_out = initial_state if initial_state is not None else empty
-    user_outputs = (o, final_state, g, aqk, akk, w, u, qg, kg, v_new, h, initial_state_out)
-    kernel_outputs = (o, final_state_work, kernel_aqk, kernel_akk, kernel_w, kernel_u,
-                      kernel_qg, kernel_kg, kernel_v_new, kernel_h)
+        batch, h_num, seqlen, k_dim = q_shape
+        hv_num, v_dim = v_shape[1], v_shape[3]
+        expected_v = (batch, hv_num, seqlen, v_dim)
+        expected_g = (batch, hv_num, seqlen, k_dim)
+        expected_beta = (batch, hv_num, seqlen)
+    if v_shape != expected_v or g_shape != expected_g or beta_shape != expected_beta:
+        raise RuntimeError("npu_chunk_kda_fwd: v/g/beta shapes do not match the selected layout.")
+    if h_num <= 0 or hv_num < h_num or hv_num % h_num != 0 or h_num > 128 or hv_num > 128:
+        raise RuntimeError("npu_chunk_kda_fwd: H/HV must satisfy 0 < H <= HV <= 128 and HV % H == 0.")
+    if q.dtype not in {torch.float16, torch.bfloat16} or k.dtype != q.dtype or v.dtype != q.dtype:
+        raise RuntimeError("npu_chunk_kda_fwd: q/k/v must use the same float16 or bfloat16 dtype.")
+    if g.dtype not in {torch.float32, torch.bfloat16} or beta.dtype not in {torch.float32, torch.bfloat16}:
+        raise RuntimeError("npu_chunk_kda_fwd: g and beta must be float32 or bfloat16.")
+    if k_dim < 16 or k_dim > 256 or k_dim % 16 or v_dim < 16 or v_dim > 256 or v_dim % 16:
+        raise RuntimeError("npu_chunk_kda_fwd: K/V must be multiples of 16 with K,V <= 256.")
+
+    use_gate_in_kernel = _optional_bool(use_gate_in_kernel, False)
+    safe_gate = _optional_bool(safe_gate, False)
+    disable_recompute = _optional_bool(disable_recompute, False)
+    return_intermediate_states = _optional_bool(return_intermediate_states, False)
+    output_final_state = _optional_bool(output_final_state, False)
+    state_v_first = _optional_bool(state_v_first, False)
+    if use_gate_in_kernel:
+        if A_log is None or _shape(A_log) != (hv_num,) or A_log.dtype != torch.float32:
+            raise RuntimeError("npu_chunk_kda_fwd: A_log must be float32 [HV] when use_gate_in_kernel=True.")
+        if dt_bias is not None and (_shape(dt_bias) != (hv_num * k_dim,) or dt_bias.dtype != torch.float32):
+            raise RuntimeError("npu_chunk_kda_fwd: dt_bias must be float32 [HV*K].")
+    lower_bound = _optional_float(lower_bound, -5.0)
+    if use_gate_in_kernel and safe_gate and not (-5.0 <= lower_bound < 0.0):
+        raise RuntimeError("npu_chunk_kda_fwd: lower_bound must be in [-5, 0) for safe gate.")
+
+    cu = None if cu_seqlens is None else tuple(int(value) for value in cu_seqlens)
+    if cu is not None:
+        if len(cu) < 2 or cu[0] != 0 or cu[-1] != seqlen or any(a > b for a, b in zip(cu, cu[1:])):
+            raise RuntimeError("npu_chunk_kda_fwd: cu_seqlens must be nondecreasing, start at 0 and end at T.")
+        if len(cu) - 1 > 1024:
+            raise RuntimeError("npu_chunk_kda_fwd: varlen input supports at most 1024 sequences.")
+        if not is_rank3 and batch != 1:
+            raise RuntimeError("npu_chunk_kda_fwd: rank4 varlen input requires B=1.")
+    seq_num = len(cu) - 1 if cu is not None else batch
+    canonical_indices = _kda_build_chunk_indices(cu, chunk_size)
+    indices = canonical_indices if chunk_indices is None else tuple(int(value) for value in chunk_indices)
+    if indices is not None and indices != canonical_indices:
+        raise RuntimeError("npu_chunk_kda_fwd: chunk_indices must use canonical sequence-major order.")
+    total_chunks = _kda_total_chunks(batch, seqlen, chunk_size, cu, indices)
+
+    state_shape = (
+        (seq_num, hv_num, v_dim, k_dim)
+        if state_v_first
+        else (seq_num, hv_num, k_dim, v_dim)
+    )
+    if initial_state is not None and (_shape(initial_state) != state_shape or initial_state.dtype != torch.float32):
+        raise RuntimeError("npu_chunk_kda_fwd: initial_state shape/dtype does not match state_v_first.")
+
+    attn_shape = (
+        (seqlen, hv_num, v_dim)
+        if is_rank3
+        else (batch, seqlen, hv_num, v_dim)
+    )
+    matrix_shape = (
+        (hv_num, seqlen, chunk_size)
+        if is_rank3
+        else (batch, hv_num, seqlen, chunk_size)
+    )
+    k_shape_head = (
+        (hv_num, seqlen, k_dim)
+        if is_rank3
+        else (batch, hv_num, seqlen, k_dim)
+    )
+    v_shape_head = (
+        (hv_num, seqlen, v_dim)
+        if is_rank3
+        else (batch, hv_num, seqlen, v_dim)
+    )
+    h_shape = (
+        ((hv_num, total_chunks, v_dim, k_dim) if state_v_first
+         else (hv_num, total_chunks, k_dim, v_dim))
+        if is_rank3
+        else ((batch, hv_num, total_chunks, v_dim, k_dim) if state_v_first
+              else (batch, hv_num, total_chunks, k_dim, v_dim))
+    )
+
+    attn_out = _empty(attn_shape, q)
+    final_state = _empty(state_shape, q, dtype=torch.float32) if output_final_state else None
+    save_gk = not use_gate_in_kernel or disable_recompute
+    gk_out = _empty(k_shape_head, q, dtype=torch.float32) if save_gk else None
+    aqk = _empty(matrix_shape, q)
+    akk = _empty(matrix_shape, q)
+    w = _empty(k_shape_head, q) if disable_recompute else None
+    u = _empty(v_shape_head, q) if disable_recompute else None
+    qg = _empty(k_shape_head, q) if disable_recompute else None
+    kg = _empty(k_shape_head, q) if disable_recompute else None
+    v_new = _empty(v_shape_head, q) if disable_recompute else None
+    h = _empty(h_shape, q) if disable_recompute or return_intermediate_states else None
+
+    outputs = (attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h)
     layout_buffer = ctypes.create_string_buffer(layout.encode("utf-8"))
     _call_aclnn(
         "aclnnChunkKdaFwd",
@@ -798,31 +763,39 @@ def npu_chunk_kda_fwd(
             ctx.tensor(q, "q"),
             ctx.tensor(k, "k"),
             ctx.tensor(v, "v"),
-            ctx.tensor(gk, "gk"),
+            ctx.tensor(g, "g"),
             ctx.tensor(beta, "beta"),
+            ctx.tensor(A_log, "A_log"),
+            ctx.tensor(dt_bias, "dt_bias"),
             ctx.tensor(initial_state, "initial_state"),
-            ctx.int_array(cu_seqlens_for_call),
-            ctx.int_array(chunk_indices_for_call),
+            ctx.int_array(cu),
+            ctx.int_array(indices),
             ctypes.cast(layout_buffer, ctypes.c_char_p),
             ctypes.c_double(float(scale)),
             ctypes.c_int64(chunk_size),
-            ctypes.c_bool(True),
+            ctypes.c_bool(output_final_state),
             ctypes.c_bool(safe_gate),
-            ctypes.c_int64(total_chunks),
-            ctx.tensor(o, "o"),
-            ctx.tensor(final_state_work, "final_state"),
-            ctx.tensor(kernel_aqk, "aqk"),
-            ctx.tensor(kernel_akk, "akk"),
-            ctx.tensor(kernel_w, "w"),
-            ctx.tensor(kernel_u, "u"),
-            ctx.tensor(kernel_qg, "qg"),
-            ctx.tensor(kernel_kg, "kg"),
-            ctx.tensor(kernel_v_new, "v_new"),
-            ctx.tensor(kernel_h, "h"),
+            ctypes.c_double(lower_bound),
+            ctypes.c_bool(use_gate_in_kernel),
+            ctypes.c_bool(disable_recompute),
+            ctypes.c_bool(return_intermediate_states),
+            ctypes.c_bool(state_v_first),
+            ctx.tensor(attn_out, "attn_out"),
+            ctx.tensor(final_state, "final_state"),
+            ctx.tensor(gk_out, "gk"),
+            ctx.tensor(aqk, "Aqk"),
+            ctx.tensor(akk, "Akk"),
+            ctx.tensor(w, "w"),
+            ctx.tensor(u, "u"),
+            ctx.tensor(qg, "qg"),
+            ctx.tensor(kg, "kg"),
+            ctx.tensor(v_new, "v_new"),
+            ctx.tensor(h, "h"),
         ],
-        kernel_outputs,
+        outputs,
     )
-    return user_outputs
+    initial_state_out = initial_state
+    return (*outputs, initial_state_out)
 
 
 def npu_kda_gate_cumsum(
@@ -835,15 +808,10 @@ def npu_kda_gate_cumsum(
     use_gate_in_kernel=False,
     safe_gate=False,
     lower_bound=None,
-    layout="BSND",
 ):
     import torch
 
     out = _empty(_shape(g), g, dtype=torch.float32)
-    layout = str(layout)
-    if layout not in ("BSND", "BNSD", "TND", "NTD"):
-        raise ValueError("layout must be uppercase and one of BSND, BNSD, TND or NTD")
-    layout_buffer = ctypes.create_string_buffer(layout.encode("utf-8"))
     return _call_aclnn(
         "aclnnKdaGateCumsum",
         lambda ctx: [
@@ -855,7 +823,6 @@ def npu_kda_gate_cumsum(
             ctypes.c_bool(_optional_bool(use_gate_in_kernel, False)),
             ctypes.c_bool(_optional_bool(safe_gate, False)),
             ctypes.c_double(_optional_float(lower_bound, -5.0)),
-            ctypes.cast(layout_buffer, ctypes.c_char_p),
             ctx.tensor(out, "gk"),
         ],
         out,

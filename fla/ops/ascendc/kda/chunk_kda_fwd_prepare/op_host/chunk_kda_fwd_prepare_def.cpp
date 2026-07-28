@@ -44,7 +44,6 @@ public:
         this->Input("beta").ParamType(REQUIRED)
             .DataType(betaTypes)
             .Format(formats).UnknownShapeFormat(formats);
-        this->Input("initial_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("cu_seqlens").ParamType(OPTIONAL).ValueDepend(OPTIONAL)
             .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64,
                        ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
@@ -63,9 +62,13 @@ public:
 
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
-        this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
-        this->Attr("total_chunks").AttrType(REQUIRED).Int(1);
         this->Attr("safe_gate").AttrType(REQUIRED).Bool(false);
+        this->Attr("logical_batch").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_seqlen").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_q_heads").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_v_heads").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_k_dim").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_v_dim").AttrType(REQUIRED).Int(1);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

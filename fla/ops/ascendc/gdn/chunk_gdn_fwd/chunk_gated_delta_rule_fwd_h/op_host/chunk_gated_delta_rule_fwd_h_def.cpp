@@ -64,7 +64,7 @@ public:
             .DataType(gateTypes).Format(formats).UnknownShapeFormat(formats)
             .AutoContiguous();
 
-        this->Input("inital_state")
+        this->Input("initial_state")
             .ParamType(OPTIONAL)
             .DataType(stateTypes).Format(formats).UnknownShapeFormat(formats)
             .AutoContiguous();
@@ -90,12 +90,17 @@ public:
             .DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
 
         this->Output("final_state")
-            .ParamType(REQUIRED)
+            .ParamType(OPTIONAL)
             .DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
 
         this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
-        this->Attr("use_exp2").AttrType(REQUIRED).Bool(false);
+        this->Attr("logical_batch").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_seqlen").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_k_heads").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_v_heads").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_k_dim").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_v_dim").AttrType(REQUIRED).Int(1);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

@@ -215,7 +215,6 @@ public:
         hasInitial_ = tiling.hasInitialState;
         isVarLen_ = tiling.isVarLen;
         usedCoreNum_ = tiling.outputUsedCoreNum;
-        outputSequenceMajor_ = tiling.outputSequenceMajor;
         const uint64_t outputElements = B_ * HV_ * T_ * V_;
         o_.SetGlobalBuffer((__gm__ OUT_T *)workspace);
         u_.SetGlobalBuffer((__gm__ OUT_T *)workspace + outputElements);
@@ -285,10 +284,7 @@ private:
 
     __aicore__ inline uint64_t OutputOffset(uint64_t b, uint64_t hv, uint64_t t, uint64_t d) const
     {
-        if (outputSequenceMajor_) {
-            return ((b * T_ + t) * HV_ + hv) * V_ + d;
-        }
-        return KVOffset(b, hv, t, d, V_);
+        return ((b * T_ + t) * HV_ + hv) * V_ + d;
     }
 
     __aicore__ inline uint64_t BetaOffset(uint64_t b, uint64_t hv, uint64_t t) const
@@ -1049,13 +1045,9 @@ private:
 
             SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
             WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
-            if (outputSequenceMajor_) {
-                for (uint64_t row = 0; row < tileRows; ++row) {
-                    LocalTensor<T> rowTyped = outTyped[row * V_];
-                    CopyVectorOut(vNew_, OutputOffset(b, hv, ti + row, 0), rowTyped, V_);
-                }
-            } else {
-                CopyVectorOut(vNew_, OutputOffset(b, hv, ti, 0), outTyped, elems);
+            for (uint64_t row = 0; row < tileRows; ++row) {
+                LocalTensor<T> rowTyped = outTyped[row * V_];
+                CopyVectorOut(vNew_, OutputOffset(b, hv, ti + row, 0), rowTyped, V_);
             }
             SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
             WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
@@ -1239,7 +1231,6 @@ private:
     bool isVarLen_ = false;
     bool hasChunkIndices_ = false;
     bool isAivOnly_ = false;
-    bool outputSequenceMajor_ = false;
     uint64_t usedCoreNum_ = 1;
     uint64_t solveCoreIdx_ = 0;
     __gm__ int64_t *chunkIndicesAddr_ = nullptr;

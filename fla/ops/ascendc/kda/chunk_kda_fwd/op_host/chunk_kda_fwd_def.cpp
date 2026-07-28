@@ -38,12 +38,14 @@ public:
         this->Input("q").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("k").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("v").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("gk").ParamType(REQUIRED)
+        this->Input("g").ParamType(REQUIRED)
             .DataType(gateTypes)
             .Format(formats).UnknownShapeFormat(formats);
         this->Input("beta").ParamType(REQUIRED)
             .DataType(betaTypes)
             .Format(formats).UnknownShapeFormat(formats);
+        this->Input("a_log").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Input("dt_bias").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("initial_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("cu_seqlens").ParamType(OPTIONAL).ValueDepend(OPTIONAL)
             .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64,
@@ -54,23 +56,28 @@ public:
                        ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
             .Format(formats).UnknownShapeFormat(formats);
 
-        this->Output("o").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("final_state").ParamType(REQUIRED).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("attn_out").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("final_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("gk").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
         this->Output("Aqk").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Output("Akk").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("w").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("u").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("qg").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("kg").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("v_new").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("h").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("w").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("u").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("qg").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("kg").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("v_new").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("h").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
 
+        this->Attr("layout").AttrType(OPTIONAL).String("BSND");
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
         this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
-        this->Attr("total_chunks").AttrType(REQUIRED).Int(1);
         this->Attr("safe_gate").AttrType(REQUIRED).Bool(false);
-
+        this->Attr("lower_bound").AttrType(OPTIONAL).Float(-5.0);
+        this->Attr("use_gate_in_kernel").AttrType(REQUIRED).Bool(false);
+        this->Attr("disable_recompute").AttrType(REQUIRED).Bool(false);
+        this->Attr("return_intermediate_states").AttrType(REQUIRED).Bool(false);
+        this->Attr("state_v_first").AttrType(REQUIRED).Bool(false);
     }
 };
 

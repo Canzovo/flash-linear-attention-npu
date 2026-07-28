@@ -185,19 +185,22 @@ def _run_chunk_gated_delta_rule_fwd_h(torch, ops, case, device):
     if _meta(case, "gk") is not None:
         gk = -_tensor(torch, (B, Hv, T, K), _dtype(torch, d["gk"]), device, positive=True, scale=0.02)
     seq_num = len(_meta(case, "cu_seqlens")) - 1 if _meta(case, "cu_seqlens") else B
+    state_v_first = bool(case["attrs"].get("state_v_first", False))
+    state_tail = (V, K) if state_v_first else (K, V)
     initial_state = None
     if _meta(case, "initial_state") is not None:
-        initial_state = _zeros(torch, (seq_num, Hv, K, V), _dtype(torch, d["state"]), device)
+        initial_state = _zeros(torch, (seq_num, Hv, *state_tail), _dtype(torch, d["state"]), device)
     out = ops.chunk_gated_delta_rule_fwd_h(
         k, w, u, g, gk=gk, initial_state=initial_state,
         output_final_state=case["attrs"].get("output_final_state", False),
         chunk_size=int(case["attrs"]["chunk_size"]),
-        save_new_value=case["attrs"].get("save_new_value", True),
         cu_seqlens=_meta(case, "cu_seqlens"), chunk_indices=_meta(case, "chunk_indices"),
-        use_exp2=case["attrs"].get("use_exp2", False),
-        transpose_state_layout=case["attrs"].get("transpose_state_layout", False),
+        state_v_first=state_v_first,
     )
-    return out, ((B, Hv, Nc, K, V), (B, Hv, T, V), (seq_num, Hv, K, V))
+    expected = [(B, Hv, Nc, *state_tail), (B, Hv, T, V)]
+    if case["attrs"].get("output_final_state", False):
+        expected.append((seq_num, Hv, *state_tail))
+    return out, tuple(expected)
 
 
 def _run_recompute_wu_fwd(torch, ops, case, device):
@@ -326,42 +329,23 @@ def _run_solve_tri(torch, ops, case, device):
 def _run_kda_gate_cumsum(torch, ops, case, device):
     s, attrs = case["shape"], case["attrs"]
     B, T, Hv, K = int(s.get("B", 1)), int(s["T"]), int(s["H_v"]), int(s["K"])
-    layout = attrs["layout"]
-    if layout == "NTD":
+    if attrs.get("layout") in {"NTD", "TND"}:
         shape = (Hv, T, K)
-    elif layout == "TND":
-        shape = (T, Hv, K)
-    elif layout == "BNSD":
-        shape = (B, Hv, T, K)
     else:
-        shape = (B, T, Hv, K)
+        shape = (B, Hv, T, K)
     g = _tensor(torch, shape, _dtype(torch, case["dtype"]["g"]), device)
     A_log = None
     dt_bias = None
     if _meta(case, "A_log") is not None:
         A_log = _tensor(torch, (Hv,), torch.float32, device)
     if _meta(case, "dt_bias") is not None:
-        dt_bias = _tensor(torch, (Hv, K), torch.float32, device)
+        dt_bias = _tensor(torch, (Hv * K,), torch.float32, device)
     out = ops.kda_gate_cumsum(
         g, int(attrs["chunk_size"]), A_log=A_log, dt_bias=dt_bias,
         cu_seqlens=_meta(case, "cu_seqlens"), use_gate_in_kernel=attrs["use_gate_in_kernel"],
-        safe_gate=attrs["safe_gate"], lower_bound=float(attrs["lower_bound"]), layout=layout,
+        safe_gate=attrs["safe_gate"], lower_bound=float(attrs["lower_bound"]),
     )
     return out, (shape,)
-
-
-def _run_kda_layout_swap12(torch, ops, case, device):
-    s = case["shape"]
-    if case["layout"] == "ND-rank3":
-        shape = (int(s["T"]), int(s["H_v"]), int(s["K"]))
-        expected = (shape[1], shape[0], shape[2])
-    else:
-        shape = (int(s["B"]), int(s["N_c"]), int(s["H_v"]), int(s["K"]), int(s["V"]))
-        expected = (shape[0], shape[2], shape[1], shape[3], shape[4])
-    x = _tensor(torch, shape, _dtype(torch, case["dtype"]["x_y"]), device)
-    dependency = _zeros(torch, (1,), x.dtype, device) if _meta(case, "dependency") is not None else None
-    out = ops.kda_layout_swap12(x, dependency=dependency)
-    return out, (expected,)
 
 
 def _run_chunk_kda_fwd(torch, ops, case, device):
@@ -370,34 +354,66 @@ def _run_chunk_kda_fwd(torch, ops, case, device):
     layout = attrs["layout"]
     if layout == "BSND":
         q_shape, v_shape = (B, T, Hk, K), (B, T, Hv, V)
-        gk_shape, beta_shape = (B, T, Hv, K), (B, T, Hv)
+        g_shape, beta_shape = (B, T, Hv, K), (B, T, Hv)
     elif layout == "BNSD":
         q_shape, v_shape = (B, Hk, T, K), (B, Hv, T, V)
-        gk_shape, beta_shape = (B, Hv, T, K), (B, Hv, T)
+        g_shape, beta_shape = (B, Hv, T, K), (B, Hv, T)
     elif layout == "NTD":
         q_shape, v_shape = (Hk, T, K), (Hv, T, V)
-        gk_shape, beta_shape = (Hv, T, K), (Hv, T)
+        g_shape, beta_shape = (Hv, T, K), (Hv, T)
     else:
         q_shape, v_shape = (T, Hk, K), (T, Hv, V)
-        gk_shape, beta_shape = (T, Hv, K), (T, Hv)
+        g_shape, beta_shape = (T, Hv, K), (T, Hv)
     data = _dtype(torch, case["dtype"]["q_k_v"])
     q = _tensor(torch, q_shape, data, device)
     k = _tensor(torch, q_shape, data, device)
     v = _tensor(torch, v_shape, data, device)
-    gk = -_tensor(torch, gk_shape, torch.float32, device, positive=True, scale=0.02)
+    g = -_tensor(torch, g_shape, torch.float32, device, positive=True, scale=0.02)
     beta = _tensor(torch, beta_shape, torch.float32, device, positive=True)
     cu = _meta(case, "cu_seqlens")
     seq_num = len(cu) - 1 if cu else B
+    state_v_first = bool(attrs.get("state_v_first", False))
+    state_tail = (V, K) if state_v_first else (K, V)
     initial = None
     if _meta(case, "initial_state") is not None:
-        initial = _zeros(torch, (seq_num, Hv, K, V), torch.float32, device)
+        initial = _zeros(torch, (seq_num, Hv, *state_tail), torch.float32, device)
+    use_gate = bool(attrs.get("use_gate_in_kernel", False))
+    a_log = _tensor(torch, (Hv,), torch.float32, device) if use_gate else None
+    dt_bias = _tensor(torch, (Hv * K,), torch.float32, device) if use_gate else None
+    disable_recompute = bool(attrs.get("disable_recompute", False))
+    return_states = bool(attrs.get("return_intermediate_states", False))
     out = ops.chunk_kda_fwd(
-        q, k, v, gk, beta, float(attrs["scale"]), int(attrs["chunk_size"]), layout=layout,
+        q, k, v, g, beta, float(attrs["scale"]), int(attrs["chunk_size"]), layout=layout,
         initial_state=initial, output_final_state=attrs["output_final_state"], cu_seqlens=cu,
-        chunk_indices=_meta(case, "chunk_indices"), return_intermediate=attrs["return_intermediate"],
-        safe_gate=attrs["safe_gate"], transpose_state_layout=attrs["transpose_state_layout"],
+        chunk_indices=_meta(case, "chunk_indices"), safe_gate=attrs["safe_gate"],
+        lower_bound=attrs.get("lower_bound"), use_gate_in_kernel=use_gate,
+        A_log=a_log, dt_bias=dt_bias, disable_recompute=disable_recompute,
+        return_intermediate_states=return_states, state_v_first=state_v_first,
     )
-    return out, (v_shape, (seq_num, Hv, K, V))
+    rank3 = layout in {"TND", "NTD"}
+    chunk_size = int(attrs["chunk_size"])
+    attn_shape = (T, Hv, V) if rank3 else (B, T, Hv, V)
+    matrix_shape = (Hv, T, chunk_size) if rank3 else (B, Hv, T, chunk_size)
+    k_head_shape = (Hv, T, K) if rank3 else (B, Hv, T, K)
+    v_head_shape = (Hv, T, V) if rank3 else (B, Hv, T, V)
+    h_shape = (
+        (Hv, _chunk_count(case), *state_tail)
+        if rank3
+        else (B, Hv, _chunk_count(case), *state_tail)
+    )
+    expected = [attn_shape]
+    if attrs["output_final_state"]:
+        expected.append((seq_num, Hv, *state_tail))
+    if not use_gate or disable_recompute:
+        expected.append(k_head_shape)
+    expected.extend((matrix_shape, matrix_shape))
+    if disable_recompute:
+        expected.extend((k_head_shape, v_head_shape, k_head_shape, k_head_shape, v_head_shape))
+    if disable_recompute or return_states:
+        expected.append(h_shape)
+    if initial is not None:
+        expected.append((seq_num, Hv, *state_tail))
+    return out, tuple(expected)
 
 
 def _sequence_lengths(total: int, batch: int, accepted):
@@ -449,7 +465,6 @@ RUNNERS = {
     "chunk_local_cumsum": _run_chunk_local_cumsum,
     "chunk_scaled_dot_kkt": _run_chunk_scaled_dot_kkt,
     "kda_gate_cumsum": _run_kda_gate_cumsum,
-    "kda_layout_swap12": _run_kda_layout_swap12,
     "prepare_wy_repr_bwd_da": _run_prepare_wy_repr_bwd_da,
     "prepare_wy_repr_bwd_full": _run_prepare_wy_repr_bwd_full,
     "recompute_wu_fwd": _run_recompute_wu_fwd,

@@ -35,16 +35,10 @@ public:
             ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND
         };
 
-        this->Input("q").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("k").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("v").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("gk").ParamType(REQUIRED)
-            .DataType(gateTypes)
-            .Format(formats).UnknownShapeFormat(formats);
-        this->Input("beta").ParamType(REQUIRED)
-            .DataType(betaTypes)
-            .Format(formats).UnknownShapeFormat(formats);
-        this->Input("initial_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Input("qg_scaled").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Input("Aqk").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Input("v_new").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Input("h").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("cu_seqlens").ParamType(OPTIONAL).ValueDepend(OPTIONAL)
             .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64,
                        ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
@@ -53,19 +47,17 @@ public:
             .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64,
                        ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
             .Format(formats).UnknownShapeFormat(formats);
-        this->Input("qg_scaled").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("Aqk").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("v_new").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("h").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
 
-        this->Output("o").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("attn_out").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
 
-        this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
-        this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
-        this->Attr("total_chunks").AttrType(REQUIRED).Int(1);
-        this->Attr("safe_gate").AttrType(REQUIRED).Bool(false);
-        this->Attr("output_sequence_major").AttrType(REQUIRED).Bool(false);
+        this->Attr("logical_batch").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_seqlen").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_q_heads").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_v_heads").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_k_dim").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_v_dim").AttrType(REQUIRED).Int(1);
+        this->Attr("logical_total_chunks").AttrType(REQUIRED).Int(1);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

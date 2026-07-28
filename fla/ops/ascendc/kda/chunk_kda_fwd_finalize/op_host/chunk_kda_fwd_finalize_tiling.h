@@ -26,7 +26,6 @@ TILING_DATA_FIELD_DEF(bool, hasInitialState);
 TILING_DATA_FIELD_DEF(bool, isVarLen);
 TILING_DATA_FIELD_DEF(int64_t, outputUsedCoreNum);
 TILING_DATA_FIELD_DEF(int64_t, outputScratchOffset);
-TILING_DATA_FIELD_DEF(bool, outputSequenceMajor);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkKdaFwdFinalize, ChunkKdaFwdFinalizeTilingData)

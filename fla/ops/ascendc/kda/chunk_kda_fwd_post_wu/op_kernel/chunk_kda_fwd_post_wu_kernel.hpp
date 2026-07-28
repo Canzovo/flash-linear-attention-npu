@@ -279,14 +279,6 @@ private:
         return ((b * HV_ + hv) * T_ + t) * dim + d;
     }
 
-    __aicore__ inline uint64_t OutputOffset(uint64_t b, uint64_t hv, uint64_t t, uint64_t d) const
-    {
-        if (outputSequenceMajor_) {
-            return ((b * T_ + t) * HV_ + hv) * V_ + d;
-        }
-        return KVOffset(b, hv, t, d, V_);
-    }
-
     __aicore__ inline uint64_t BetaOffset(uint64_t b, uint64_t hv, uint64_t t) const
     {
         return (b * HV_ + hv) * T_ + t;
@@ -887,7 +879,6 @@ private:
     bool isVarLen_ = false;
     bool hasChunkIndices_ = false;
     bool isAivOnly_ = false;
-    bool outputSequenceMajor_ = false;
     uint64_t usedCoreNum_ = 1;
     uint64_t solveCoreIdx_ = 0;
     __gm__ int64_t *chunkIndicesAddr_ = nullptr;
