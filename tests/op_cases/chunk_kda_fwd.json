@@ -11,9 +11,9 @@
     "scope": "non-CP low-level chunk_kda_fwd 12-value return policy",
     "return_policy": {
       "final_state": "output_final_state",
-      "gk": "not use_gate_in_kernel",
+      "gk": "not use_gate_in_kernel or disable_recompute",
       "w_u_qg_kg_v_new": "disable_recompute",
-      "h": "return_intermediate_states"
+      "h": "disable_recompute or return_intermediate_states"
     }
   },
   "capability": {
@@ -95,15 +95,19 @@
       "chunk_kda_fwd_main_accuracy",
       "chunk_kda_fwd_dtype_layout_generalization",
       "chunk_kda_fwd_tail_or_varlen",
+      "chunk_kda_fwd_a5_varlen_tail_finalize",
       "chunk_kda_fwd_tnd_layout",
       "chunk_kda_fwd_state_v_first",
-      "chunk_kda_fwd_optional_output_matrix"
+      "chunk_kda_fwd_optional_output_matrix",
+      "chunk_kda_fwd_chunk128_writeback_boundary"
     ],
     "generalization_case_ids": [
       "chunk_kda_fwd_dtype_layout_generalization",
       "chunk_kda_fwd_tail_or_varlen",
+      "chunk_kda_fwd_a5_varlen_tail_finalize",
       "chunk_kda_fwd_tnd_layout",
-      "chunk_kda_fwd_state_v_first"
+      "chunk_kda_fwd_state_v_first",
+      "chunk_kda_fwd_chunk128_writeback_boundary"
     ],
     "negative_case_ids": [
       "chunk_kda_fwd_negative_contract",
@@ -125,6 +129,9 @@
       "legacy_chunk128_backend_0001",
       "legacy_chunk128_backend_0002",
       "legacy_model_shape_0000"
+    ],
+    "model_adapter_case_ids": [
+      "chunk_kda_model_bwd_h96"
     ]
   },
   "tolerance": {
@@ -338,6 +345,76 @@
         ]
       },
       "seed": 2028
+    },
+    {
+      "id": "chunk_kda_fwd_a5_varlen_tail_finalize",
+      "tags": [
+        "accuracy",
+        "generalization",
+        "boundary",
+        "tail",
+        "regression"
+      ],
+      "shape": {
+        "N": 2,
+        "H_k": 1,
+        "H_v": 2,
+        "T": 127,
+        "K": 128,
+        "V": 128,
+        "chunk_size": 64,
+        "N_c": 3
+      },
+      "dtype": {
+        "q_k_v": "float16",
+        "g_beta_state": "float32"
+      },
+      "layout": "TND",
+      "attrs": {
+        "layout": "TND",
+        "scale": 0.0883883476,
+        "chunk_size": 64,
+        "output_final_state": true,
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": false,
+        "use_gate_in_kernel": false,
+        "state_v_first": false
+      },
+      "optional_inputs": {
+        "initial_state": null,
+        "cu_seqlens": [
+          0,
+          90,
+          127
+        ],
+        "chunk_indices": null
+      },
+      "soc": [
+        "ascend910b",
+        "ascend910_93",
+        "ascend950"
+      ],
+      "run_on": [
+        "ascendc",
+        "aclnn"
+      ],
+      "reference": "tests/reference/chunk_kda_reference.py",
+      "expect": {
+        "return_code": "ACLNN_SUCCESS",
+        "finite_outputs": true,
+        "compare_outputs": [
+          "attn_out",
+          "final_state",
+          "gk",
+          "Aqk/Akk",
+          "w/qg/kg",
+          "u/v_new",
+          "h",
+          "initial_state_out"
+        ]
+      },
+      "seed": 20261312
     },
     {
       "id": "chunk_kda_fwd_tnd_layout",
@@ -1050,6 +1127,141 @@
           }
         }
       }
+    },
+    {
+      "id": "chunk_kda_model_bwd_h96",
+      "tags": [
+        "integration",
+        "model_adapter",
+        "backward",
+        "model_performance",
+        "determinism"
+      ],
+      "shape": {
+        "B": 1,
+        "H_k": 96,
+        "H_v": 96,
+        "T": 18432,
+        "K": 128,
+        "V": 128,
+        "chunk_size": 64,
+        "N_c": 288
+      },
+      "dtype": {
+        "q_k_v_beta": "bfloat16",
+        "g": "float32",
+        "dAqk_dAkk_dq_dk_db_dg": "float32"
+      },
+      "layout": "BSND",
+      "attrs": {
+        "layout": "BSND",
+        "scale": 0.0883883476,
+        "chunk_size": 64,
+        "output_final_state": false,
+        "disable_recompute": false,
+        "return_intermediate_states": false,
+        "safe_gate": true,
+        "use_gate_in_kernel": false,
+        "state_v_first": false
+      },
+      "optional_inputs": {
+        "initial_state": null,
+        "cu_seqlens": null,
+        "chunk_indices": null
+      },
+      "soc": [
+        "ascend910b",
+        "ascend950"
+      ],
+      "run_on": [
+        "ascendc",
+        "triton_ascend_kernels"
+      ],
+      "reference": "Ascend/triton-ascend-kernels@4cd4b506d4153ac18ac1ca8f4c770eac9fd3fcc8",
+      "expect": {
+        "return_code": "ACLNN_SUCCESS",
+        "finite_forward_and_backward": true,
+        "binary_deterministic": true,
+        "backward_input_contract": {
+          "q": [[1, 18432, 96, 128], "bfloat16"],
+          "k": [[1, 18432, 96, 128], "bfloat16"],
+          "beta": [[1, 18432, 96], "bfloat16"],
+          "g": [[1, 18432, 96, 128], "float32"],
+          "dAqk": [[1, 18432, 96, 64], "float32"],
+          "dq": [[1, 18432, 96, 128], "float32"],
+          "dk": [[1, 18432, 96, 128], "float32"],
+          "db": [[1, 18432, 96], "float32"],
+          "dg": [[1, 18432, 96, 128], "float32"],
+          "dAkk": [[1, 18432, 96, 64], "float32"]
+        }
+      },
+      "seed": 20260730
+    },
+    {
+      "id": "chunk_kda_fwd_chunk128_writeback_boundary",
+      "tags": [
+        "accuracy",
+        "generalization",
+        "boundary",
+        "tail",
+        "regression"
+      ],
+      "shape": {
+        "B": 1,
+        "H_k": 1,
+        "H_v": 2,
+        "T": 129,
+        "K": 128,
+        "V": 256,
+        "chunk_size": 128,
+        "N_c": 2
+      },
+      "dtype": {
+        "q_k_v": "float16",
+        "g_beta_state": "float32"
+      },
+      "layout": "BNSD",
+      "attrs": {
+        "layout": "BNSD",
+        "scale": 0.0883883476,
+        "chunk_size": 128,
+        "output_final_state": true,
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": true,
+        "use_gate_in_kernel": false,
+        "state_v_first": true
+      },
+      "optional_inputs": {
+        "initial_state": "present",
+        "cu_seqlens": null,
+        "chunk_indices": null
+      },
+      "soc": [
+        "ascend910b",
+        "ascend910_93",
+        "ascend950"
+      ],
+      "run_on": [
+        "ascendc",
+        "aclnn"
+      ],
+      "reference": "tests/reference/chunk_kda_reference.py",
+      "expect": {
+        "return_code": "ACLNN_SUCCESS",
+        "finite_outputs": true,
+        "compare_outputs": [
+          "attn_out",
+          "final_state",
+          "gk",
+          "Aqk/Akk",
+          "w/qg/kg",
+          "u/v_new",
+          "h",
+          "initial_state_out"
+        ]
+      },
+      "seed": 20265095
     }
   ]
 }

@@ -25,7 +25,7 @@ def _expected_mask(output_final_state, use_gate_in_kernel, disable_recompute, re
     return (
         True,
         output_final_state,
-        not use_gate_in_kernel,
+        not use_gate_in_kernel or disable_recompute,
         True,
         True,
         disable_recompute,
@@ -33,7 +33,7 @@ def _expected_mask(output_final_state, use_gate_in_kernel, disable_recompute, re
         disable_recompute,
         disable_recompute,
         disable_recompute,
-        return_states,
+        disable_recompute or return_states,
         True,
     )
 
@@ -66,9 +66,9 @@ def test_optional_output_alignment_is_pinned_to_manifest_commit():
     assert alignment["source"] == "fla/ops/kda/chunk_fwd.py"
     assert alignment["return_policy"] == {
         "final_state": "output_final_state",
-        "gk": "not use_gate_in_kernel",
+        "gk": "not use_gate_in_kernel or disable_recompute",
         "w_u_qg_kg_v_new": "disable_recompute",
-        "h": "return_intermediate_states",
+        "h": "disable_recompute or return_intermediate_states",
     }
 
     case_id = manifest["coverage_requirements"]["optional_output_case_ids"]

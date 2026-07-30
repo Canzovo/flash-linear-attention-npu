@@ -97,8 +97,8 @@ Python/legacy 包装层对齐 fla-org `chunk_kda_fwd` 提交
 
 - `Aqk/Akk` 始终返回。
 - `disable_recompute=false` 时不保留 `w/u/qg/kg/v_new`。
-- `return_intermediate_states=true` 时保留公开 `hOut`。
-- `gk` 仅在 `use_gate_in_kernel=false` 时保留。
+- `disable_recompute=true` 或 `return_intermediate_states=true` 时保留公开 `hOut`。
+- `use_gate_in_kernel=false` 或 `disable_recompute=true` 时保留 `gk`。
 - `final_state` 只在 `output_final_state=true` 时创建公开输出。
 
 内部 `hCompute` 与公开 `hOut` 是两个生命周期：`hCompute` 是 FwdH 到 Finalize 的必需

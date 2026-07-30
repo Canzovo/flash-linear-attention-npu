@@ -205,11 +205,18 @@ def _assert_close(name, actual, expected, rtol=2e-3, atol=2e-3):
         expected_float = expected_cpu.float()
         abs_diff = (actual_float - expected_float).abs()
         flat_index = int(abs_diff.argmax().item())
+        max_index = tuple(
+            int(index)
+            for index in torch.unravel_index(
+                torch.tensor(flat_index), abs_diff.shape
+            )
+        )
         max_abs = float(abs_diff.flatten()[flat_index].item())
         denominator = expected_float.abs().clamp_min(1e-12)
         max_rel = float((abs_diff / denominator).max().item())
         print(
-            f"[Mismatch] {name}: shape={tuple(actual.shape)}, max_abs={max_abs:.8g}, "
+            f"[Mismatch] {name}: shape={tuple(actual.shape)}, index={max_index}, "
+            f"max_abs={max_abs:.8g}, "
             f"max_rel={max_rel:.8g}, actual={float(actual_float.flatten()[flat_index]):.8g}, "
             f"expected={float(expected_float.flatten()[flat_index]):.8g}",
             flush=True,
@@ -1284,6 +1291,66 @@ def test_chunk_kda_fwd_fp16_matches_reference():
     _assert_close("initial_state fp16", got[11], initial_state)
 
 
+def test_chunk_kda_fwd_fp16_safe_gate_large_span_matches_reference():
+    device = _device()
+    if device.type == "cpu":
+        return
+    b, t, h, hv, kdim, vdim = 1, 64, 1, 1, 128, 128
+    q = torch.full((b, t, h, kdim), 0.125, dtype=torch.float16, device=device)
+    k = torch.full((b, t, h, kdim), 0.125, dtype=torch.float16, device=device)
+    torch.manual_seed(20260730)
+    v = (torch.randn(b, t, hv, vdim, dtype=torch.float32) * 0.02).half().to(device)
+    gate_step = -5.0 / math.log(2.0)
+    gate_rows = gate_step * torch.arange(t, dtype=torch.float32, device=device)
+    gk = gate_rows.view(1, t, 1, 1).expand(b, t, hv, kdim).contiguous()
+    beta = torch.full((b, t, hv), 0.5, dtype=torch.float32, device=device)
+    initial_state = torch.zeros((b, hv, kdim, vdim), dtype=torch.float32, device=device)
+    scale = kdim ** -0.5
+
+    got = _chunk_kda_fwd_from_gk(
+        q,
+        k,
+        v,
+        gk,
+        beta,
+        scale,
+        64,
+        layout="BSND",
+        initial_state=initial_state,
+        output_final_state=True,
+        disable_recompute=True,
+        return_intermediate_states=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        use_gate_in_kernel=False,
+    )
+    ref = chunk_kda_forward_reference(
+        q.detach().cpu(),
+        k.detach().cpu(),
+        v.detach().cpu(),
+        gk.detach().cpu(),
+        beta.detach().cpu(),
+        scale=scale,
+        chunk_size=64,
+        initial_state=initial_state.detach().cpu(),
+        output_final_state=True,
+    )
+    _assert_close(
+        "Aqk fp16 safe large span",
+        got[3],
+        _bsnd_intermediate_to_bnsd(ref.Aqk),
+        rtol=1e-2,
+        atol=3e-3,
+    )
+    _assert_close(
+        "Akk fp16 safe large span",
+        got[4],
+        _bsnd_intermediate_to_bnsd(ref.Akk),
+        rtol=1e-2,
+        atol=3e-3,
+    )
+
+
 def test_chunk_kda_fwd_tnd_matches_reference():
     device = _device()
     q, k, v, gk, beta, initial_state = _make_inputs(device, b=1, h=1, hv=2, t=128)
@@ -1721,8 +1788,13 @@ def test_chunk_kda_fwd_raw_gate_safe_modes_match_reference():
         mode = f"raw gate safe_gate={safe_gate}"
         _assert_close(f"{mode} o", got[0], ref.o, rtol=2e-2, atol=3e-2)
         _assert_close(f"{mode} final_state", got[1], ref.final_state, rtol=2e-2, atol=3e-2)
-        if got[2] is not None:
-            raise AssertionError(f"{mode} gk must be None when use_gate_in_kernel=True")
+        _assert_close(
+            f"{mode} gk",
+            got[2],
+            gk_head,
+            rtol=2e-3,
+            atol=2e-3,
+        )
         _assert_close(f"{mode} Aqk", got[3], _bsnd_intermediate_to_bnsd(ref.Aqk), rtol=2e-2, atol=2e-2)
         _assert_close(f"{mode} Akk", got[4], _bsnd_intermediate_to_bnsd(ref.Akk), rtol=2e-2, atol=2e-2)
 
@@ -1977,6 +2049,7 @@ if __name__ == "__main__":
         test_chunk_kda_fwd_raw_gate_safe_modes_match_reference()
         test_chunk_kda_fwd_bf16_gate_matches_reference()
         test_chunk_kda_fwd_fp16_matches_reference()
+        test_chunk_kda_fwd_fp16_safe_gate_large_span_matches_reference()
         test_chunk_kda_fwd_tnd_matches_reference()
         test_chunk_kda_fwd_tnd_multi_head_supported()
         test_chunk_kda_fwd_bnsd_direct_matches_reference()
@@ -1994,6 +2067,7 @@ if __name__ == "__main__":
     test_chunk_kda_fwd_matches_reference()
     test_chunk_kda_fwd_bf16_gate_matches_reference()
     test_chunk_kda_fwd_fp16_matches_reference()
+    test_chunk_kda_fwd_fp16_safe_gate_large_span_matches_reference()
     test_chunk_kda_fwd_tnd_matches_reference()
     test_chunk_kda_fwd_tnd_multi_head_supported()
     test_chunk_kda_fwd_bnsd_direct_matches_reference()

@@ -968,7 +968,8 @@ private:
                                              uint64_t curT)
     {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        if (BT_ == 64) {
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
+        if (BT_ == 64 && curT == BT_) {
             ComputeOutputCubeFusedA5(b, hv, chunkIdx, start, curT);
             return;
         }
@@ -1044,7 +1045,9 @@ private:
         const uint64_t gateWritebackBytes =
             gateWritebackRows * K_ * (3 * sizeof(T) + sizeof(GK_T));
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        uint64_t maxRows = KDA_VEC_ARENA_ELEMENTS / V_;
+        const bool fusedA5Output = BT_ == 64 && curT == BT_;
+        uint64_t maxRows =
+            KDA_VEC_ARENA_ELEMENTS / ((fusedA5Output ? 1 : 3) * V_);
 #else
         uint64_t maxRows = KDA_VEC_ARENA_ELEMENTS / (3 * V_);
 #endif
@@ -1065,12 +1068,22 @@ private:
             const uint64_t ti = start + tileRow;
             LocalTensor<float> arena = vecBuf_.Get<float>();
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            LocalTensor<float> outLocal = arena;
+            LocalTensor<float> stateLocal = arena;
+            LocalTensor<float> localLocal = arena[elems];
+            LocalTensor<float> outLocal =
+                fusedA5Output ? arena : arena[2 * elems];
             LocalTensor<T> outTyped = gateWritebackBuf_.Get<T>();
 
-            CopyVectorIn(outLocal, o_, KVOffset(b, hv, ti, 0, V_), elems);
+            CopyVectorIn(stateLocal, o_, KVOffset(b, hv, ti, 0, V_), elems);
+            if (!fusedA5Output) {
+                CopyVectorIn(localLocal, u_, KVOffset(b, hv, ti, 0, V_), elems);
+            }
             SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            if (!fusedA5Output) {
+                Add(outLocal, stateLocal, localLocal, static_cast<uint32_t>(elems));
+                PipeBarrier<PIPE_V>();
+            }
 #else
             LocalTensor<float> stateLocal = arena;
             LocalTensor<float> localLocal = arena[elems];

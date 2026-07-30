@@ -24,6 +24,7 @@
 #include "catlass/gemm/block/block_mmad.hpp"
 #include "catlass/gemm/dispatch_policy.hpp"
 #include "catlass/gemm/tile/tile_copy.hpp"
+#include "catlass/gemm/tile/tile_mmad.hpp"
 #include "catlass/gemm_coord.hpp"
 #include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
 #include "catlass/layout/layout.hpp"
@@ -78,6 +79,9 @@ constexpr uint32_t KDA_SCORE_SCRATCH_W = 1;
 constexpr uint32_t KDA_SCORE_SCRATCH_KG = 2;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_GATE_TILE_ROWS = 32;
+constexpr uint32_t KDA_POST_EVENT = 3;
+constexpr uint32_t KDA_POST_EVENT_NEXT = 4;
+constexpr uint32_t KDA_POST_EVENT_FIX = 5;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 using KdaArchTag = Catlass::Arch::Ascend950;
@@ -514,15 +518,142 @@ private:
                V_ <= 256 && K_ % 16 == 0 && V_ % 16 == 0;
     }
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    __aicore__ inline bool UseFusedPostWuCubeA5(uint64_t curT) const
+    {
+        return curT == 64 && BT_ == 64 && K_ == 128 && V_ == 128;
+    }
+
+    __aicore__ inline void ComputePostWuCubeFusedA5(uint64_t b, uint64_t hv, uint64_t start)
+    {
+        using ElementA = T;
+        using ElementB = T;
+        using ElementC = T;
+        using LayoutTagA = Catlass::layout::RowMajor;
+        using LayoutTagB = Catlass::layout::RowMajor;
+        using LayoutTagC = Catlass::layout::RowMajor;
+        using TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<
+            KdaArchTag, ElementA, LayoutTagA, ElementB, LayoutTagB, ElementC, LayoutTagC>;
+
+        constexpr uint32_t m = 64;
+        constexpr uint32_t n = 128;
+        constexpr uint32_t k = 64;
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
+
+        auto layoutA = tla::MakeLayout<ElementA, LayoutTagA>(m, k);
+        auto layoutB = tla::MakeLayout<ElementB, LayoutTagB>(k, n);
+        auto layoutC = tla::MakeLayout<ElementC, LayoutTagC>(m, n);
+        auto tensorA = tla::MakeTensor(
+            preparedAqk_[AOffset(b, hv, start, 0)], layoutA, Catlass::Arch::PositionGM{});
+        auto tensorW = tla::MakeTensor(
+            preparedQG_[KVOffset(b, hv, start, 0, K_)], layoutB, Catlass::Arch::PositionGM{});
+        auto tensorU = tla::MakeTensor(
+            propagatedVNew_[KVOffset(b, hv, start, 0, V_)], layoutB, Catlass::Arch::PositionGM{});
+        auto tensorWOut = tla::MakeTensor(
+            w_[KVOffset(b, hv, start, 0, K_)], layoutC, Catlass::Arch::PositionGM{});
+        auto tensorUOut = tla::MakeTensor(
+            u_[KVOffset(b, hv, start, 0, V_)], layoutC, Catlass::Arch::PositionGM{});
+        auto blockA = GetTile(tensorA, tla::MakeCoord(0, 0), tla::MakeShape(m, k));
+        auto blockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
+        auto blockU = GetTile(tensorU, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
+        auto blockWOut = GetTile(tensorWOut, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
+        auto blockUOut = GetTile(tensorUOut, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
+
+        Catlass::Arch::Resource<KdaArchTag> resource;
+        constexpr uint32_t aBytes = m * k * sizeof(ElementA);
+        constexpr uint32_t bBytes = k * n * sizeof(ElementB);
+        LocalTensor<ElementA> l1A = resource.l1Buf.template GetBufferByByte<ElementA>(0);
+        LocalTensor<ElementB> l1B0 = resource.l1Buf.template GetBufferByByte<ElementB>(aBytes);
+        LocalTensor<ElementB> l1B1 = resource.l1Buf.template GetBufferByByte<ElementB>(aBytes + bBytes);
+        LocalTensor<ElementA> l0A = resource.l0ABuf.template GetBufferByByte<ElementA>(0);
+        LocalTensor<ElementB> l0B = resource.l0BBuf.template GetBufferByByte<ElementB>(0);
+        LocalTensor<float> l0C = resource.l0CBuf.template GetBufferByByte<float>(0);
+
+        using LayoutTagL1A = typename TileCopy::LayoutTagL1A;
+        using LayoutTagL1B = typename TileCopy::LayoutTagL1B;
+        using LayoutTagL0A = typename TileCopy::LayoutTagL0A;
+        using LayoutTagL0B = typename TileCopy::LayoutTagL0B;
+        using CopyGmToL1A = typename TileCopy::template CopyGmToL1A<decltype(blockA)>;
+        using CopyGmToL1B = typename TileCopy::template CopyGmToL1B<decltype(blockW)>;
+        using CopyL1ToL0A = typename TileCopy::CopyL1ToL0A;
+        using CopyL1ToL0B = typename TileCopy::CopyL1ToL0B;
+        using CopyL0CToDst = typename TileCopy::template CopyL0CToDst<decltype(blockWOut)>;
+        using TileMmad =
+            Catlass::Gemm::Tile::TileMmadTla<KdaArchTag, ElementA, LayoutTagL1A>;
+
+        auto layoutL1A = tla::MakeLayout<ElementA, LayoutTagL1A>(m, k);
+        auto layoutL1B = tla::MakeLayout<ElementB, LayoutTagL1B>(k, n);
+        auto layoutL0A = tla::MakeLayout<ElementA, LayoutTagL0A>(m, k);
+        auto layoutL0B = tla::MakeLayout<ElementB, LayoutTagL0B>(k, n);
+        auto layoutL0C = tla::MakeLayoutL0C(m, n);
+        auto tensorL1A = tla::MakeTensor(l1A, layoutL1A, Catlass::Arch::PositionL1{});
+        auto tensorL1B0 = tla::MakeTensor(l1B0, layoutL1B, Catlass::Arch::PositionL1{});
+        auto tensorL1B1 = tla::MakeTensor(l1B1, layoutL1B, Catlass::Arch::PositionL1{});
+        auto tensorL0A = tla::MakeTensor(l0A, layoutL0A, Catlass::Arch::PositionL0A{});
+        auto tensorL0B = tla::MakeTensor(l0B, layoutL0B, Catlass::Arch::PositionL0B{});
+        auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
+        auto tileL1A = GetTile(tensorL1A, tla::MakeCoord(0, 0), tla::MakeShape(m, k));
+        auto tileL1B0 = GetTile(tensorL1B0, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
+        auto tileL1B1 = GetTile(tensorL1B1, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
+        auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0), tla::MakeShape(m, k));
+        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
+        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
+
+        CopyGmToL1A copyGmToL1A;
+        CopyGmToL1B copyGmToL1B;
+        CopyL1ToL0A copyL1ToL0A;
+        CopyL1ToL0B copyL1ToL0B;
+        CopyL0CToDst copyL0CToDst;
+        TileMmad tileMmad;
+
+        copyGmToL1A(tensorL1A, blockA);
+        copyGmToL1B(tensorL1B0, blockW);
+        SetFlag<HardEvent::MTE2_MTE1>(KDA_POST_EVENT);
+        WaitFlag<HardEvent::MTE2_MTE1>(KDA_POST_EVENT);
+        copyL1ToL0A(tileL0A, tileL1A);
+        copyL1ToL0B(tileL0B, tileL1B0);
+        SetFlag<HardEvent::MTE1_M>(KDA_POST_EVENT);
+        copyGmToL1B(tensorL1B1, blockU);
+        SetFlag<HardEvent::MTE2_MTE1>(KDA_POST_EVENT_NEXT);
+        WaitFlag<HardEvent::MTE1_M>(KDA_POST_EVENT);
+        tileMmad(tileL0C, tileL0A, tileL0B, m, n, k, true, 0);
+        SetFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
+        SetFlag<HardEvent::M_MTE1>(KDA_POST_EVENT);
+        WaitFlag<HardEvent::MTE2_MTE1>(KDA_POST_EVENT_NEXT);
+        WaitFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
+        WaitFlag<HardEvent::M_MTE1>(KDA_POST_EVENT);
+        copyL0CToDst(blockWOut, tensorL0C);
+        SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
+
+        copyL1ToL0B(tileL0B, tileL1B1);
+        SetFlag<HardEvent::MTE1_M>(KDA_POST_EVENT_NEXT);
+        WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
+        WaitFlag<HardEvent::MTE1_M>(KDA_POST_EVENT_NEXT);
+        tileMmad(tileL0C, tileL0A, tileL0B, m, n, k, true, 0);
+        SetFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
+        WaitFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
+        copyL0CToDst(blockUOut, tensorL0C);
+        SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
+        WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
+    }
+#endif
+
     __aicore__ inline void ComputePostWuCube(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
                                              uint64_t curT)
     {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if (UseFusedPostWuCubeA5(curT)) {
+            ComputePostWuCubeFusedA5(b, hv, start);
+            return;
+        }
+#endif
         using ElementA = AKK_T;
         using ElementB = T;
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
         using LayoutTagC = Catlass::layout::RowMajor;
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
         using WTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
                                                                  LayoutTagB, T, LayoutTagC>;
 #else
@@ -550,7 +681,6 @@ private:
         using UBlockMmad256 = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape256,
                                                                   PostL0TileShape256,
                                                                   ElementA, ElementB, OUT_T, void, UTileCopy>;
-
         LayoutTagA tagA = LayoutTagA::template MakeLayout<ElementA>(BT_, BT_);
         auto layoutA = tla::MakeLayoutFromTag(tagA);
         auto tensorA = tla::MakeTensor(preparedAqk_[AOffset(b, hv, start, 0)], layoutA,
@@ -571,7 +701,7 @@ private:
                                            Catlass::Arch::PositionGM{});
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
             auto tensorC = tla::MakeTensor(w_[KVOffset(b, hv, start, 0, K_)], layoutC,
-                                            Catlass::Arch::PositionGM{});
+                                           Catlass::Arch::PositionGM{});
 #else
             auto tensorC = tla::MakeTensor(h_[WScratchOffset(b, hv, chunkIdx, 0, 0)], layoutC,
                                             Catlass::Arch::PositionGM{});
@@ -699,6 +829,62 @@ private:
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    template <typename SrcTensor, typename DstTensor>
+    __aicore__ inline void ComputeTailWuRow(GlobalTensor<SrcTensor> &src, GlobalTensor<DstTensor> &dst,
+                                            uint64_t akkBase, uint64_t srcBase, uint64_t dstBase, uint64_t curT,
+                                            uint64_t dim)
+    {
+        LocalTensor<float> acc = vecBuf_.Get<float>();
+        LocalTensor<float> value = vecBuf_.Get<float>()[512];
+        LocalTensor<SrcTensor> typed = vecBuf_.Get<SrcTensor>()[4096];
+        LocalTensor<T> coefficientTyped = exp2Buf_.Get<T>();
+        LocalTensor<float> coefficients = exp2Buf_.Get<float>()[128];
+        CopyVectorIn(coefficientTyped, preparedAqk_, akkBase, curT);
+        SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        Cast(coefficients, coefficientTyped, RoundMode::CAST_NONE, static_cast<uint32_t>(curT));
+        PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        for (uint64_t j = 0; j < curT; ++j) {
+            LoadAsFloatVector(src, srcBase + j * dim, value, typed, dim);
+            float coefficient = coefficients.GetValue(j);
+            SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+            Muls(value, value, coefficient, static_cast<uint32_t>(dim));
+            PipeBarrier<PIPE_V>();
+            if (j == 0) {
+                Adds(acc, value, 0.0f, static_cast<uint32_t>(dim));
+            } else {
+                Add(acc, acc, value, static_cast<uint32_t>(dim));
+            }
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
+            WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
+        }
+        SetFlag<HardEvent::S_MTE2>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::S_MTE2>(EXP2_EVENT_ID);
+        ClampFp32ToOutputType(acc, static_cast<uint32_t>(dim));
+        StoreFloatRow(dst, dstBase, acc, dim);
+    }
+
+    __aicore__ inline void ComputeTailWuVector(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+                                               uint64_t curT, uint64_t subBlockIdx, uint64_t subBlockNum)
+    {
+        uint64_t rowBegin = (curT * subBlockIdx) / subBlockNum;
+        uint64_t rowEnd = (curT * (subBlockIdx + 1)) / subBlockNum;
+        for (uint64_t row = rowBegin; row < rowEnd; ++row) {
+            ComputeTailWuRow(
+                preparedQG_, w_, AOffset(b, hv, start + row, 0), KVOffset(b, hv, start, 0, K_),
+                KVOffset(b, hv, start + row, 0, K_), curT, K_);
+            ComputeTailWuRow(
+                propagatedVNew_, u_, AOffset(b, hv, start + row, 0), KVOffset(b, hv, start, 0, V_),
+                KVOffset(b, hv, start + row, 0, V_), curT, V_);
+        }
+    }
+#endif
     __aicore__ inline bool ResolveFlatChunk(uint64_t task, uint64_t &seq, uint64_t &b, uint64_t &h, uint64_t &hv,
                                             uint64_t &chunkIdx, uint64_t &start, uint64_t &end)
     {
@@ -744,6 +930,9 @@ private:
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         CopyScratchWAndFinalizeKg(b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
         Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+        if (curT != BT_) {
+            ComputeTailWuVector(b, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
+        }
 #else
         Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
         CopyScratchWAndFinalizeKg(b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);

@@ -27,6 +27,11 @@ def main():
     parser.add_argument("--launch-count", type=int, default=20)
     parser.add_argument("--warm-up", type=int, default=5)
     parser.add_argument(
+        "--aic-metrics",
+        default="BasicInfo",
+        help="comma-separated msopprof metric groups",
+    )
+    parser.add_argument(
         "--replay-mode",
         choices=("application", "kernel", "range"),
         default="application",
@@ -46,7 +51,7 @@ def main():
     application = f"{shlex.quote(sys.executable)} {shlex.quote(str(RUNNER))}"
     command = [
         "msopprof", f"--application={application}", f"--output={args.output}",
-        "--aic-metrics=BasicInfo", f"--launch-count={args.launch_count}",
+        f"--aic-metrics={args.aic_metrics}", f"--launch-count={args.launch_count}",
         f"--warm-up={args.warm_up}", f"--replay-mode={args.replay_mode}",
         f"--kill={args.kill}",
     ]

@@ -68,10 +68,10 @@ Python 返回顺序为：
 | 条件 | 返回 |
 | --- | --- |
 | `output_final_state=true` | 返回 `final_state`，否则为 `None` |
-| `use_gate_in_kernel=false` | 返回 `gk` |
+| `use_gate_in_kernel=false` 或 `disable_recompute=true` | 返回 `gk` |
 | 始终 | 返回 `Aqk/Akk` |
 | `disable_recompute=true` | 返回 `w/u/qg/kg/v_new` |
-| `return_intermediate_states=true` | 返回 `h` |
+| `disable_recompute=true` 或 `return_intermediate_states=true` | 返回 `h` |
 
 这是 `fla_npu.ops.ascendc.chunk_kda_fwd` 的低层 12 返回值语义；不涉及 CP。aclnn L2 不接收
 `output_final_state/disable_recompute/return_intermediate_states`，每个可选输出是否写出仅由对应

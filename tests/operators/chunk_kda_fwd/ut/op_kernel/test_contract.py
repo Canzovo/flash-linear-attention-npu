@@ -180,10 +180,69 @@ def test_fp16_score_pipeline_does_not_fall_back_to_two_row_cube_tiles():
         "__aicore__ inline uint64_t ScoreRefBlockSize() const", 1
     )[1].split("__aicore__ inline uint64_t ScoreRowBlockCount", 1)[0]
     assert "KDA_SCORE_REF_BC = 32" in prepare
-    assert "KDA_SAFE_SCORE_REF_BC = 16" in prepare
+    assert "KDA_SAFE_SCORE_REF_BC = 32" in prepare
     assert "return KDA_SAFE_SCORE_REF_BC;" in score_ref_block
     assert "return KDA_SCORE_REF_BC;" in score_ref_block
     assert "return 2;" not in score_ref_block
+
+
+def test_safe_fp16_score_pipeline_uses_bf16_on_all_supported_soc():
+    prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    score_type = prepare.split("using SCORE_T =", 1)[1].split(";", 1)[0]
+
+    assert "SAFE_GATE && IsSameType<T, half>::value" in score_type
+    assert "bfloat16_t" in score_type
+    assert "__CCE_AICORE__" not in score_type
+
+
+def test_fwd_h_varlen_metadata_is_resolved_locally_without_shared_writes():
+    schedulers = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/"
+        "chunk_gated_delta_rule_fwd_h/op_kernel/gemm/block/"
+        "block_scheduler_gdn_fwd_h.hpp",
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/"
+        "chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/block/"
+        "block_scheduler_gdn_fwd_h.hpp",
+    )
+    for path in schedulers:
+        source = path.read_text(encoding="utf-8")
+        init = source.split("void InitRuntime(", 1)[1].split(
+            "void ResolveVarlenSequence(", 1
+        )[0]
+        resolve = source.split("void ResolveVarlenSequence(", 1)[1].split(
+            "void InitNewStream(", 1
+        )[0]
+
+        assert "writeMetadata" not in init
+        assert "chunkPrefix += batchChunk" in init
+        assert "totalChunks = chunkPrefix" in init
+        assert "totalTokens = prevSeq" in init
+        assert "inputTokenBatch = tokenBatch" in init
+        assert "gmNumChunks.SetValue" not in source
+        assert "gmNumSeq.SetValue" not in source
+        assert "gmNumChunks.GetValue" not in source
+        assert "gmNumSeq.GetValue" not in source
+        assert "gmSeqlen.GetValue" in resolve
+        assert "stream.chunkOffset" in resolve
+        assert "stream.tokenOffset" in resolve
+
+    kernels = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/"
+        "chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/"
+        "gdn_fwd_h_kernel.hpp",
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/"
+        "chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/"
+        "gdn_fwd_h_kernel.hpp",
+    )
+    for path in kernels:
+        source = path.read_text(encoding="utf-8")
+        assert "GetVarlenChunkOffset(batchIdx)" in source
+        assert "gmNumChunks.GetValue" not in source
+        assert "gmNumSeq.GetValue" not in source
 
 
 def test_prepare_aiv_overlaps_gate_mte2_with_vec_using_two_ub_slots():
@@ -220,15 +279,45 @@ def test_prepare_uses_a5_regbase_gate_math_with_a2_a3_fallback():
     assert '#include "kernel_utils/vector/regbase.hpp"' in prepare
     assert "static __simd_vf__ inline void PrepareKdaGateQwRegbase" in prepare
     assert "static __simd_vf__ inline void PrepareKdaGateKgRegbase" in prepare
-    assert "PrepareKdaGateQwKgRegbase<T, GK_T, true, true>" in prepare
-    assert "PrepareKdaGateQwKgRegbase<T, GK_T, true, false>" in prepare
-    assert "PrepareKdaGateQwKgRegbase<T, GK_T, false, false>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, SCORE_T, GK_T, true, true>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, SCORE_T, GK_T, true, false>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, T, GK_T, true, false>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, T, GK_T, false, false>" in prepare
     assert "ClampKdaGateRegbaseOutput" in prepare
     assert "KDA_EXP_INPUT_MAX" in prepare
     assert "KDA_EXP_INPUT_MIN" in prepare
     assert "row >= validRows" in prepare
     assert "#if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310" in prepare
     assert "Cast(qTyped, outFp32, RoundMode::CAST_RINT" in prepare
+
+
+def test_a5_fused_post_wu_protects_l0c_reuse_with_fix_to_cube_events():
+    post_wu = STAGE_IMPLEMENTATIONS["post_wu"].read_text(encoding="utf-8")
+    fused = post_wu.split(
+        "__aicore__ inline void ComputePostWuCubeFusedA5", 1
+    )[1].split("__aicore__ inline void ComputePostWuCube(", 1)[0]
+
+    assert fused.count("SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX)") == 2
+    assert fused.count("WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX)") == 2
+    assert "FIX_MTE2>(KDA_POST_EVENT_FIX)" not in fused
+
+
+def test_a5_finalize_fused_cube_is_limited_to_full_chunks():
+    finalize = STAGE_IMPLEMENTATIONS["output"].read_text(encoding="utf-8")
+    dispatch = finalize.split(
+        "__aicore__ inline void ComputeOutputCube(", 1
+    )[1].split("using ElementA = T;", 1)[0]
+    writeback = finalize.split(
+        "__aicore__ inline void FinalizeOutputRows(", 1
+    )[1].split("__aicore__ inline bool ResolveFlatChunk(", 1)[0]
+
+    assert "BT_ == 64 && curT == BT_" in dispatch
+    assert "ComputeOutputCubeFusedA5" in dispatch
+    assert "const bool fusedA5Output = BT_ == 64 && curT == BT_;" in writeback
+    assert "fusedA5Output ? 1 : 3" in writeback
+    assert "if (!fusedA5Output)" in writeback
+    assert "CopyVectorIn(localLocal, u_" in writeback
+    assert "Add(outLocal, stateLocal, localLocal" in writeback
 
 
 def test_fwd_h_uses_fixed_scalar_exp_and_keywise_exp2_on_a2_and_a5():

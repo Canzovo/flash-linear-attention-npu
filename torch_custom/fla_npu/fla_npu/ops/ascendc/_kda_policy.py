@@ -24,7 +24,7 @@ def kda_fwd_optional_output_mask(
     return (
         True,
         output_final_state,
-        not use_gate_in_kernel,
+        not use_gate_in_kernel or disable_recompute,
         True,
         True,
         disable_recompute,
@@ -32,6 +32,6 @@ def kda_fwd_optional_output_mask(
         disable_recompute,
         disable_recompute,
         disable_recompute,
-        return_intermediate_states,
+        disable_recompute or return_intermediate_states,
         True,
     )

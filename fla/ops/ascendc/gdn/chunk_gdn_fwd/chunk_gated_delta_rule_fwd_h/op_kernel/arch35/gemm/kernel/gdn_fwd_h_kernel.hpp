@@ -550,7 +550,7 @@ public:
                     uint32_t batchIdx = taskIdx / vNumHead;
                     uint32_t vHeadIdx = taskIdx % vNumHead;
                     uint32_t chunkOffset =
-                        isVariedLen ? static_cast<uint32_t>(gmNumChunks.GetValue(batchIdx)) : 0;
+                        isVariedLen ? vecBlockScheduler.GetVarlenChunkOffset(batchIdx) : 0;
                     uint32_t shapeBatchIdx = isVariedLen ? 0 : batchIdx;
                     uint32_t hBaseOffset =
                         (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset) *
