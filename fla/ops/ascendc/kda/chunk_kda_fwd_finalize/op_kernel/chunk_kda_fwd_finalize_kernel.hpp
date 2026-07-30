@@ -409,6 +409,45 @@ private:
     }
 
     template <typename CopyT>
+    __aicore__ inline void CopyRowsOut(GlobalTensor<CopyT> &dst, uint64_t offset, LocalTensor<CopyT> &src,
+                                       uint64_t rows, uint64_t cols, uint64_t dstStride)
+    {
+        if (cols == dstStride) {
+            CopyVectorOut(dst, offset, src, rows * cols);
+            return;
+        }
+        constexpr uint64_t blockBytes = 32;
+        const uint64_t rowBytes = cols * sizeof(CopyT);
+        const uint64_t gapBytes = (dstStride - cols) * sizeof(CopyT);
+        DataCopyParams params{
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            1,
+#else
+            static_cast<uint16_t>(rows),
+#endif
+            static_cast<uint16_t>(rowBytes / blockBytes),
+            0,
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            0
+#else
+            static_cast<uint16_t>(gapBytes / blockBytes)
+#endif
+        };
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        const uint64_t dstRowBytes = dstStride * sizeof(CopyT);
+        LoopModeParams loopParams{
+            static_cast<uint32_t>(rows), 1, rowBytes, dstRowBytes, 0, 0};
+        // Loop-mode registers are core-local state and must not leak across DMA calls.
+        ResetLoopModePara(DataCopyMVType::UB_TO_OUT);
+        SetLoopModePara(loopParams, DataCopyMVType::UB_TO_OUT);
+        DataCopy(dst[offset], src, params);
+        ResetLoopModePara(DataCopyMVType::UB_TO_OUT);
+#else
+        DataCopy(dst[offset], src, params);
+#endif
+    }
+
+    template <typename CopyT>
     __aicore__ inline void CopyRowIn(LocalTensor<CopyT> &dst, GlobalTensor<CopyT> &src, uint64_t offset)
     {
         CopyVectorIn(dst, src, offset, K_);
@@ -655,11 +694,17 @@ private:
                 copyL1ToL0A(tileL0A1, tileL1A1);
                 copyL1ToL0B(tileL0B1, tileL1B1);
                 SetFlag<HardEvent::MTE1_M>(kMte1Event);
+                SetFlag<HardEvent::MTE1_MTE2>(kMte2Event);
                 WaitFlag<HardEvent::MTE1_M>(kMte1Event);
+                WaitFlag<HardEvent::MTE1_MTE2>(kMte2Event);
                 tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT), false, 0);
+                SetFlag<HardEvent::M_MTE1>(kMmadEvent);
+                WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
                 SetFlag<HardEvent::M_FIX>(kFixEvent);
                 WaitFlag<HardEvent::M_FIX>(kFixEvent);
                 copyL0CToDst(blockO, tileL0C);
+                SetFlag<HardEvent::FIX_M>(kFixEvent);
+                WaitFlag<HardEvent::FIX_M>(kFixEvent);
                 SetFlag<HardEvent::FIX_MTE2>(kFixEvent);
                 WaitFlag<HardEvent::FIX_MTE2>(kFixEvent);
             }
@@ -1045,10 +1090,7 @@ private:
 
             SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
             WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
-            for (uint64_t row = 0; row < tileRows; ++row) {
-                LocalTensor<T> rowTyped = outTyped[row * V_];
-                CopyVectorOut(vNew_, OutputOffset(b, hv, ti + row, 0), rowTyped, V_);
-            }
+            CopyRowsOut(vNew_, OutputOffset(b, hv, ti, 0), outTyped, tileRows, V_, HV_ * V_);
             SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
             WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
             SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
@@ -1149,12 +1191,6 @@ private:
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        if (K_ == 128 && V_ == 128 && BT_ == 64) {
-            ProcessOutAicPipelinedA5();
-            return;
-        }
-#endif
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
         for (uint64_t task = GetBlockIdx(); task < taskNum; task += coreNum) {

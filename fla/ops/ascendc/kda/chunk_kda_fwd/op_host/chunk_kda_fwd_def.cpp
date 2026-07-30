@@ -71,13 +71,10 @@ public:
         this->Attr("layout").AttrType(OPTIONAL).String("BSND");
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
-        this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
         this->Attr("safe_gate").AttrType(REQUIRED).Bool(false);
         this->Attr("lower_bound").AttrType(OPTIONAL).Float(-5.0);
         this->Attr("use_gate_in_kernel").AttrType(REQUIRED).Bool(false);
-        this->Attr("disable_recompute").AttrType(REQUIRED).Bool(false);
-        this->Attr("return_intermediate_states").AttrType(REQUIRED).Bool(false);
-        this->Attr("state_v_first").AttrType(REQUIRED).Bool(false);
+        this->Attr("state_v_first").AttrType(OPTIONAL).Bool(false);
     }
 };
 

@@ -51,6 +51,7 @@ static __simd_vf__ inline void AccumulateGateRowRegbase(__ubuf__ float *input, _
         StoreAlign(output + offset + FLOAT_ELEMENTS_PER_REG, accOneReg, floatMask);
     }
 }
+
 #endif
 
 template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE>

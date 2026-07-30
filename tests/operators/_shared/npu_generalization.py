@@ -397,9 +397,9 @@ def _run_chunk_kda_fwd(torch, ops, case, device):
     k_head_shape = (Hv, T, K) if rank3 else (B, Hv, T, K)
     v_head_shape = (Hv, T, V) if rank3 else (B, Hv, T, V)
     h_shape = (
-        (Hv, _chunk_count(case), *state_tail)
+        (_chunk_count(case), Hv, *state_tail)
         if rank3
-        else (B, Hv, _chunk_count(case), *state_tail)
+        else (B, _chunk_count(case), Hv, *state_tail)
     )
     expected = [attn_shape]
     if attrs["output_final_state"]:

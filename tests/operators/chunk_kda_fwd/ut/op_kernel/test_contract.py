@@ -125,22 +125,32 @@ def test_intermediate_outputs_keep_canonical_bnsd_graph_views_between_stages():
     aclnn = (OP_ROOT / "op_host/op_api/aclnn_chunk_kda_fwd.cpp").read_text(
         encoding="utf-8"
     )
-    compute_names = {
+    required_compute_names = {
         "aqkOut": "aqkCompute",
         "akkOut": "akkCompute",
-        "wOut": "wCompute",
-        "uOut": "uCompute",
-        "qgOut": "qgCompute",
-        "kgOut": "kgCompute",
-        "vNewOut": "vNewCompute",
-        "hOut": "hCompute",
     }
-    for output, compute in compute_names.items():
+    for output, compute in required_compute_names.items():
         assert f"const aclTensor *{compute} = params.{output};" in aclnn
         assert f"AsRank4({compute}," in aclnn
         assert f"Transpose(params.{output}" not in aclnn
+    optional_names = {
+        "wOut": ("wExport", "wCompute"),
+        "uOut": ("uExport", "uCompute"),
+        "qgOut": ("qgExport", "qgCompute"),
+        "kgOut": ("kgExport", "kgCompute"),
+        "vNewOut": ("vNewExport", "vNewCompute"),
+        "hOut": ("hExport", "hCompute"),
+    }
+    for output, (export, compute) in optional_names.items():
+        assert f"const aclTensor *{export} = params.{output};" in aclnn
+        assert f"const aclTensor *{compute} = AllocTensor(" in aclnn
+        assert f"Transpose(params.{output}" not in aclnn
     assert "MakeShape({info.batch, info.hvNum, info.seqlen" in aclnn
     assert "MakeShape({info.batch, info.hvNum, info.totalChunks" in aclnn
+    assert "MakeShape({info.batch, info.totalChunks, info.hvNum" in aclnn
+    assert "std::vector<int64_t>{0, 2, 1, 3, 4}" in aclnn
+    assert "std::vector<int64_t>{0, 2, 1, 4, 3}" in aclnn
+    assert "use fixed sequence-major layout" in aclnn
 
 
 def test_safe_gate_is_supported_across_public_and_direct_routes():
@@ -210,8 +220,9 @@ def test_prepare_uses_a5_regbase_gate_math_with_a2_a3_fallback():
     assert '#include "kernel_utils/vector/regbase.hpp"' in prepare
     assert "static __simd_vf__ inline void PrepareKdaGateQwRegbase" in prepare
     assert "static __simd_vf__ inline void PrepareKdaGateKgRegbase" in prepare
-    assert "PrepareKdaGateQwKgRegbase<T, GK_T, true>" in prepare
-    assert "PrepareKdaGateQwKgRegbase<T, GK_T, false>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, GK_T, true, true>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, GK_T, true, false>" in prepare
+    assert "PrepareKdaGateQwKgRegbase<T, GK_T, false, false>" in prepare
     assert "ClampKdaGateRegbaseOutput" in prepare
     assert "KDA_EXP_INPUT_MAX" in prepare
     assert "KDA_EXP_INPUT_MIN" in prepare
@@ -313,12 +324,79 @@ def test_kda_keeps_fp32_recurrence_when_final_state_is_not_returned():
         encoding="utf-8"
     )
     l0 = (OP_ROOT / "op_host/op_api/chunk_kda_fwd.cpp").read_text(encoding="utf-8")
-    assert "const aclTensor *finalStateCompute = params.finalStateOut;" in aclnn
-    assert "if (!params.outputFinalState || params.stateVFirst)" in aclnn
+    assert "const bool outputFinalState = params.finalStateOut != nullptr;" in aclnn
+    assert "const aclTensor *finalStateCompute = AllocTensor(" in aclnn
     assert "MakeShape({info.seqNum, info.hvNum, info.kDim, info.vDim})" in aclnn
     assert "AllocTensor(executorPtr, stateShape4, DataType::DT_FLOAT)" in aclnn
     assert "finalStateCompute, aqkCompute," in aclnn
     assert "chunkIndicesOptional, outputFinalState, chunkSize, hOut, vNewOut," in l0
+
+
+def test_aclnn_l2_optional_outputs_are_pointer_driven():
+    aclnn = (OP_ROOT / "op_host/op_api/aclnn_chunk_kda_fwd.cpp").read_text(
+        encoding="utf-8"
+    )
+    header = (OP_ROOT / "op_host/op_api/aclnn_chunk_kda_fwd.h").read_text(
+        encoding="utf-8"
+    )
+    op_def = (OP_ROOT / "op_host/chunk_kda_fwd_def.cpp").read_text(encoding="utf-8")
+
+    for policy in (
+        "outputFinalState",
+        "disableRecompute",
+        "returnIntermediateStates",
+    ):
+        assert policy not in header
+    for policy in (
+        '"output_final_state"',
+        '"disable_recompute"',
+        '"return_intermediate_states"',
+    ):
+        assert policy not in op_def
+    assert "const bool outputFinalState = params.finalStateOut != nullptr;" in aclnn
+    assert "params.useGateInKernel || params.gkOut != nullptr" not in aclnn
+    assert "const aclTensor *gkCompute = params.gkOut;" in aclnn
+    assert "if (gkCompute == nullptr)" in aclnn
+    for compute_name in (
+        "wCompute",
+        "uCompute",
+        "qgCompute",
+        "kgCompute",
+        "vNewCompute",
+        "hCompute",
+    ):
+        assert f"const aclTensor *{compute_name} = AllocTensor(" in aclnn
+    for result_index, export_name in (
+        (4, "wExport"),
+        (5, "uExport"),
+        (6, "qgExport"),
+        (7, "kgExport"),
+        (8, "vNewExport"),
+    ):
+        assert f"if ({export_name} != nullptr)" in aclnn
+        assert f"l0op::ViewCopy(result[{result_index}]" in aclnn
+    assert "if (hExport != nullptr)" in aclnn
+    assert "const aclTensor *hResult = Transpose(result[9], hPerm, executorPtr);" in aclnn
+    assert "l0op::ViewCopy(hResult, hExport" in aclnn
+
+
+def test_state_v_first_defaults_false_and_legacy_returns_are_optional():
+    runtime = (
+        ROOT / "torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py"
+    ).read_text(encoding="utf-8")
+    schema = (ROOT / "torch_custom/fla_npu/npu_custom.yaml").read_text(
+        encoding="utf-8"
+    )
+    op_def = (OP_ROOT / "op_host/chunk_kda_fwd_def.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert "state_v_first=False" in runtime
+    assert "bool? state_v_first=False" in schema
+    assert (
+        "-> (Tensor, Tensor?, Tensor?, Tensor, Tensor, Tensor?, Tensor?, Tensor?, "
+        "Tensor?, Tensor?, Tensor?, Tensor?)"
+    ) in schema
+    assert 'Attr("state_v_first").AttrType(OPTIONAL).Bool(false)' in op_def
 
 
 def test_fwd_h_dispatches_optional_gate_and_state_dtype_without_full_runtime_expansion():
@@ -393,6 +471,36 @@ def test_aqk_akk_share_one_l1_resident_right_matrix_slot():
     assert resident_mmad.count("static_cast<uint32_t>(tla::get<1>(tensorTile") == 4
 
 
+def test_a5_prepare_joins_both_aiv_subcores_before_shared_ready_signal():
+    prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    join = prepare.split(
+        "__aicore__ inline void JoinA5AivMte3()", 1
+    )[1].split("__aicore__ inline void RunAicAfterBothAivReady", 1)[0]
+    assert "CrossCoreBarrier<0x1, PIPE_MTE3>();" in join
+    assert "PipeBarrier<PIPE_MTE3>();" in join
+    run_after_join = prepare.split(
+        "__aicore__ inline void RunAicAfterBothAivReady", 1
+    )[1].split("__aicore__ inline void SignalAicSolveReady", 1)[0]
+    signal_solve = prepare.split(
+        "__aicore__ inline void SignalAicSolveReady", 1
+    )[1].split("__aicore__ inline void WaitAicSolveDone", 1)[0]
+    score_loop = prepare.split(
+        "__aicore__ inline void ProcessChunkPreAivFp32", 1
+    )[1].split("Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(scoreDoneFlag_);", 1)[0]
+    assert run_after_join.index("JoinA5AivMte3();") < run_after_join.index(
+        "CrossCoreSetFlag<0x2, PIPE_MTE3>(syncReadyFlag_);"
+    )
+    assert run_after_join.index("JoinA5AivMte3();") < run_after_join.index(
+        "CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(mchSyncReadyFlag_);"
+    )
+    assert signal_solve.index("JoinA5AivMte3();") < signal_solve.index(
+        "CrossCoreSetFlag<0x2, PIPE_MTE3>(syncReadyFlag_);"
+    )
+    assert score_loop.rindex("JoinA5AivMte3();") < score_loop.rindex(
+        "CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(scoreReadyFlag_);"
+    )
+
+
 def test_fwd_h_gk_only_path_skips_scalar_gate_scaling():
     block_root = (
         ROOT
@@ -438,14 +546,22 @@ def test_output_layout_conversion_stays_in_kernel_copy_out():
     runtime = (
         ROOT / "torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py"
     ).read_text(encoding="utf-8")
+    generalization = (
+        ROOT / "tests/operators/_shared/npu_generalization.py"
+    ).read_text(encoding="utf-8")
     assert "OutputOffset" in finalize
     assert "outputSequenceMajor" not in finalize
     assert "return ((b * T_ + t) * HV_ + hv) * V_ + d;" in finalize
     assert "const uint64_t rowBegin = (curT * subBlockIdx) / subBlockNum;" in finalize
-    assert "CopyVectorOut(vNew_, OutputOffset(b, hv, ti + row, 0), rowTyped, V_);" in finalize
+    assert "CopyRowsOut(vNew_, OutputOffset(b, hv, ti, 0), outTyped, tileRows, V_, HV_ * V_);" in finalize
+    assert "LoopModeParams loopParams" in finalize
+    assert "SetLoopModePara(loopParams, DataCopyMVType::UB_TO_OUT);" in finalize
+    assert finalize.count("ResetLoopModePara(DataCopyMVType::UB_TO_OUT);") == 2
     assert "KdaLayoutSwap12" not in aclnn
     assert "KdaFwdCopyAfter" not in aclnn
     assert "attn_shape" in runtime and "matrix_shape" in runtime and "h_shape" in runtime
+    assert "(_chunk_count(case), Hv, *state_tail)" in generalization
+    assert "(B, _chunk_count(case), Hv, *state_tail)" in generalization
 
 
 def test_finalize_keeps_fp32_cube_outputs_in_workspace():
@@ -468,6 +584,18 @@ def test_manifest_registers_positive_tnd_output_layout_case():
     assert case["shape"]["H_k"] == 1 and case["shape"]["H_v"] == 2
     assert case["attrs"]["output_final_state"] is True
     assert case["attrs"]["return_intermediate_states"] is True
+    assert set(case["soc"]) == {"ascend910b", "ascend910_93", "ascend950"}
+
+
+def test_manifest_registers_state_v_first_sequence_major_h_case():
+    manifest = json.loads(CASE_MANIFEST.read_text(encoding="utf-8"))
+    case = next(item for item in manifest["cases"] if item["id"] == "chunk_kda_fwd_state_v_first")
+    coverage = manifest["coverage_requirements"]
+    assert case["id"] in coverage["accuracy_case_ids"]
+    assert case["id"] in coverage["generalization_case_ids"]
+    assert case["attrs"]["state_v_first"] is True
+    assert case["attrs"]["return_intermediate_states"] is True
+    assert case["shape"]["K"] == 128 and case["shape"]["V"] == 256
     assert set(case["soc"]) == {"ascend910b", "ascend910_93", "ascend950"}
 
 

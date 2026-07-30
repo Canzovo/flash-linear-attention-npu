@@ -57,18 +57,29 @@ Python 返回顺序为：
 - `attn_out` 固定为 BSND/TND。
 - `final_state` 固定按序列排列，末两维服从 `state_v_first`。
 - `Aqk/Akk` 始终返回，固定为 head-major。
-- `gk/w/u/qg/kg/v_new/h` 是供反向使用的 head-major 中间量。
+- `gk/w/u/qg/kg/v_new` 是供反向使用的 head-major 中间量。
+- 公开 `h` 固定为 sequence-major；内部 `hCompute` 保持 head-major 供 Finalize 使用。
 - 第 12 个返回值是 Python 层对 `initial_state` 的原对象透传，不是 aclnn 输出。
 
-输出保留策略对齐 FLA：
+输出保留策略对齐 fla-org
+[`chunk_kda_fwd`](https://github.com/fla-org/flash-linear-attention/blob/0f0f0c97af39343855b43bbbaddcedfda5cb9d77/fla/ops/kda/chunk_fwd.py)
+提交 `0f0f0c97af39343855b43bbbaddcedfda5cb9d77`：
 
 | 条件 | 返回 |
 | --- | --- |
 | `output_final_state=true` | 返回 `final_state`，否则为 `None` |
-| `use_gate_in_kernel=false` 或 `disable_recompute=true` | 返回 `gk` |
+| `use_gate_in_kernel=false` | 返回 `gk` |
 | 始终 | 返回 `Aqk/Akk` |
-| `disable_recompute=true` | 返回 `w/u/qg/kg/v_new/h` |
-| `return_intermediate_states=true` | 至少额外返回 `h` |
+| `disable_recompute=true` | 返回 `w/u/qg/kg/v_new` |
+| `return_intermediate_states=true` | 返回 `h` |
+
+这是 `fla_npu.ops.ascendc.chunk_kda_fwd` 的低层 12 返回值语义；不涉及 CP。aclnn L2 不接收
+`output_final_state/disable_recompute/return_intermediate_states`，每个可选输出是否写出仅由对应
+输出指针是否为空决定。`w/u/qg/kg/v_new/h` 的 L0 阶段固定写内部 compute 张量，L2 仅在
+对应指针非空时通过 `ViewCopy` 导出；`gkOut` 非空时直接复用为 `gkCompute`，避免目标场景
+额外复制整张 FP32 gate。内部 `hCompute` 是 FwdH 到 Finalize 的必需 head-major 阶段结果；
+公开 `hOut` 非空时，L2 转为 sequence-major 后导出。`hOut` 为空时仍创建 `hCompute`，但不
+作为第 11 个 Python 返回值公开。
 
 ## 属性
 

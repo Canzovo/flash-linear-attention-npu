@@ -582,18 +582,16 @@ npu_chunk_kda_fwd(
                  : std::vector<int64_t>{B, HV, T, V};
     std::vector<int64_t> h_shape =
         is_rank3
-            ? (state_v_first_ ? std::vector<int64_t>{HV, total_chunks, V, K}
-                              : std::vector<int64_t>{HV, total_chunks, K, V})
-            : (state_v_first_ ? std::vector<int64_t>{B, HV, total_chunks, V, K}
-                              : std::vector<int64_t>{B, HV, total_chunks, K, V});
+            ? (state_v_first_ ? std::vector<int64_t>{total_chunks, HV, V, K}
+                              : std::vector<int64_t>{total_chunks, HV, K, V})
+            : (state_v_first_ ? std::vector<int64_t>{B, total_chunks, HV, V, K}
+                              : std::vector<int64_t>{B, total_chunks, HV, K, V});
 
     at::Tensor attn_out = at::empty(attn_shape, v.options());
     at::Tensor final_state =
         output_final_state_ ? at::empty(state_shape, q.options().dtype(at::kFloat)) : at::Tensor();
     at::Tensor gk_out =
-        (!use_gate_in_kernel_ || disable_recompute_)
-            ? at::empty(k_shape, q.options().dtype(at::kFloat))
-            : at::Tensor();
+        !use_gate_in_kernel_ ? at::empty(k_shape, q.options().dtype(at::kFloat)) : at::Tensor();
     at::Tensor aqk = at::empty(matrix_shape, q.options());
     at::Tensor akk = at::empty(matrix_shape, q.options());
     at::Tensor w = disable_recompute_ ? at::empty(k_shape, q.options()) : at::Tensor();
@@ -601,9 +599,8 @@ npu_chunk_kda_fwd(
     at::Tensor qg = disable_recompute_ ? at::empty(k_shape, q.options()) : at::Tensor();
     at::Tensor kg = disable_recompute_ ? at::empty(k_shape, q.options()) : at::Tensor();
     at::Tensor v_new = disable_recompute_ ? at::empty(v_shape, q.options()) : at::Tensor();
-    at::Tensor h = (disable_recompute_ || return_intermediate_states_)
-                       ? at::empty(h_shape, q.options())
-                       : at::Tensor();
+    at::Tensor h =
+        return_intermediate_states_ ? at::empty(h_shape, q.options()) : at::Tensor();
 
     const at::Tensor &initial_state_ = c10::value_or_else(initial_state, [] { return at::Tensor(); });
     const at::Tensor &A_log_ = c10::value_or_else(A_log, [] { return at::Tensor(); });
@@ -614,8 +611,8 @@ npu_chunk_kda_fwd(
         aclnnChunkKdaFwd,
         q, k, v, g, beta, A_log_, dt_bias_, initial_state_,
         cu_seqlens, chunk_indices_for_call,
-        layout_cstr, scale, chunk_size, output_final_state_, safe_gate_, lower_bound_,
-        use_gate_in_kernel_, disable_recompute_, return_intermediate_states_, state_v_first_,
+        layout_cstr, scale, chunk_size, safe_gate_, lower_bound_,
+        use_gate_in_kernel_, state_v_first_,
         attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h
     );
 

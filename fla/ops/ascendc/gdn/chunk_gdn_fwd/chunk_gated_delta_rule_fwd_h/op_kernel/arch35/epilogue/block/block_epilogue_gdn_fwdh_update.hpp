@@ -252,6 +252,8 @@ public:
         AscendC::LocalTensor<HElementOutput> hUbTensor = isPing ? hUbTensor_ping : hUbTensor_pong;
         AscendC::LocalTensor<FinalStateElement> finalOutputUbTensor = isPing ? finalOutputUbTensor_ping : finalOutputUbTensor_pong;
         AscendC::LocalTensor<float> glastUbTensor = isPing ? glastUbTensor_ping : glastUbTensor_pong;
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2 + pingpongFlag);
         float muls = 1.0f;
         if constexpr (scalarGated) {
             GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
@@ -320,12 +322,6 @@ public:
             AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE,
                           rowsThisTile * nActual);
             AscendC::PipeBarrier<PIPE_V>();
-            if (storeFinalState && isFinalState && std::is_same<FinalStateElement, float>::value) {
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
-                waitHFromV = true;
-            } else {
-                waitHFromV = false;
-            }
             if constexpr (scalarGated) {
                 AscendC::Muls(calcUbTensor, calcUbTensor, muls, rowsThisTile * nActual);
                 AscendC::PipeBarrier<PIPE_V>();
@@ -373,6 +369,12 @@ public:
                 hUpdateUbTensorThisTile, calcUbTensor, hUpdateUbTensorThisTile,
                 rowsThisTile * nActual);
             AscendC::PipeBarrier<PIPE_V>();
+            if (storeFinalState && isFinalState && std::is_same<FinalStateElement, float>::value) {
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
+                waitHFromV = true;
+            } else {
+                waitHFromV = false;
+            }
 
             if constexpr(std::is_same<FinalStateElement, float>::value) {
                 if (storeFinalState && isFinalState) {
@@ -424,9 +426,11 @@ public:
         }
         if (useDirectFp32Ub) {
             uint32_t directUbSlot = isPing ? 0 : 1;
-            AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
+            AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
                 directUbFreeFlagBegin + directUbSlot);
         }
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2 + pingpongFlag);
 
     }
 

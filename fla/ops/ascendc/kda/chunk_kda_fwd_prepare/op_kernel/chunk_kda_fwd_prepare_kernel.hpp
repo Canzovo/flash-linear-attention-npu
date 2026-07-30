@@ -78,6 +78,8 @@ constexpr uint8_t KDA_SCORE_DONE_FLAG0 = 2;
 constexpr uint8_t KDA_SCORE_DONE_FLAG1 = 3;
 constexpr uint8_t KDA_SCORE_READY_FLAG0 = 4;
 constexpr uint8_t KDA_SCORE_READY_FLAG1 = 5;
+constexpr uint8_t KDA_SOLVE_DONE_FLAG = 6;
+constexpr uint8_t KDA_SOLVE_READY_FLAG = 7;
 constexpr uint32_t KDA_SCORE_QUEUE_DEPTH = 2;
 constexpr uint32_t KDA_SCORE_LANES = 2;
 constexpr uint32_t KDA_SCORE_SCRATCH_SLOTS = KDA_SCORE_QUEUE_DEPTH * KDA_SCORE_LANES;
@@ -90,6 +92,7 @@ constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_GATE_TILE_ROWS = 16;
 constexpr uint32_t KDA_GATE_PIPELINE_DEPTH = 3;
 constexpr uint32_t KDA_AIV_UB_BUDGET_BYTES = 192 * 1024;
+constexpr bool KDA_A5_ENABLE_HEAD_PAIR = true;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 template <typename InputT>
@@ -263,10 +266,10 @@ static __simd_vf__ inline void PrepareKdaGateKgRegbase(
     }
 }
 
-template <typename T, typename GK_T, bool USE_REF>
+template <typename T, typename GK_T, bool USE_REF, bool STORE_DIRECT>
 static __simd_vf__ inline void PrepareKdaGateQwKgRegbase(
-    __ubuf__ T *q, __ubuf__ T *k, __ubuf__ T *kg, __ubuf__ GK_T *gate, __ubuf__ float *ref,
-    uint16_t rows, uint16_t cols, uint16_t validRows)
+    __ubuf__ T *q, __ubuf__ T *k, __ubuf__ T *kg, __ubuf__ T *qDirect, __ubuf__ T *wDirect,
+    __ubuf__ GK_T *gate, __ubuf__ float *ref, uint16_t rows, uint16_t cols, uint16_t validRows)
 {
     using namespace AscendC::MicroAPI;
     constexpr uint16_t ELEMENTS_PER_REG = AscendC::VECTOR_REG_WIDTH / sizeof(T);
@@ -285,6 +288,8 @@ static __simd_vf__ inline void PrepareKdaGateQwKgRegbase(
             RegTensor<float> posOneReg;
             RegTensor<float> negZeroReg;
             RegTensor<float> negOneReg;
+            RegTensor<float> directZeroReg;
+            RegTensor<float> directOneReg;
             RegTensor<float> inputZeroReg;
             RegTensor<float> inputOneReg;
             RegTensor<float> outputZeroReg;
@@ -305,6 +310,17 @@ static __simd_vf__ inline void PrepareKdaGateQwKgRegbase(
                 Muls(negZeroReg, gateZeroReg, -1.0f, floatMask);
                 Muls(negOneReg, gateOneReg, -1.0f, floatMask);
             }
+            if constexpr (STORE_DIRECT) {
+                Adds(directZeroReg, gateZeroReg, 0.0f, floatMask);
+                Adds(directOneReg, gateOneReg, 0.0f, floatMask);
+                Muls(directZeroReg, directZeroReg, LN2, floatMask);
+                Muls(directOneReg, directOneReg, LN2, floatMask);
+                MinsFloatTwoReg(directZeroReg, directOneReg, directZeroReg, directOneReg,
+                                KDA_EXP_INPUT_MAX, floatMask);
+                Maxs(directZeroReg, directZeroReg, KDA_EXP_INPUT_MIN, floatMask);
+                Maxs(directOneReg, directOneReg, KDA_EXP_INPUT_MIN, floatMask);
+                ExpFloatTwoReg(directZeroReg, directOneReg, directZeroReg, directOneReg, floatMask);
+            }
             Muls(posZeroReg, posZeroReg, LN2, floatMask);
             Muls(posOneReg, posOneReg, LN2, floatMask);
             Muls(negZeroReg, negZeroReg, LN2, floatMask);
@@ -321,12 +337,24 @@ static __simd_vf__ inline void PrepareKdaGateQwKgRegbase(
             ExpFloatTwoReg(negZeroReg, negOneReg, negZeroReg, negOneReg, floatMask);
 
             LoadKdaGateRegbasePair<T>(inputZeroReg, inputOneReg, q + offset, inputMask);
+            if constexpr (STORE_DIRECT) {
+                MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
+                               directZeroReg, directOneReg, floatMask);
+                StoreKdaGateRegbasePair<T>(qDirect + offset, outputZeroReg, outputOneReg,
+                                           inputMask, floatMask);
+            }
             MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
                            posZeroReg, posOneReg, floatMask);
             StoreKdaGateRegbasePair<T>(q + offset, outputZeroReg, outputOneReg,
                                        inputMask, floatMask);
 
             LoadKdaGateRegbasePair<T>(inputZeroReg, inputOneReg, k + offset, inputMask);
+            if constexpr (STORE_DIRECT) {
+                MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
+                               directZeroReg, directOneReg, floatMask);
+                StoreKdaGateRegbasePair<T>(wDirect + offset, outputZeroReg, outputOneReg,
+                                           inputMask, floatMask);
+            }
             MulFloatTwoReg(outputZeroReg, outputOneReg, inputZeroReg, inputOneReg,
                            posZeroReg, posOneReg, floatMask);
             StoreKdaGateRegbasePair<T>(k + offset, outputZeroReg, outputOneReg,
@@ -1220,6 +1248,10 @@ private:
         if (useRef) {
             LoadAsFloatRow(gk_, KVOffset(b, hv, refToken, 0, K_), refFp32, K_);
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        const bool fuseScoreWriteback =
+            writeScoreScratch && useRef && K_ * 2 <= EXP2_UB_ELEMENTS;
+#endif
 
         bool outputPending = false;
         uint64_t gateSlot = 0;
@@ -1245,6 +1277,10 @@ private:
             LocalTensor<float> gFp32 = arena[2 * elems];
             LocalTensor<float> expFp32 = arena[3 * elems];
             LocalTensor<float> outFp32 = arena[4 * elems];
+#else
+            LocalTensor<T> directQ =
+                vecBuf_.Get<T>()[gateSlot * 2 * GateStageElems()];
+            LocalTensor<T> directW = directQ[GateStageElems()];
 #endif
 
             uint64_t token = start + tileRow;
@@ -1292,18 +1328,32 @@ private:
                 validRows = static_cast<uint16_t>(validColEnd - tileRow);
             }
             if (useRef) {
-                PrepareKdaGateQwKgRegbase<T, GK_T, true>(
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
-                    (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
-                    (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
-                    (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
-                    static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_), validRows);
+                if (fuseScoreWriteback) {
+                    PrepareKdaGateQwKgRegbase<T, GK_T, true, true>(
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(directQ.GetPhyAddr()),
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(directW.GetPhyAddr()),
+                        (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
+                        (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
+                        static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_), validRows);
+                } else {
+                    PrepareKdaGateQwKgRegbase<T, GK_T, true, false>(
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
+                        (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
+                        nullptr, nullptr,
+                        (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
+                        (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
+                        static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_), validRows);
+                }
             } else {
-                PrepareKdaGateQwKgRegbase<T, GK_T, false>(
+                PrepareKdaGateQwKgRegbase<T, GK_T, false, false>(
                     (__ubuf__ T *)reinterpret_cast<uint64_t>(qTyped.GetPhyAddr()),
                     (__ubuf__ T *)reinterpret_cast<uint64_t>(kTyped.GetPhyAddr()),
                     (__ubuf__ T *)reinterpret_cast<uint64_t>(kgTyped.GetPhyAddr()),
+                    nullptr, nullptr,
                     (__ubuf__ GK_T *)reinterpret_cast<uint64_t>(gateTyped.GetPhyAddr()),
                     (__ubuf__ float *)reinterpret_cast<uint64_t>(refFp32.GetPhyAddr()),
                     static_cast<uint16_t>(tileRows), static_cast<uint16_t>(K_), validRows);
@@ -1377,6 +1427,12 @@ private:
                               kTyped, elems);
                 CopyVectorOut(scoreWorkspace_, ScoreScratchOffset(scoreSlot, KDA_SCORE_SCRATCH_KG, tileRow),
                               kgTyped, elems);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+                if (fuseScoreWriteback) {
+                    CopyVectorOut(qg_, KVOffset(b, hv, token, 0, K_), directQ, elems);
+                    CopyVectorOut(w_, KVOffset(b, hv, token, 0, K_), directW, elems);
+                }
+#endif
             } else {
                 CopyVectorOut(qg_, KVOffset(b, hv, token, 0, K_), qTyped, elems);
                 CopyVectorOut(w_, KVOffset(b, hv, token, 0, K_), kTyped, elems);
@@ -1906,6 +1962,7 @@ private:
             (__ubuf__ float *)reinterpret_cast<uint64_t>(akkMat.GetPhyAddr()),
             (__ubuf__ float *)reinterpret_cast<uint64_t>(betaLocal.GetPhyAddr()),
             static_cast<uint16_t>(rowCount), static_cast<uint16_t>(BT_));
+        PipeBarrier<PIPE_V>();
 #else
         Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
         PipeBarrier<PIPE_V>();
@@ -2468,11 +2525,25 @@ private:
     }
 
     template <int32_t CORE_TYPE = g_coreType>
+    __aicore__ inline void JoinA5AivMte3()
+    {
+        if constexpr (CORE_TYPE == AscendC::AIV) {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            if (!isAivOnly_) {
+                Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
+                PipeBarrier<PIPE_MTE3>();
+            }
+#endif
+        }
+    }
+
+    template <int32_t CORE_TYPE = g_coreType>
     __aicore__ inline void RunAicAfterBothAivReady(uint64_t subBlockIdx, uint64_t subBlockNum)
     {
         if constexpr (CORE_TYPE == AscendC::AIV) {
             (void)subBlockIdx;
             (void)subBlockNum;
+            JoinA5AivMte3();
             if constexpr (SAFE_GATE) {
                 Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncReadyFlag_);
                 Catlass::Arch::CrossCoreWaitFlag(syncDoneFlag_);
@@ -2487,6 +2558,7 @@ private:
     __aicore__ inline void SignalAicSolveReady()
     {
         if constexpr (CORE_TYPE == AscendC::AIV) {
+            JoinA5AivMte3();
             Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncReadyFlag_);
         }
     }
@@ -2536,6 +2608,7 @@ private:
                                     rowBegin + rowCount, true, scoreSlot,
                                     rowBegin, rowCount);
             }
+            JoinA5AivMte3();
             Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(scoreReadyFlag_);
             if (block > 0) {
                 if constexpr (SAFE_GATE) {
@@ -2547,9 +2620,15 @@ private:
                 Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(scoreDoneFlag_);
             }
         }
-        // The final score MMAD only consumes scoreWorkspace_. Run the
-        // independent gate writeback while AIC drains its MMAD/Fixpipe path.
-        PrepareGateProducts(b, h, hv, start, curT, subBlockIdx, subBlockNum);
+        bool fusedScoreWriteback = false;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        fusedScoreWriteback = scoreBlockCount == 1 && K_ * 2 <= EXP2_UB_ELEMENTS;
+#endif
+        if (!fusedScoreWriteback) {
+            // The final score MMAD only consumes scoreWorkspace_. Run the
+            // independent gate writeback while AIC drains its MMAD/Fixpipe path.
+            PrepareGateProducts(b, h, hv, start, curT, subBlockIdx, subBlockNum);
+        }
         if (pipelineBlockCount > 0) {
             Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(scoreDoneFlag_);
         }
@@ -2562,8 +2641,19 @@ private:
         if (useAkkCubeSolve) {
             bool fullChunk = curT == BT_;
             if constexpr (SAFE_GATE) {
-                PrepareAqkAkkSolveInputRows(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd,
-                                            false, false);
+                if (pairHeads) {
+                    for (uint64_t rowPart = 0; rowPart < KDA_SCORE_LANES; ++rowPart) {
+                        uint64_t pairRowBegin = 0;
+                        uint64_t pairRowEnd = 0;
+                        GetSolveRowRange(
+                            BT_, rowPart, KDA_SCORE_LANES, pairRowBegin, pairRowEnd);
+                        PrepareAqkAkkSolveInputRows(
+                            b, hv, chunkIdx, start, curT, pairRowBegin, pairRowEnd, false, false);
+                    }
+                } else {
+                    PrepareAqkAkkSolveInputRows(
+                        b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd, false, false);
+                }
                 if (deferSafeSolve) {
                     SignalAicSolveReady();
                     return;
@@ -2601,6 +2691,12 @@ private:
         StoreSolveXRowsToAkk(b, hv, chunkIdx, start, curT, solveRowBegin, solveRowEnd);
         PrepareWuCubeInputs(b, hv, start, curT, subBlockIdx, subBlockNum);
         FinalizePrepareIntermediates(b, hv, start, curT, subBlockIdx, subBlockNum);
+    }
+
+    __aicore__ inline void FinishDeferredSafeChunkPair(
+        uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start, uint64_t end)
+    {
+        FinishDeferredSafeChunk(b, hv, chunkIdx, start, end, 0, 1);
     }
 
     __aicore__ inline void ProcessChunkPreAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
@@ -2754,14 +2850,17 @@ private:
             }
             (void)seq;
             uint64_t currentSlot =
-                (localTaskIdx % (KDA_SOLVE_PIPELINE_DEPTH / KDA_SCORE_LANES)) * KDA_SCORE_LANES + subBlockIdx;
+                (localTaskIdx % (KDA_SOLVE_PIPELINE_DEPTH / KDA_SCORE_LANES)) *
+                    KDA_SCORE_LANES +
+                subBlockIdx;
             activeSolveSlot_ = currentSlot;
             bool deferSolve = UseAkkCubeSolve(end - start);
-            ProcessChunkPreAivFp32(b, h, hv, chunkIdx, start, end, 0, 1, deferSolve,
-                                  pendingValid, subBlockIdx, true);
+            ProcessChunkPreAivFp32(
+                b, h, hv, chunkIdx, start, end, 0, 1, deferSolve, pendingValid, subBlockIdx, true);
             if (pendingValid) {
                 activeSolveSlot_ = pendingSlot;
-                FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd, 0, 1);
+                FinishDeferredSafeChunkPair(
+                    pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd);
             }
             pendingValid = deferSolve;
             if (pendingValid) {
@@ -2776,7 +2875,8 @@ private:
         if (pendingValid) {
             WaitAicSolveDone();
             activeSolveSlot_ = pendingSlot;
-            FinishDeferredSafeChunk(pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd, 0, 1);
+            FinishDeferredSafeChunkPair(
+                pendingB, pendingHv, pendingChunkIdx, pendingStart, pendingEnd);
         }
     }
 
@@ -2811,7 +2911,7 @@ private:
         }
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if constexpr (SAFE_GATE && !IsSameType<T, float>::value) {
-            if (!isAivOnly_ && HV_ % KDA_SCORE_LANES == 0) {
+            if (KDA_A5_ENABLE_HEAD_PAIR && !isAivOnly_ && HV_ % KDA_SCORE_LANES == 0) {
                 ProcessPreAivHeadPair();
                 return;
             }
@@ -2905,7 +3005,7 @@ private:
         }
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if constexpr (SAFE_GATE) {
-            if (HV_ % KDA_SCORE_LANES == 0) {
+            if (KDA_A5_ENABLE_HEAD_PAIR && HV_ % KDA_SCORE_LANES == 0) {
                 ProcessPreAicHeadPair();
                 return;
             }
@@ -2974,8 +3074,8 @@ private:
                                                                                  KDA_SCORE_DONE_FLAG1};
     // Solve has one outstanding task per core. Reuse the primary score IDs as an ordered token stream;
     // score credits remain on the reverse IDs, so no additional hardware flag IDs are consumed.
-    Catlass::Arch::CrossCoreFlag syncReadyFlag_{KDA_SCORE_READY_FLAG0};
-    Catlass::Arch::CrossCoreFlag syncDoneFlag_{KDA_SCORE_DONE_FLAG0};
+    Catlass::Arch::CrossCoreFlag syncReadyFlag_{KDA_SOLVE_READY_FLAG};
+    Catlass::Arch::CrossCoreFlag syncDoneFlag_{KDA_SOLVE_DONE_FLAG};
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> mchSyncReadyFlag_{
         KDA_SCORE_READY_FLAG0, KDA_SCORE_READY_FLAG1};
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> mchSyncDoneFlag_{

@@ -79,19 +79,32 @@ kernel 内直接按 BSND/TND 写出 `attn_out`。供反向使用的中间量保�
 
 ## 状态布局
 
-内部递推统一使用 `[...,K,V]`。`state_v_first=true` 时，L2 在进入 FwdH 前转置 initial state，并在
-FwdH/顶层输出边界转置 `h` 和 `final_state`。`h` 保持 head-major，因为反向继续消费；`final_state`
-按序列排列，与 FLA 顶层输出一致。
+内部递推统一使用 `[...,K,V]`。`state_v_first=true` 时，L2 在进入 FwdH 前转置 initial state。
+内部 `hCompute` 始终保持 head-major 供 Finalize 消费；公开 `hOut` 在 L2 导出边界转为
+sequence-major，并按 `state_v_first` 决定末两维顺序。`final_state` 按序列排列，与 FLA 顶层
+输出一致。
 
 ## 重计算策略
 
+L2 不理解 autograd 重计算策略。`final_state/gk/w/u/qg/kg/v_new/h` 是相互独立的
+`OPTIONAL_OUTPUT`；非空指针表示导出，空指针表示不公开该结果。`w/u/qg/kg/v_new/h` 的 L0
+阶段固定写内部 compute tensor，L2 通过 `ViewCopy` 导出非空输出，不能依赖公开可选输出来
+承接或延长内部生命周期。`gkOut` 非空时直接复用为 `gkCompute`，避免目标场景额外复制整张
+FP32 gate。
+
+Python/legacy 包装层对齐 fla-org `chunk_kda_fwd` 提交
+`0f0f0c97af39343855b43bbbaddcedfda5cb9d77`：
+
 - `Aqk/Akk` 始终返回。
 - `disable_recompute=false` 时不保留 `w/u/qg/kg/v_new`。
-- `return_intermediate_states=true` 可独立要求 `h`。
-- `gk` 在外部传入已激活 gate 或禁用重计算时保留。
+- `return_intermediate_states=true` 时保留公开 `hOut`。
+- `gk` 仅在 `use_gate_in_kernel=false` 时保留。
 - `final_state` 只在 `output_final_state=true` 时创建公开输出。
 
-L2 为当前前向内部阶段分配的临时 tensor 不等于 Python 可见输出，不能依赖可选输出延长内部生命周期。
+内部 `hCompute` 与公开 `hOut` 是两个生命周期：`hCompute` 是 FwdH 到 Finalize 的必需
+head-major 阶段结果，L2 无论 `hOut` 是否为空都必须提供；`hOut` 仅表示是否将该结果转为
+sequence-major 并通过 `ViewCopy` 导出到调用方。该规则对齐非 CP 的低层 12 返回值接口；
+第 12 项 `initial_state` 由 Python 层原对象透传。
 
 ## 模板化方案与 tiling key
 

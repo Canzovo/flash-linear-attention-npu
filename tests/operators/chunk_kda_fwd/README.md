@@ -15,6 +15,7 @@
 | `examples/fast_kernel_launch_example/csrc/chunk_kda_fwd/` | 完整 KDA 语义的真实 `<<<>>>` 发射实现 |
 | `examples/fast_kernel_launch_example/tests/chunk_kda_fwd/` | 直调与稳定 aclnn/ctypes 路径的逐输出精度对比 |
 | `ut/op_host/test_contract.py` | manifest、SOC、返回码、host 负向用例静态契约 |
+| `ut/op_host/test_optional_output_policy.py` | 固定 fla-org 提交并穷举 16 种可选输出策略 |
 | `ut/op_kernel/test_contract.py` | kernel 入口、tiling key 说明和 direct launch 静态契约 |
 | `performance/profile.py` | 读取 performance tag 并通过 msopprof 运行设备侧 profiling |
 | `st/test_example.py` | example tag 与仓内数值执行后端的 ST 入口 |
@@ -51,3 +52,6 @@ cd examples/fast_kernel_launch_example && FAST_KERNEL_OP_NAME=chunk_kda_fwd pyte
 A2/A3/A5 通过 `FLA_NPU_SOC` 选择。精度逐项比较全部公开输出并检查 NaN/Inf；性能只使用 msopprof
 设备侧结果，按 JSON 的 `expect.requirement` 对比 Triton 或当前主线基线。报告记录平台、case 总数、通过数和
 失败 case ID，不记录本地环境路径。
+
+可选输出矩阵同时验证 L2 空指针契约和 `fla_npu.ops.ascendc.chunk_kda_fwd` 的 12 返回值掩码；
+对标版本固定在 `tests/op_cases/chunk_kda_fwd.json` 的 `upstream_alignment`。

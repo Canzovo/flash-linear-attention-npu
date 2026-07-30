@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 
+from ._kda_policy import kda_fwd_optional_output_mask
 from ._runtime import (
     call_aclnn as _runtime_call_aclnn,
     chunk_num as _chunk_num,
@@ -68,10 +69,7 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.c_double,
         ctypes.c_int64,
         ctypes.c_bool,
-        ctypes.c_bool,
         ctypes.c_double,
-        ctypes.c_bool,
-        ctypes.c_bool,
         ctypes.c_bool,
         ctypes.c_bool,
         *([ctypes.c_void_p] * 11),
@@ -735,25 +733,30 @@ def npu_chunk_kda_fwd(
         else (batch, hv_num, seqlen, v_dim)
     )
     h_shape = (
-        ((hv_num, total_chunks, v_dim, k_dim) if state_v_first
-         else (hv_num, total_chunks, k_dim, v_dim))
+        ((total_chunks, hv_num, v_dim, k_dim) if state_v_first
+         else (total_chunks, hv_num, k_dim, v_dim))
         if is_rank3
-        else ((batch, hv_num, total_chunks, v_dim, k_dim) if state_v_first
-              else (batch, hv_num, total_chunks, k_dim, v_dim))
+        else ((batch, total_chunks, hv_num, v_dim, k_dim) if state_v_first
+              else (batch, total_chunks, hv_num, k_dim, v_dim))
     )
 
+    output_mask = kda_fwd_optional_output_mask(
+        output_final_state=output_final_state,
+        use_gate_in_kernel=use_gate_in_kernel,
+        disable_recompute=disable_recompute,
+        return_intermediate_states=return_intermediate_states,
+    )
     attn_out = _empty(attn_shape, q)
-    final_state = _empty(state_shape, q, dtype=torch.float32) if output_final_state else None
-    save_gk = not use_gate_in_kernel or disable_recompute
-    gk_out = _empty(k_shape_head, q, dtype=torch.float32) if save_gk else None
+    final_state = _empty(state_shape, q, dtype=torch.float32) if output_mask[1] else None
+    gk_out = _empty(k_shape_head, q, dtype=torch.float32) if output_mask[2] else None
     aqk = _empty(matrix_shape, q)
     akk = _empty(matrix_shape, q)
-    w = _empty(k_shape_head, q) if disable_recompute else None
-    u = _empty(v_shape_head, q) if disable_recompute else None
-    qg = _empty(k_shape_head, q) if disable_recompute else None
-    kg = _empty(k_shape_head, q) if disable_recompute else None
-    v_new = _empty(v_shape_head, q) if disable_recompute else None
-    h = _empty(h_shape, q) if disable_recompute or return_intermediate_states else None
+    w = _empty(k_shape_head, q) if output_mask[5] else None
+    u = _empty(v_shape_head, q) if output_mask[6] else None
+    qg = _empty(k_shape_head, q) if output_mask[7] else None
+    kg = _empty(k_shape_head, q) if output_mask[8] else None
+    v_new = _empty(v_shape_head, q) if output_mask[9] else None
+    h = _empty(h_shape, q) if output_mask[10] else None
 
     outputs = (attn_out, final_state, gk_out, aqk, akk, w, u, qg, kg, v_new, h)
     layout_buffer = ctypes.create_string_buffer(layout.encode("utf-8"))
@@ -773,12 +776,9 @@ def npu_chunk_kda_fwd(
             ctypes.cast(layout_buffer, ctypes.c_char_p),
             ctypes.c_double(float(scale)),
             ctypes.c_int64(chunk_size),
-            ctypes.c_bool(output_final_state),
             ctypes.c_bool(safe_gate),
             ctypes.c_double(lower_bound),
             ctypes.c_bool(use_gate_in_kernel),
-            ctypes.c_bool(disable_recompute),
-            ctypes.c_bool(return_intermediate_states),
             ctypes.c_bool(state_v_first),
             ctx.tensor(attn_out, "attn_out"),
             ctx.tensor(final_state, "final_state"),

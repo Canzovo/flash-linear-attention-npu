@@ -130,20 +130,6 @@ struct BlockSchedulerGdnFwdH {
     BlockSchedulerGdnFwdH() {}
 
     CATLASS_DEVICE
-    void UseEmbeddedStageFlags() {
-        // The enclosing KDA phases own flags 2..5. FWD_H alternates C1/V1/C2/V2 per stream, so each
-        // direction can reuse one clean flag after the matching wait has consumed it.
-        cube1Done[0].id = 0;
-        cube1Done[1].id = 1;
-        cube2Done[0].id = 0;
-        cube2Done[1].id = 1;
-        vec1Done[0].id = 6;
-        vec1Done[1].id = 7;
-        vec2Done[0].id = 6;
-        vec2Done[1].id = 7;
-    }
-
-    CATLASS_DEVICE
     void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user, uint32_t coreIdx, uint32_t coreNum) {
         __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict gdnFwdHTilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
 
@@ -367,7 +353,6 @@ struct BlockSchedulerGdnFwdHCube : public BlockSchedulerGdnFwdH {
     void InitFromData(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, const TilingData& tilingData, GM_ADDR user) {
         BlockSchedulerGdnFwdH::InitFromData(
             cu_seqlens, chunk_indices, tilingData, user, AscendC::GetBlockIdx(), AscendC::GetBlockNum());
-        UseEmbeddedStageFlags();
     }
 
 };
@@ -391,7 +376,6 @@ struct BlockSchedulerGdnFwdHVec : public BlockSchedulerGdnFwdH {
             cu_seqlens, chunk_indices, tilingData, user,
             AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(),
             AscendC::GetBlockNum());
-        UseEmbeddedStageFlags();
     }
 
 };

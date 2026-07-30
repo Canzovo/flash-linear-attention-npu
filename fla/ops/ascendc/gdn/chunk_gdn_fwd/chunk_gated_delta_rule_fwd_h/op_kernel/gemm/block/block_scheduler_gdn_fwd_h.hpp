@@ -122,26 +122,12 @@ struct BlockSchedulerGdnFwdH {
     AscendC::GlobalTensor<int64_t> gmNumChunks;
 
     Arch::CrossCoreFlag cube1Done[PING_PONG_STAGES] = {0, 1};
-    Arch::CrossCoreFlag vec1Done[PING_PONG_STAGES] = {2, 3};
-    Arch::CrossCoreFlag cube2Done[PING_PONG_STAGES] = {4, 5};
+    Arch::CrossCoreFlag vec1Done[PING_PONG_STAGES] = {6, 7};
+    Arch::CrossCoreFlag cube2Done[PING_PONG_STAGES] = {0, 1};
     Arch::CrossCoreFlag vec2Done[PING_PONG_STAGES] = {6, 7};
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdH() {}
-
-    CATLASS_DEVICE
-    void UseEmbeddedStageFlags() {
-        // The enclosing KDA phases own flags 2..5. FWD_H alternates C1/V1/C2/V2 per stream, so each
-        // direction can reuse one clean flag after the matching wait has consumed it.
-        cube1Done[0].id = 0;
-        cube1Done[1].id = 1;
-        cube2Done[0].id = 0;
-        cube2Done[1].id = 1;
-        vec1Done[0].id = 6;
-        vec1Done[1].id = 7;
-        vec2Done[0].id = 6;
-        vec2Done[1].id = 7;
-    }
 
     CATLASS_DEVICE
     void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user, uint32_t coreIdx, uint32_t coreNum) {
@@ -225,7 +211,9 @@ struct BlockSchedulerGdnFwdH {
         vBlockSize = vHeadDim;
         taskNum = batch * vNumHead;
         headGroups = vNumHead / kNumHead;
-        uint32_t maxTaskCntPerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
+        // A short final chunk can retire one AIV subcore before its partner. Keep one task stream
+        // per core until the two-stream protocol has a reverse credit for that asymmetric tail.
+        uint32_t maxTaskCntPerLoop = 1;
         taskStride = cubeCoreNum * maxTaskCntPerLoop;
         for (uint32_t streamId = 0; streamId < PING_PONG_STAGES; ++streamId) {
             auto& stream = runningQ.streams[streamId];
@@ -367,7 +355,6 @@ struct BlockSchedulerGdnFwdHCube : public BlockSchedulerGdnFwdH {
     void InitFromData(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, const TilingData& tilingData, GM_ADDR user) {
         BlockSchedulerGdnFwdH::InitFromData(
             cu_seqlens, chunk_indices, tilingData, user, AscendC::GetBlockIdx(), AscendC::GetBlockNum());
-        UseEmbeddedStageFlags();
     }
 
 };
@@ -391,7 +378,6 @@ struct BlockSchedulerGdnFwdHVec : public BlockSchedulerGdnFwdH {
             cu_seqlens, chunk_indices, tilingData, user,
             AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(),
             AscendC::GetBlockNum());
-        UseEmbeddedStageFlags();
     }
 
 };

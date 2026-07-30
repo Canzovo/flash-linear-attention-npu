@@ -48,12 +48,9 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
     const char *layout,
     double scale,
     int64_t chunkSize,
-    bool outputFinalState,
     bool safeGate,
     double lowerBound,
     bool useGateInKernel,
-    bool disableRecompute,
-    bool returnIntermediateStates,
     bool stateVFirst,
     const aclTensor *attnOut,
     const aclTensor *finalStateOut,
@@ -76,13 +73,20 @@ aclnnStatus aclnnChunkKdaFwd(
     aclrtStream stream);
 ```
 
-aclnn 原型使用 `OPTIONAL_INPUT/OPTIONAL_OUTPUT` 对应的空指针表达可选项：
+aclnn L2 只描述张量与算法契约，不接收或解释 autograd 重计算策略：
 
-- `finalStateOut` 仅在 `outputFinalState=true` 时必需。
-- `gkOut` 在 `useGateInKernel=false` 或 `disableRecompute=true` 时必需。
-- `wOut/uOut/qgOut/kgOut/vNewOut/hOut` 在 `disableRecompute=true` 时必需。
-- `hOut` 在 `returnIntermediateStates=true` 时必需。
-- `aqkOut/akkOut` 始终必需。
+- `attnOut/aqkOut/akkOut` 是必选输出。
+- `finalStateOut/gkOut/wOut/uOut/qgOut/kgOut/vNewOut/hOut` 均为相互独立的可选输出。
+- `w/u/qg/kg/vNew/h` 的 L0 阶段固定写内部 compute 张量；对应可选输出非空时，L2 通过
+  `ViewCopy` 导出，为空时只保留前向内部生命周期。`gkOut` 非空时直接复用为 `gkCompute`，
+  避免目标场景额外复制整张 FP32 gate。
+- `finalStateOut != nullptr` 同时表示本次需要计算并写出最终状态。
+- `hCompute` 是 FwdH 到 Finalize 的内部必需 head-major 张量；`hOut` 是独立的公开可选输出。
+  `hOut == nullptr` 不会跳过内部 `hCompute`，只是不向调用方公开该中间状态；非空时由
+  L2 转为固定 sequence-major 后导出。
+
+`output_final_state/disable_recompute/return_intermediate_states` 只存在于 Python 和 legacy torch
+包装层，由上层按 FLA 的保留策略决定向 L2 传入哪些输出指针。
 
 ## 输入与输出布局
 
@@ -90,7 +94,9 @@ aclnn 原型使用 `OPTIONAL_INPUT/OPTIONAL_OUTPUT` 对应的空指针表达可�
 
 - `attnOut`: BSND 或 TND。
 - `finalStateOut`: `[N,H_v,K,V]` 或 `stateVFirst=true` 时 `[N,H_v,V,K]`。
-- 所有反向中间量：BNSD/NTD；`hOut` 的末两维服从 `stateVFirst`。
+- `gkOut/AqkOut/AkkOut/wOut/uOut/qgOut/kgOut/vNewOut`: BNSD/NTD。
+- `hOut`: dense 为 `[B,N_c,H_v,K,V]`，varlen 为 `[N_c,H_v,K,V]`；
+  `stateVFirst=true` 时交换末两维。
 
 完整 Shape 表见 [KDA 模型符号表](../../README.md#model-shape-symbols)。
 

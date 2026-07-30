@@ -314,6 +314,7 @@ public:
                         blockMmadWH.preSetFlags();
                         blockMmadWH(tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape);
                         blockMmadWH.finalWaitFlags();
+                        AscendC::PipeBarrier<PIPE_ALL>();
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done[streamId]);
                     }
                 } else {
@@ -344,6 +345,7 @@ public:
                             blockMmadKV.preSetFlags();
                             blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
                             blockMmadKV.finalWaitFlags();
+                            AscendC::PipeBarrier<PIPE_ALL>();
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done[streamId]);
                     }
@@ -362,7 +364,7 @@ public:
             uint32_t coreNum = AscendC::GetBlockNum();
             uint32_t taskCount =
                 (isVariedLen ? vecBlockScheduler.tokenBatch : shapeBatch) * vNumHead;
-            uint32_t tasksPerCore = taskCount > coreNum ? PING_PONG_STAGES : 1;
+            uint32_t tasksPerCore = 1;
             uint32_t taskStride = coreNum * tasksPerCore;
             uint32_t rowsPerSubBlock = (kHeadDim + subBlockNum - 1) / subBlockNum;
             uint32_t rowBegin = subBlockIdx * rowsPerSubBlock;
@@ -466,11 +468,19 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pongBaseEvent);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3); // preset g
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pongBaseEvent);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0); // preset h_update
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pongBaseEvent);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2); // preset h
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2 + pongBaseEvent);
             uint32_t currStage = 0; // 0: V1, 1: V2
+            bool waitStageFence = false;
             bool event0FromMte3[PING_PONG_STAGES] = {false, false};
             bool event2FromMte3[PING_PONG_STAGES] = {!(storeFinalState && std::is_same<ElementFinalState, float>::value),
                                                       !(storeFinalState && std::is_same<ElementFinalState, float>::value)};
             while (vecBlockScheduler.isRunning) {
+                if (waitStageFence) {
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+                }
                 if (currStage == 0) {
                     /* V1:
                      * gmV = gmU - gmVWorkspace
@@ -497,6 +507,8 @@ public:
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState,
                             waitWsFromMte3, (streamId == 0)
                         );
+                        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+                        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
                         }
@@ -527,11 +539,17 @@ public:
                                 vec2Offsets.isInitialState, vec2Offsets.isFinalState, storeFinalState,
                                 useInitialState, (streamId == 0)
                             );
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         } else {
                             Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
                     }
+                }
+                waitStageFence = vecBlockScheduler.isRunning;
+                if (waitStageFence) {
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                 }
                 currStage ^= 0x01;
             }
@@ -567,6 +585,10 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pongBaseEvent);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3); // preset g
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pongBaseEvent);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0); // drain h_update
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pongBaseEvent);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2); // drain h
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2 + pongBaseEvent);
 
         }
     }

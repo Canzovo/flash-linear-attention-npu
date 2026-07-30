@@ -4,6 +4,18 @@
   "implementation": "ascendc",
   "model": "kda",
   "symbol_table_version": "kda-shape-v1",
+  "upstream_alignment": {
+    "repository": "fla-org/flash-linear-attention",
+    "commit": "0f0f0c97af39343855b43bbbaddcedfda5cb9d77",
+    "source": "fla/ops/kda/chunk_fwd.py",
+    "scope": "non-CP low-level chunk_kda_fwd 12-value return policy",
+    "return_policy": {
+      "final_state": "output_final_state",
+      "gk": "not use_gate_in_kernel",
+      "w_u_qg_kg_v_new": "disable_recompute",
+      "h": "return_intermediate_states"
+    }
+  },
   "capability": {
     "soc": [
       "ascend910b",
@@ -71,7 +83,7 @@
       "变长序列的 cu_seqlens 至少含首尾、非递减且末项等于 T；单次最多 1024 条逻辑序列。",
       "显式 chunk_indices 必须完整、合法并严格采用 sequence-major 规范顺序。",
       "use_gate_in_kernel=true 时内部计算 -exp(A_log)*softplus(g+dt_bias) 或 lower_bound*sigmoid(exp(A_log)*(g+dt_bias))；false 时 g 为已激活的自然对数门控。",
-      "attn_out 固定为 BSND/TND，final_state 为 sequence-major；反向中间量固定为 BNSD/NTD，h 的末两维服从 state_v_first。"
+      "attn_out 固定为 BSND/TND，final_state 与公开 h 为 sequence-major；其余反向中间量固定为 BNSD/NTD，state_v_first 只交换 state/h 的末两维。"
     ],
     "required_outputs": [
       "attn_out",
@@ -83,18 +95,23 @@
       "chunk_kda_fwd_main_accuracy",
       "chunk_kda_fwd_dtype_layout_generalization",
       "chunk_kda_fwd_tail_or_varlen",
-      "chunk_kda_fwd_tnd_layout"
+      "chunk_kda_fwd_tnd_layout",
+      "chunk_kda_fwd_state_v_first",
+      "chunk_kda_fwd_optional_output_matrix"
     ],
     "generalization_case_ids": [
       "chunk_kda_fwd_dtype_layout_generalization",
       "chunk_kda_fwd_tail_or_varlen",
-      "chunk_kda_fwd_tnd_layout"
+      "chunk_kda_fwd_tnd_layout",
+      "chunk_kda_fwd_state_v_first"
     ],
     "negative_case_ids": [
       "chunk_kda_fwd_negative_contract",
       "chunk_kda_fwd_varlen_requires_b1",
-      "chunk_kda_fwd_intermediates_all_or_none",
       "chunk_kda_fwd_chunk_order"
+    ],
+    "optional_output_case_ids": [
+      "chunk_kda_fwd_optional_output_matrix"
     ],
     "route_case_ids": [
       "chunk_kda_fwd_main_accuracy",
@@ -150,7 +167,8 @@
         "output_final_state": true,
         "disable_recompute": true,
         "return_intermediate_states": true,
-        "safe_gate": true
+        "safe_gate": true,
+        "state_v_first": false
       },
       "optional_inputs": {
         "initial_state": "present",
@@ -384,6 +402,70 @@
       "seed": 2034
     },
     {
+      "id": "chunk_kda_fwd_state_v_first",
+      "tags": [
+        "accuracy",
+        "generalization",
+        "state_layout"
+      ],
+      "shape": {
+        "B": 1,
+        "H_k": 1,
+        "H_v": 2,
+        "T": 96,
+        "K": 128,
+        "V": 256,
+        "chunk_size": 64,
+        "N_c": 2
+      },
+      "dtype": {
+        "q_k_v": "float16",
+        "g_beta_state": "float32"
+      },
+      "layout": "BSND",
+      "attrs": {
+        "layout": "BSND",
+        "scale": 0.0883883476,
+        "chunk_size": 64,
+        "output_final_state": true,
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": false,
+        "state_v_first": true
+      },
+      "optional_inputs": {
+        "initial_state": "present",
+        "cu_seqlens": null,
+        "chunk_indices": null
+      },
+      "soc": [
+        "ascend910b",
+        "ascend910_93",
+        "ascend950"
+      ],
+      "run_on": [
+        "ascendc",
+        "aclnn",
+        "torch_ops_npu"
+      ],
+      "reference": "tests/reference/chunk_kda_reference.py",
+      "expect": {
+        "return_code": "ACLNN_SUCCESS",
+        "finite_outputs": true,
+        "compare_outputs": [
+          "attn_out",
+          "final_state",
+          "gk",
+          "Aqk/Akk",
+          "w/qg/kg",
+          "u/v_new",
+          "h",
+          "initial_state_out"
+        ]
+      },
+      "seed": 2035
+    },
+    {
       "id": "chunk_kda_fwd_performance",
       "tags": [
         "performance",
@@ -561,10 +643,11 @@
       "seed": 2031
     },
     {
-      "id": "chunk_kda_fwd_intermediates_all_or_none",
+      "id": "chunk_kda_fwd_optional_output_matrix",
       "tags": [
-        "negative",
-        "boundary"
+        "accuracy",
+        "boundary",
+        "optional_outputs"
       ],
       "shape": {
         "B": 1,
@@ -588,20 +671,49 @@
         "output_final_state": true,
         "disable_recompute": false,
         "return_intermediate_states": true,
-        "safe_gate": false
+        "safe_gate": false,
+        "use_gate_in_kernel": false,
+        "optional_output_matrix": {
+          "output_final_state": [
+            false,
+            true
+          ],
+          "use_gate_in_kernel": [
+            false,
+            true
+          ],
+          "disable_recompute": [
+            false,
+            true
+          ],
+          "return_intermediate_states": [
+            false,
+            true
+          ]
+        }
       },
       "optional_inputs": {
-        "initial_state": null,
+        "initial_state": "present",
         "cu_seqlens": null,
         "chunk_indices": null
       },
       "run_on": [
+        "ascendc",
         "aclnn"
       ],
-      "reference": "error_contract",
+      "reference": "fla-org/flash-linear-attention@0f0f0c97af39343855b43bbbaddcedfda5cb9d77:fla/ops/kda/chunk_fwd.py",
       "expect": {
-        "return_code": "ACLNN_ERR_PARAM_INVALID",
-        "message_contains": "materialized together"
+        "return_code": "ACLNN_SUCCESS",
+        "matrix_size": 16,
+        "compare_outputs": [
+          "attn_out",
+          "final_state",
+          "gk",
+          "Aqk/Akk",
+          "w/u/qg/kg/v_new",
+          "h",
+          "initial_state_out"
+        ]
       },
       "soc": [
         "ascend910b",
