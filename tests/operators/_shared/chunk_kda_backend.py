@@ -2042,7 +2042,6 @@ def test_chunk_gdn_fwd_h_a5_model_shape_is_bitwise_deterministic():
             initial_state=initial_state,
             output_final_state=True,
             chunk_size=chunk_size,
-            save_new_value=True,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
