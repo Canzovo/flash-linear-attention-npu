@@ -83,6 +83,13 @@ def _prepare_embedded_opp() -> pathlib.Path:
     op_api_lib = vendor_dir / "op_api" / "lib" / "libcust_opapi.so"
     if not op_api_lib.exists():
         raise FileNotFoundError(f"Embedded custom op_api library not found: {op_api_lib}")
+    op_api_alias = op_api_lib.with_name("libopapi.so")
+    if op_api_alias.exists() or op_api_alias.is_symlink():
+        raise RuntimeError(
+            "The FLA NPU custom OPP contains libopapi.so, which can shadow the "
+            "CANN runtime library. Reinstall a wheel that only contains "
+            f"libcust_opapi.so, or remove the stale alias: {op_api_alias}"
+        )
 
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_dir)
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", opp_root)
@@ -118,7 +125,6 @@ def load_ascendc_opapi_libraries() -> list[ctypes.CDLL]:
     vendor_dir = _prepare_embedded_opp()
     op_api_dir = vendor_dir / "op_api" / "lib"
     custom_opapi = op_api_dir / "libcust_opapi.so"
-    opapi_alias = op_api_dir / "libopapi.so"
 
     try:
         custom_library = _load_shared_library_required(custom_opapi)
@@ -128,8 +134,6 @@ def load_ascendc_opapi_libraries() -> list[ctypes.CDLL]:
             f"Dynamic loader error: {exc}"
         ) from exc
     libraries = [custom_library]
-    if opapi_alias.exists():
-        libraries.append(_load_shared_library_required(opapi_alias))
 
     _ASCENDC_OPAPI_LIBRARIES = libraries
     return libraries
