@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import ctypes
 import sys
-from collections import deque
 from contextlib import contextmanager
 from typing import Iterable, Optional, Sequence
 
@@ -36,13 +35,6 @@ _ACL_FORMAT_BY_NAME = {
     "NCDHW": ACL_FORMAT_NCDHW,
     "NCL": ACL_FORMAT_NCL,
 }
-
-# aclnn launch 是异步的。输出 tensor、workspace buffer，以及为可选 int-array
-# 输入临时创建的小 tensor，都必须至少存活到队列里的 kernel 消费完成。这里用
-# 一个小 ring 保活即可：普通用户 tensor 会由 torch stream 语义保活，而在常见
-# test/example 流程里，deque 回绕前旧 launch 通常已经执行完。
-_RECENT_LAUNCH_STORAGE = deque(maxlen=128)
-
 
 def dtype_to_acl(dtype) -> int:
     import torch
@@ -413,10 +405,6 @@ def runtime() -> _AclnnRuntime:
     return _RUNTIME
 
 
-def finalize(outputs, workspace, keepalive_tensors):
-    _RECENT_LAUNCH_STORAGE.append((tuple(outputs), workspace, tuple(keepalive_tensors)))
-
-
 def _call_device(outputs: Sequence[object]):
     device = None
     device_index = None
@@ -446,7 +434,10 @@ def call_aclnn(name: str, build_args, outputs, *, get_workspace_argtypes=None):
     with _npu_device_guard(device):
         try:
             args = build_args(ctx)
-            workspace = aclnn_runtime.call(
+            # runtime.call 在目标 current stream 上分配 workspace 并把 kernel
+            # enqueue 到同一 stream。调用返回后可立即释放 Python 引用；NPU
+            # caching allocator 会按 stream 生命周期管理底层 block 的安全复用。
+            aclnn_runtime.call(
                 name,
                 args,
                 device,
@@ -454,5 +445,4 @@ def call_aclnn(name: str, build_args, outputs, *, get_workspace_argtypes=None):
             )
         finally:
             ctx.destroy()
-    finalize(outputs_tuple, workspace, ctx.keepalive_tensors)
     return outputs
