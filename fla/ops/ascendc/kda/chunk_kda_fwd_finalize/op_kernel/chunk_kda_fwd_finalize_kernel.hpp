@@ -556,9 +556,10 @@ private:
         return maxRows;
     }
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    __aicore__ inline void ComputeOutputCubeFusedA5(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
-                                                    uint64_t curT)
+    __aicore__ inline void ComputeOutputCubeStagedA5(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+                                                     uint64_t curT)
     {
+        SetMMLayoutTransform(true);
         using ElementA = T;
         using ElementB = T;
         using ElementC = OUT_T;
@@ -578,7 +579,6 @@ private:
         constexpr uint16_t kMte2Event = 0;
         constexpr uint16_t kMte1Event = 0;
         constexpr uint16_t kMmadEvent = 0;
-        constexpr uint16_t kFixEvent = 0;
         constexpr uint32_t kL1A0Offset = 0;
         constexpr uint32_t kL1B0Offset = 64 * 128 * sizeof(ElementA);
         constexpr uint32_t kL1A1Offset = kL1B0Offset + 128 * 128 * sizeof(ElementB);
@@ -618,12 +618,16 @@ private:
                                                  Catlass::Arch::PositionGM{});
                 auto tensorO = tla::MakeTensor(o_[KVOffset(b, hv, start + mOffset, nOffset, V_)], layoutO,
                                                Catlass::Arch::PositionGM{});
+                auto tensorLocal = tla::MakeTensor(u_[KVOffset(b, hv, start + mOffset, nOffset, V_)], layoutO,
+                                                   Catlass::Arch::PositionGM{});
 
                 auto blockQ = GetTile(tensorQ, tla::MakeCoord(0, 0), tla::MakeShape(curM, K_));
                 auto blockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(K_, curN));
                 auto blockAqk = GetTile(tensorAqk, tla::MakeCoord(0, 0), tla::MakeShape(curM, curT));
                 auto blockVNew = GetTile(tensorVNew, tla::MakeCoord(0, 0), tla::MakeShape(curT, curN));
                 auto blockO = GetTile(tensorO, tla::MakeCoord(0, 0), tla::MakeShape(curM, curN));
+                auto blockLocal =
+                    GetTile(tensorLocal, tla::MakeCoord(0, 0), tla::MakeShape(curM, curN));
 
                 using CopyGmToL1A0 = typename TileCopy::template CopyGmToL1A<decltype(blockQ)>;
                 using CopyGmToL1B0 = typename TileCopy::template CopyGmToL1B<decltype(blockH)>;
@@ -687,9 +691,11 @@ private:
                 copyL1ToL0B(tileL0B0, tileL1B0);
                 SetFlag<HardEvent::MTE1_M>(kMte1Event);
                 WaitFlag<HardEvent::MTE1_M>(kMte1Event);
-                tileMmad(tileL0C, tileL0A0, tileL0B0, curM, curN, static_cast<uint32_t>(K_), true, 0);
+                tileMmad(tileL0C, tileL0A0, tileL0B0, curM, curN, static_cast<uint32_t>(K_), true, 0b11);
                 SetFlag<HardEvent::M_MTE1>(kMmadEvent);
                 WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
+                copyL0CToDst(blockO, tileL0C, 0b11);
+                PipeBarrier<PIPE_ALL>();
 
                 copyL1ToL0A(tileL0A1, tileL1A1);
                 copyL1ToL0B(tileL0B1, tileL1B1);
@@ -697,18 +703,14 @@ private:
                 SetFlag<HardEvent::MTE1_MTE2>(kMte2Event);
                 WaitFlag<HardEvent::MTE1_M>(kMte1Event);
                 WaitFlag<HardEvent::MTE1_MTE2>(kMte2Event);
-                tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT), false, 0);
+                tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT), true, 0b11);
                 SetFlag<HardEvent::M_MTE1>(kMmadEvent);
                 WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
-                SetFlag<HardEvent::M_FIX>(kFixEvent);
-                WaitFlag<HardEvent::M_FIX>(kFixEvent);
-                copyL0CToDst(blockO, tileL0C);
-                SetFlag<HardEvent::FIX_M>(kFixEvent);
-                WaitFlag<HardEvent::FIX_M>(kFixEvent);
-                SetFlag<HardEvent::FIX_MTE2>(kFixEvent);
-                WaitFlag<HardEvent::FIX_MTE2>(kFixEvent);
+                copyL0CToDst(blockLocal, tileL0C, 0b11);
+                PipeBarrier<PIPE_ALL>();
             }
         }
+        SetMMLayoutTransform(false);
     }
 
     __aicore__ inline void PrefetchOutputTileA5(Catlass::Arch::Resource<KdaArchTag> &resource, uint32_t slot,
@@ -970,7 +972,7 @@ private:
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         SetLoadDataPaddingValue<T>(static_cast<T>(0));
         if (BT_ == 64 && curT == BT_) {
-            ComputeOutputCubeFusedA5(b, hv, chunkIdx, start, curT);
+            ComputeOutputCubeStagedA5(b, hv, chunkIdx, start, curT);
             return;
         }
 #endif
@@ -1044,13 +1046,7 @@ private:
             ScoreVectorMaxRows(5 * sizeof(float) + 2 * sizeof(T) + sizeof(GK_T));
         const uint64_t gateWritebackBytes =
             gateWritebackRows * K_ * (3 * sizeof(T) + sizeof(GK_T));
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        const bool fusedA5Output = BT_ == 64 && curT == BT_;
-        uint64_t maxRows =
-            KDA_VEC_ARENA_ELEMENTS / ((fusedA5Output ? 1 : 3) * V_);
-#else
         uint64_t maxRows = KDA_VEC_ARENA_ELEMENTS / (3 * V_);
-#endif
         const uint64_t typedMaxRows = gateWritebackBytes / (V_ * sizeof(T));
         if (maxRows > typedMaxRows) {
             maxRows = typedMaxRows;
@@ -1067,24 +1063,6 @@ private:
             const uint64_t elems = tileRows * V_;
             const uint64_t ti = start + tileRow;
             LocalTensor<float> arena = vecBuf_.Get<float>();
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            LocalTensor<float> stateLocal = arena;
-            LocalTensor<float> localLocal = arena[elems];
-            LocalTensor<float> outLocal =
-                fusedA5Output ? arena : arena[2 * elems];
-            LocalTensor<T> outTyped = gateWritebackBuf_.Get<T>();
-
-            CopyVectorIn(stateLocal, o_, KVOffset(b, hv, ti, 0, V_), elems);
-            if (!fusedA5Output) {
-                CopyVectorIn(localLocal, u_, KVOffset(b, hv, ti, 0, V_), elems);
-            }
-            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
-            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
-            if (!fusedA5Output) {
-                Add(outLocal, stateLocal, localLocal, static_cast<uint32_t>(elems));
-                PipeBarrier<PIPE_V>();
-            }
-#else
             LocalTensor<float> stateLocal = arena;
             LocalTensor<float> localLocal = arena[elems];
             LocalTensor<float> outLocal = arena[2 * elems];
@@ -1096,7 +1074,6 @@ private:
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             Add(outLocal, stateLocal, localLocal, static_cast<uint32_t>(elems));
             PipeBarrier<PIPE_V>();
-#endif
             ClampFp32ToOutputType(outLocal, static_cast<uint32_t>(elems));
             Cast(outTyped, outLocal, RoundMode::CAST_RINT, static_cast<uint32_t>(elems));
             PipeBarrier<PIPE_V>();

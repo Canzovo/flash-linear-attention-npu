@@ -302,22 +302,47 @@ def test_a5_fused_post_wu_protects_l0c_reuse_with_fix_to_cube_events():
     assert "FIX_MTE2>(KDA_POST_EVENT_FIX)" not in fused
 
 
-def test_a5_finalize_fused_cube_is_limited_to_full_chunks():
+def test_a5_finalize_stages_full_chunk_mmads_without_l0c_accumulation():
     finalize = STAGE_IMPLEMENTATIONS["output"].read_text(encoding="utf-8")
     dispatch = finalize.split(
         "__aicore__ inline void ComputeOutputCube(", 1
     )[1].split("using ElementA = T;", 1)[0]
+    staged = finalize.split(
+        "__aicore__ inline void ComputeOutputCubeStagedA5", 1
+    )[1].split("__aicore__ inline void PrefetchOutputTileA5", 1)[0]
     writeback = finalize.split(
         "__aicore__ inline void FinalizeOutputRows(", 1
     )[1].split("__aicore__ inline bool ResolveFlatChunk(", 1)[0]
 
     assert "BT_ == 64 && curT == BT_" in dispatch
-    assert "ComputeOutputCubeFusedA5" in dispatch
-    assert "const bool fusedA5Output = BT_ == 64 && curT == BT_;" in writeback
-    assert "fusedA5Output ? 1 : 3" in writeback
-    assert "if (!fusedA5Output)" in writeback
+    assert "ComputeOutputCubeStagedA5" in dispatch
+    assert staged.count("true, 0b11") == 2
+    assert "false, 0b11" not in staged
+    assert "copyL0CToDst(blockO, tileL0C, 0b11);" in staged
+    assert "copyL0CToDst(blockLocal, tileL0C, 0b11);" in staged
+    assert "fusedA5Output" not in writeback
     assert "CopyVectorIn(localLocal, u_" in writeback
     assert "Add(outLocal, stateLocal, localLocal" in writeback
+
+
+def test_manifest_registers_a5_bf16_full_chunk_finalize_regression():
+    manifest = json.loads(CASE_MANIFEST.read_text(encoding="utf-8"))
+    case = next(
+        item
+        for item in manifest["cases"]
+        if item["id"] == "chunk_kda_fwd_a5_bf16_full_chunk_finalize"
+    )
+    coverage = manifest["coverage_requirements"]
+
+    assert case["id"] in coverage["accuracy_case_ids"]
+    assert case["id"] in coverage["generalization_case_ids"]
+    assert case["dtype"]["q_k_v"] == "bfloat16"
+    assert case["layout"] == "BSND"
+    assert case["shape"]["chunk_size"] == 64
+    assert case["shape"]["T"] % case["shape"]["chunk_size"] == 0
+    assert case["attrs"]["safe_gate"] is True
+    assert case["attrs"]["state_v_first"] is True
+    assert case["soc"] == ["ascend950"]
 
 
 def test_fwd_h_uses_fixed_scalar_exp_and_keywise_exp2_on_a2_and_a5():
