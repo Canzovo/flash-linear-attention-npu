@@ -105,6 +105,52 @@ class RuntimeDeviceGuardTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"input must be on npu:1, got npu:0"):
                 ctx.tensor(FakeTensor(0), "input")
 
+    def test_call_context_forwards_descriptor_overrides(self):
+        calls = []
+
+        class FakeDescriptor:
+            def __init__(
+                self,
+                runtime,
+                tensor,
+                *,
+                acl_format_override=None,
+                storage_shape_override=None,
+            ):
+                self.ptr = 0xD00D
+                calls.append(
+                    (
+                        runtime,
+                        tensor,
+                        acl_format_override,
+                        storage_shape_override,
+                    )
+                )
+
+        runtime = object()
+        tensor = FakeTensor(1)
+        ctx = RUNTIME._CallContext(runtime, FakeDevice(1))
+        with mock.patch.object(RUNTIME, "_AclTensor", FakeDescriptor):
+            ptr = ctx.tensor(
+                tensor,
+                "input",
+                acl_format_override=RUNTIME.ACL_FORMAT_ND,
+                storage_shape_override=(1, 3, 17, 64),
+            )
+
+        self.assertEqual(ptr.value, 0xD00D)
+        self.assertEqual(
+            calls,
+            [
+                (
+                    runtime,
+                    tensor,
+                    RUNTIME.ACL_FORMAT_ND,
+                    (1, 3, 17, 64),
+                )
+            ],
+        )
+
     def test_call_device_rejects_outputs_from_different_devices(self):
         with self.assertRaisesRegex(ValueError, r"output\[1\] must be on npu:0, got npu:1"):
             RUNTIME._call_device((FakeTensor(0), FakeTensor(1)))
