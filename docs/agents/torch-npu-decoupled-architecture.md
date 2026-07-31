@@ -126,7 +126,7 @@ legacy `torch.ops.npu.*` 兼容路径仍可通过 `FLA_NPU_BUILD_LEGACY_EXTENSIO
 7. runtime 在目标 device 上分配 workspace。
 8. runtime 读取 `torch.npu.current_stream(target_device)` 的底层 stream pointer。
 9. ctypes 调用 `<aclnnOp>(workspace, size, executor, stream)`，将 kernel enqueue 到 current stream。
-10. runtime 销毁 descriptor，短期保活输出、workspace 和 helper tensor，并在退出 device guard 时恢复调用方原 device。
+10. runtime 销毁 descriptor；workspace 和 helper tensor 在同一 current stream 上交回 PyTorch NPU allocator，并在退出 device guard 时恢复调用方原 device。
 
 这条默认链路没有 `torch.ops.load_library()`，不查找 `torch.ops.npu.<op>`，也不加载 `custom_aclnn_extension_lib*.so`。
 
@@ -329,11 +329,12 @@ stream_ptr = int(stream.npu_stream)
 aclnn launch 返回时，kernel 通常只完成 enqueue。runtime 必须保证：
 
 - 用户输入 tensor 由调用方持有。
-- 输出 tensor、workspace 和临时 helper tensor 在设备消费完成前不被 Python GC 回收。
-- int-array descriptor 使用的临时 tensor 不提前释放。
+- 输出 tensor 由返回值和调用方持有，不在 runtime 内额外保留。
+- workspace 和临时 helper tensor 必须在目标 current stream 上分配，并由同一 stream 上 enqueue 的 kernel 消费。
+- workspace 和 helper tensor 的 Python 引用可在 enqueue 后释放；底层 block 的安全复用由 PyTorch NPU caching allocator 的 stream 生命周期管理。
 - descriptor 在 executor 构造和 launch 完成后销毁。
 
-本仓使用 `_RECENT_LAUNCH_STORAGE` 保存近期输出、workspace 和 helper tensor，不在默认路径做全局 synchronize。这个保活机制解决对象生命周期，不替代跨 stream event。
+runtime 不使用固定深度的全局保活队列，也不在默认路径做全局 synchronize。固定保留近期 workspace 会使显存随连续 launch 次数线性增长，尤其会放大包含内部中间张量的大融合算子显存占用。
 
 ### 5.5 ACL 私有格式和 NZ 透传
 

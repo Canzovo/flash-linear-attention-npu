@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import gc
 import importlib.util
 import sys
 import types
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -86,9 +88,6 @@ def fake_torch(npu: FakeNpu):
 
 
 class RuntimeDeviceGuardTest(unittest.TestCase):
-    def setUp(self):
-        RUNTIME._RECENT_LAUNCH_STORAGE.clear()
-
     def test_device_guard_switches_to_target_and_restores_previous_device(self):
         npu = FakeNpu(current_device=0)
         with mock.patch.dict(sys.modules, {"torch": fake_torch(npu)}):
@@ -175,6 +174,57 @@ class RuntimeDeviceGuardTest(unittest.TestCase):
             ],
         )
         self.assertEqual(npu.current_device(), 0)
+
+    def test_call_aclnn_does_not_retain_outputs_workspace_or_helpers(self):
+        npu = FakeNpu(current_device=0)
+        torch_module = fake_torch(npu)
+        workspace_ref = None
+
+        class FakeDescriptor:
+            def __init__(self, runtime, tensor):
+                self.ptr = 0xD00D
+
+            def destroy(self):
+                self.ptr = None
+
+        class Workspace:
+            pass
+
+        class FakeRuntime:
+            def call(self, name, args, device, *, get_workspace_argtypes=None):
+                nonlocal workspace_ref
+                workspace = Workspace()
+                workspace_ref = weakref.ref(workspace)
+                return workspace
+
+        with mock.patch.dict(sys.modules, {"torch": torch_module}):
+            with mock.patch.object(RUNTIME, "runtime", return_value=FakeRuntime()):
+                with mock.patch.object(RUNTIME, "_AclTensor", FakeDescriptor):
+                    output = FakeTensor(2)
+                    helper = FakeTensor(2)
+                    output_ref = weakref.ref(output)
+                    helper_ref = weakref.ref(helper)
+
+                    def build_args(ctx):
+                        ctx.keepalive_tensors.append(helper)
+                        return [ctx.tensor(output, "output")]
+
+                    result = RUNTIME.call_aclnn(
+                        "aclnnTest",
+                        build_args,
+                        output,
+                    )
+
+        self.assertIsNotNone(workspace_ref)
+        self.assertIsNone(workspace_ref())
+        self.assertIs(result, output)
+        del result
+        del output
+        del helper
+        del build_args
+        gc.collect()
+        self.assertIsNone(output_ref())
+        self.assertIsNone(helper_ref())
 
 
 if __name__ == "__main__":
