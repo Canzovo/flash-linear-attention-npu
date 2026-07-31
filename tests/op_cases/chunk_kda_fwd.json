@@ -96,6 +96,7 @@
       "chunk_kda_fwd_dtype_layout_generalization",
       "chunk_kda_fwd_tail_or_varlen",
       "chunk_kda_fwd_a5_varlen_tail_finalize",
+      "chunk_kda_fwd_a5_bf16_full_chunk_finalize",
       "chunk_kda_fwd_tnd_layout",
       "chunk_kda_fwd_state_v_first",
       "chunk_kda_fwd_optional_output_matrix",
@@ -105,6 +106,7 @@
       "chunk_kda_fwd_dtype_layout_generalization",
       "chunk_kda_fwd_tail_or_varlen",
       "chunk_kda_fwd_a5_varlen_tail_finalize",
+      "chunk_kda_fwd_a5_bf16_full_chunk_finalize",
       "chunk_kda_fwd_tnd_layout",
       "chunk_kda_fwd_state_v_first",
       "chunk_kda_fwd_chunk128_writeback_boundary"
@@ -415,6 +417,67 @@
         ]
       },
       "seed": 20261312
+    },
+    {
+      "id": "chunk_kda_fwd_a5_bf16_full_chunk_finalize",
+      "tags": [
+        "accuracy",
+        "generalization",
+        "regression"
+      ],
+      "shape": {
+        "B": 1,
+        "H_k": 2,
+        "H_v": 2,
+        "T": 128,
+        "K": 128,
+        "V": 128,
+        "chunk_size": 64,
+        "N_c": 2
+      },
+      "dtype": {
+        "q_k_v": "bfloat16",
+        "g_beta_state": "float32"
+      },
+      "layout": "BSND",
+      "attrs": {
+        "layout": "BSND",
+        "scale": 0.0883883476,
+        "chunk_size": 64,
+        "output_final_state": true,
+        "disable_recompute": true,
+        "return_intermediate_states": true,
+        "safe_gate": true,
+        "lower_bound": -5.0,
+        "use_gate_in_kernel": true,
+        "state_v_first": true
+      },
+      "optional_inputs": {
+        "initial_state": null,
+        "cu_seqlens": null,
+        "chunk_indices": null
+      },
+      "soc": [
+        "ascend950"
+      ],
+      "run_on": [
+        "ascendc"
+      ],
+      "reference": "tests/reference/chunk_kda_reference.py",
+      "expect": {
+        "return_code": "ACLNN_SUCCESS",
+        "finite_outputs": true,
+        "compare_outputs": [
+          "attn_out",
+          "final_state",
+          "gk",
+          "Aqk/Akk",
+          "w/qg/kg",
+          "u/v_new",
+          "h"
+        ]
+      },
+      "seed": 20260731
     },
     {
       "id": "chunk_kda_fwd_tnd_layout",
