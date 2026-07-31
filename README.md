@@ -61,7 +61,7 @@ FLA_NPU_SOC=ascend910b FLA_NPU_INCREMENTAL_BUILD=1 python -m pip wheel --no-buil
 |---|---|---|---|
 | `FLA_NPU_SOC` | `ascend910b` / `ascend910_93` / `ascend950` | 目标芯片；按实际运行机器选择 | `ascend910b` |
 | `FLA_NPU_INCREMENTAL_BUILD` | `TRUE` / `FALSE` | 复用 `build/` 做完整 wheel 的真增量构建；本地反复调试可设 `TRUE`，release wheel 或干净验证建议保持 `FALSE` | `FALSE` |
-| `FLA_NPU_OPS` | 逗号分隔的算子名，如 `chunk_fwd_o,recompute_wu_fwd` | 仅构建指定算子；用于单算子定位，不要用于 release wheel | 空 |
+| `FLA_NPU_OPS` | 逗号分隔的算子名，如 `chunk_fwd_o,recompute_w_u_fwd` | 仅构建指定算子；用于单算子定位，不要用于 release wheel | 空 |
 | `FLA_NPU_SKIP_RUN_BUILD` | `TRUE` / `FALSE` | 跳过 run 包编译；仅在已准备好匹配的 `build_out/fla-npu-*.run` 且只重打 wheel 时可设 `TRUE`，常规构建建议保持 `FALSE` | `FALSE` |
 | `FLA_NPU_SKIP_RUN_INSTALL` | `TRUE` / `FALSE` | 跳过将 run 包安装产物内嵌到 wheel；会得到不含内嵌 OPP 的 wheel，除非使用外部 OPP 调试，否则建议保持 `FALSE` | `FALSE` |
 | `FLA_NPU_DISABLE_LOCAL_VERSION` | `TRUE` / `FALSE` | wheel 版本号不追加 SOC/torch/ABI 本地版本；内部统一发版需要固定版本号时可设 `TRUE`，日常构建建议保持 `FALSE` 以区分产物兼容范围 | `FALSE` |
@@ -146,7 +146,7 @@ bash test.sh --device 0 --op causal_conv1d   # 单个 AscendC 测试任务
 - `chunk_bwd_dqkwg`
 - `gdn_fwd_o`
 - `gdn_fwd_h`
-- `recompute_wu_fwd`
+- `recompute_w_u_fwd`
 
 
 ### 算子调用方式参考
@@ -192,7 +192,7 @@ NPU CI 维护说明见 [`docs/Fla-npu仓CI部署教程.md`](docs/Fla-npu仓CI部
 │       │       ├── chunk_gdn_fwd      # 前向传播算子
 │       │       │   ├── chunk_fwd_o
 │       │       │   ├── chunk_gated_delta_rule_fwd_h
-│       │       │   └── recompute_wu_fwd
+│       │       │   └── recompute_w_u_fwd
 │       │       ├── chunk_gdn_bwd      # 反向传播算子
 │       │       │   ├── chunk_bwd_dqkwg
 │       │       │   ├── chunk_bwd_dv_local

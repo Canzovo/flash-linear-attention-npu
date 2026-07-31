@@ -45,7 +45,7 @@ set(INCLUDE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_bwd/chunk_gated_delta_rule_bwd_dhu/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd
     ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd/recompute_wu_fwd/op_kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd/recompute_w_u_fwd/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include
     ${ASCEND_DIR}/pkg_inc/op_common/op_host

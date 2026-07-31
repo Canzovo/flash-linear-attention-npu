@@ -43,8 +43,13 @@ TRITON_NAMES = (
     "solve_tril",
 )
 REQUIRED_ASCENDC_CONFIGS = (
-    "recompute_wu_fwd.json",
     "recompute_w_u_fwd.json",
+)
+FORBIDDEN_ASCENDC_NAMES = (
+    "recompute_wu_fwd",
+)
+FORBIDDEN_ASCENDC_CONFIGS = (
+    "recompute_wu_fwd.json",
 )
 
 
@@ -70,6 +75,16 @@ def _require_packaged_opp_configs(fla_npu_module) -> None:
     if missing:
         raise AssertionError(
             "packaged OPP kernel configs are missing: " + ", ".join(missing)
+        )
+
+    unexpected = []
+    for config_name in FORBIDDEN_ASCENDC_CONFIGS:
+        if any((config_dir / config_name).exists() for config_dir in config_dirs):
+            unexpected.append(config_name)
+    if unexpected:
+        raise AssertionError(
+            "packaged OPP kernel configs still contain deprecated aliases: "
+            + ", ".join(unexpected)
         )
 
 
@@ -103,6 +118,12 @@ def main() -> int:
     for name in ASCENDC_NAMES:
         _require_attr(ascendc, name, "fla_npu.ops.ascendc")
         _require_attr(ascendc, f"npu_{name}", "fla_npu.ops.ascendc")
+
+    for name in FORBIDDEN_ASCENDC_NAMES:
+        if hasattr(ascendc, name):
+            raise AssertionError(
+                f"fla_npu.ops.ascendc.{name} must not be kept as a compatibility alias"
+            )
 
     if args.check_legacy_torch_npu:
         import torch_npu
