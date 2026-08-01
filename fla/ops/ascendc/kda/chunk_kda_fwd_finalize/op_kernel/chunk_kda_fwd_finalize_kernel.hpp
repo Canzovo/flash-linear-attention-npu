@@ -809,7 +809,6 @@ private:
 
         constexpr uint16_t kMte1Event = 0;
         constexpr uint16_t kMmadEvent = 0;
-        constexpr uint16_t kFixEvent = 0;
         constexpr uint32_t kL1SlotBytes = 96 * 1024;
         constexpr uint32_t kL1A0Offset = 0;
         constexpr uint32_t kL1B0Offset = 64 * 128 * sizeof(ElementA);
@@ -864,7 +863,10 @@ private:
         auto layoutO = tla::MakeLayout<ElementC, LayoutTagC>(BT_, V_);
         auto tensorO = tla::MakeTensor(o_[KVOffset(b, hv, start, nOffset, V_)], layoutO,
                                        Catlass::Arch::PositionGM{});
+        auto tensorLocal = tla::MakeTensor(u_[KVOffset(b, hv, start, nOffset, V_)], layoutO,
+                                           Catlass::Arch::PositionGM{});
         auto blockO = GetTile(tensorO, tla::MakeCoord(0, 0), tla::MakeShape(curM, curN));
+        auto blockLocal = GetTile(tensorLocal, tla::MakeCoord(0, 0), tla::MakeShape(curM, curN));
         using CopyL0CToDst = typename TileCopy::template CopyL0CToDst<decltype(blockO)>;
         CopyL1ToL0A copyL1ToL0A;
         CopyL1ToL0B copyL1ToL0B;
@@ -876,24 +878,27 @@ private:
         copyL1ToL0B(tileL0B0, tileL1B0);
         SetFlag<HardEvent::MTE1_M>(kMte1Event);
         WaitFlag<HardEvent::MTE1_M>(kMte1Event);
-        tileMmad(tileL0C, tileL0A0, tileL0B0, curM, curN, static_cast<uint32_t>(K_), true, 0);
+        tileMmad(tileL0C, tileL0A0, tileL0B0, curM, curN, static_cast<uint32_t>(K_), true, 0b11);
         SetFlag<HardEvent::M_MTE1>(kMmadEvent);
         WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
+        copyL0CToDst(blockO, tileL0C, 0b11);
+        PipeBarrier<PIPE_ALL>();
 
         copyL1ToL0A(tileL0A1, tileL1A1);
         copyL1ToL0B(tileL0B1, tileL1B1);
         SetFlag<HardEvent::MTE1_M>(kMte1Event);
         WaitFlag<HardEvent::MTE1_M>(kMte1Event);
-        tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT), false, 0);
-        SetFlag<HardEvent::M_FIX>(kFixEvent);
-        WaitFlag<HardEvent::M_FIX>(kFixEvent);
-        copyL0CToDst(blockO, tileL0C);
-        SetFlag<HardEvent::FIX_MTE2>(kFixEvent);
-        WaitFlag<HardEvent::FIX_MTE2>(kFixEvent);
+        tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT), true, 0b11);
+        SetFlag<HardEvent::M_MTE1>(kMmadEvent);
+        WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
+        copyL0CToDst(blockLocal, tileL0C, 0b11);
+        PipeBarrier<PIPE_ALL>();
     }
 
     __aicore__ inline void ProcessOutAicPipelinedA5()
     {
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
+        SetMMLayoutTransform(true);
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
         uint64_t currentTask = static_cast<uint64_t>(GetBlockIdx());
@@ -909,6 +914,7 @@ private:
             currentTask += coreNum;
         }
         if (currentTask >= taskNum) {
+            SetMMLayoutTransform(false);
             return;
         }
 
@@ -963,6 +969,7 @@ private:
             nOffset = nextNOffset;
             slot = nextSlot;
         }
+        SetMMLayoutTransform(false);
     }
 #endif
 
@@ -1181,6 +1188,12 @@ private:
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if (BT_ == 64 && K_ == 128 && V_ == 128) {
+            ProcessOutAicPipelinedA5();
+            return;
+        }
+#endif
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
         for (uint64_t task = GetBlockIdx(); task < taskNum; task += coreNum) {

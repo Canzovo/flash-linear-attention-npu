@@ -174,6 +174,63 @@ def test_safe_gate_is_supported_across_public_and_direct_routes():
     )
 
 
+def test_typical_chunk64_k128_v128_uses_internal_prepare_specialization():
+    prepare_entry = STAGE_KERNELS["prepare"].read_text(encoding="utf-8")
+    prepare_impl = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    prepare_tiling = (
+        STAGE_KERNELS["prepare"].parent.parent
+        / "op_host/chunk_kda_fwd_prepare_tiling.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "TILING_KEY_IS(2)" in prepare_entry
+    assert "ChunkKdaFwdPrepareTilingData, 64, 128, 128" in prepare_entry
+    assert "chunkSize == 64 && kDim == 128 && vDim == 128" in prepare_tiling
+    assert "SetTilingKey(useTypical128 ? 2 : 1)" in prepare_tiling
+    assert "uint32_t COMPILE_BT = 0" in prepare_impl
+    assert "COMPILE_K == 0 ? tiling.kHeadDim : COMPILE_K" in prepare_impl
+
+
+def test_a5_regbase_triangular_recurrence_orders_dependent_ub_rows():
+    prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    recurrence = prepare.split(
+        "static __simd_vf__ inline void ForwardSubDiag16Regbase", 1
+    )[1].split("static __simd_vf__ inline void ApplyKdaRowScaleRegbase", 1)[0]
+
+    assert recurrence.count("sourceRow < row") == 2
+    assert recurrence.count(
+        "LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>()"
+    ) == 2
+
+
+def test_a5_post_wu_uses_bounded_u_staging_and_independent_l0b_slots():
+    post_wu = STAGE_IMPLEMENTATIONS["post_wu"].read_text(encoding="utf-8")
+
+    assert "KDA_POST_PIPELINE_L1_U_SLOT_BYTES" in post_wu
+    assert "PrefetchPostWuPipelineU(resource, slot" in post_wu
+    assert "PrefetchPostWuPipelineU(\n                        resource, nextSlot" in post_wu
+    assert "LocalTensor<T> l0BW" in post_wu
+    assert "LocalTensor<T> l0BU" in post_wu
+    assert "tileMmad(tileL0C, tileL0A, tileL0BW" in post_wu
+    assert "tileMmad(tileL0C, tileL0A, tileL0BU" in post_wu
+
+
+def test_a5_fwd_h_reads_predecayed_vector_gate_k_without_workspace_roundtrip():
+    kernel = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/"
+        "op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+    ).read_text(encoding="utf-8")
+    epilogue = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/"
+        "op_kernel/arch35/epilogue/block/block_epilogue_gdn_fwdh_vnew.hpp"
+    ).read_text(encoding="utf-8")
+
+    assert kernel.count("useKDecayWorkspace = kGated && scalarGated") == 2
+    assert epilogue.count("if constexpr (scalarGated)") >= 4
+    assert epilogue.count("Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done)") >= 4
+
+
 def test_fp16_score_pipeline_does_not_fall_back_to_two_row_cube_tiles():
     prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
     score_ref_block = prepare.split(
@@ -295,11 +352,64 @@ def test_a5_fused_post_wu_protects_l0c_reuse_with_fix_to_cube_events():
     post_wu = STAGE_IMPLEMENTATIONS["post_wu"].read_text(encoding="utf-8")
     fused = post_wu.split(
         "__aicore__ inline void ComputePostWuCubeFusedA5", 1
-    )[1].split("__aicore__ inline void ComputePostWuCube(", 1)[0]
+    )[1].split("__aicore__ inline void FinalizePostWuPipelineEvents", 1)[0]
 
     assert fused.count("SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX)") == 2
     assert fused.count("WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX)") == 2
     assert "FIX_MTE2>(KDA_POST_EVENT_FIX)" not in fused
+
+
+def test_a5_typical_post_wu_uses_regbase_kg_double_buffer():
+    post_wu = STAGE_IMPLEMENTATIONS["post_wu"].read_text(encoding="utf-8")
+    post_aiv = post_wu.split(
+        "__aicore__ inline void ProcessChunkPostAiv", 1
+    )[1].split("__aicore__ inline void ProcessChunkPostAic", 1)[0]
+
+    assert '#include "kernel_utils/vector/regbase.hpp"' in post_wu
+    assert "KDA_TYPICAL_GATE_TILE_ROWS = 16" in post_wu
+    assert "KDA_TYPICAL_GATE_PIPELINE_ROWS = 32" in post_wu
+    assert "KDA_TYPICAL_GATE_PIPELINE_STAGES = 3" in post_wu
+    assert "ComputePostKdaKgRegbase" in post_wu
+    assert "PrefetchTypicalKg(slot ^ 1" in post_wu
+    assert "ProcessPostAivPipelineA5" in post_wu
+    assert "PrefetchTypicalKgPipeline" in post_wu
+    assert "TypicalGatePipelineRef" in post_wu
+    assert "CanPipelineTypicalKg" in post_wu
+    assert "if (UseTypicalPostWuGate(curT))" in post_aiv
+    assert "ComputeTypicalKg" in post_aiv
+    assert "CrossCoreWaitFlagWithReverse" not in post_aiv.split("#else", 1)[0]
+
+
+def test_a5_typical_post_wu_prefetches_bounded_l1_slots():
+    post_wu = STAGE_IMPLEMENTATIONS["post_wu"].read_text(encoding="utf-8")
+    pipeline = post_wu.split(
+        "__aicore__ inline void ComputePrefetchedPostWuPipelineA5", 1
+    )[1].split("#endif", 1)[0]
+    dispatch = post_wu.split(
+        "__aicore__ inline void ProcessPostAic()", 1
+    )[1].split("__aicore__ inline void ProcessPostAicPipelineA5", 1)[0]
+
+    assert "KDA_POST_PIPELINE_STAGE_COUNT = 2" in post_wu
+    assert "KDA_POST_PIPELINE_L1_SLOT_BYTES = 24 * 1024" in post_wu
+    assert "PrefetchPostWuPipelineU" in post_wu
+    assert "if (reuseSlot)" in post_wu
+    assert "WaitFlag<HardEvent::MTE1_MTE2>(pipelineEvent)" in post_wu
+    assert "SetFlag<HardEvent::MTE2_MTE1>(pipelineEvent)" in post_wu
+    assert "SetFlag<HardEvent::MTE1_MTE2>(pipelineEvent)" in pipeline
+    assert "SetFlag<HardEvent::MTE1_MTE2>(uPipelineEvent)" in pipeline
+    assert "FIX_MTE2>(KDA_POST_EVENT_FIX)" not in pipeline
+    assert "PipeBarrier<PIPE_ALL>()" in pipeline
+    assert "FinalizePostWuPipelineEvents(usedSlotCount)" in post_wu
+    assert "SetFlag<HardEvent::MTE1_M>(KDA_POST_EVENT)" in pipeline
+    assert "SetFlag<HardEvent::MTE1_M>(KDA_POST_EVENT_NEXT)" in pipeline
+    assert "WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX)" in pipeline
+    assert "BT_ == 64 && K_ == 128 && V_ == 128" in dispatch
+    assert "ProcessPostAicPipelineA5" in dispatch
+    assert "ProcessPostAivPipelineA5" in post_wu
+    assert "ComputeTypicalKgPipelineRegs" in post_wu
+    assert "StoreTypicalKgPipeline" in post_wu
+    assert "ResolveHeadMajorChunk" in post_wu
+    assert "GetHeadMajorTaskRange" in post_wu
 
 
 def test_a5_finalize_stages_full_chunk_mmads_without_l0c_accumulation():
@@ -574,7 +684,7 @@ def test_aqk_akk_share_one_l1_resident_right_matrix_slot():
     assert "KdaScoreDispatchPolicy::ENABLE_L1_RESIDENT" in prepare
     assert "KdaScoreDispatchPolicy::L1B_STAGES == 1" in prepare
     score_block = prepare.split(
-        "__aicore__ inline void ComputeRawAqkAkkCubeBlock", 1
+        "__aicore__ inline void ComputeRawAqkAkkCubeBlock(uint64_t b", 1
     )[1].split("__aicore__ inline bool UseAkkCubeSolve", 1)[0]
     assert "BlockMmadTla<KdaScoreDispatchPolicy" in score_block
     assert score_block.count("blockMmad(block") == 2
@@ -613,6 +723,57 @@ def test_a5_prepare_joins_both_aiv_subcores_before_shared_ready_signal():
     assert score_loop.rindex("JoinA5AivMte3();") < score_loop.rindex(
         "CrossCoreSetFlagWithReverse<0x2, PIPE_MTE3>(scoreReadyFlag_);"
     )
+
+
+def test_a5_prepare_exports_solved_akk_without_redundant_fp32_round_trip():
+    prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    finalize = prepare.split(
+        "__aicore__ inline void FinalizePrepareIntermediates", 1
+    )[1].split("__aicore__ inline bool ResolveFlatChunk", 1)[0]
+    finish_deferred = prepare.split(
+        "__aicore__ inline void FinishDeferredSafeChunk", 1
+    )[1].split("__aicore__ inline void FinishDeferredSafeChunkPair", 1)[0]
+    assert "uint64_t chunkIdx" in finalize
+    assert "SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X)" in finalize
+    assert "CopyVectorIn(akkLocal, solveWorkspace_, xBase, matrixElems);" in finalize
+    assert "COMPILE_BT == 64 && COMPILE_K == 128 && COMPILE_V == 128" in finalize
+    assert "if constexpr (!(SAFE_GATE && COMPILE_BT == 64" in finish_deferred
+
+
+def test_a5_prepare_exports_masked_aqk_before_finalize_round_trip():
+    prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    solve_rows = prepare.split(
+        "__aicore__ inline void PrepareAqkAkkSolveInputRows", 1
+    )[1].split("__aicore__ inline void CubeGemmSolveSub", 1)[0]
+    finalize = prepare.split(
+        "__aicore__ inline void FinalizePrepareIntermediates", 1
+    )[1].split("__aicore__ inline bool ResolveFlatChunk", 1)[0]
+    assert "LocalTensor<T> aqkTyped = GateQTyped(0);" in solve_rows
+    assert "Muls(aqkMat, aqkMat, scale_" in solve_rows
+    assert "CopyVectorOut(o_, AOffset(b, hv, token, 0), aqkTyped" in solve_rows
+    assert "return;" in solve_rows
+    assert "if constexpr (!(SAFE_GATE && COMPILE_BT == 64" in finalize
+
+
+def test_a5_prepare_fuses_beta_w_and_v_into_score_factor_staging():
+    prepare = STAGE_IMPLEMENTATIONS["prepare"].read_text(encoding="utf-8")
+    regbase = prepare.split(
+        "static __simd_vf__ inline void PrepareKdaGateQwKgRegbase", 1
+    )[1].split("static __simd_vf__ inline void ForwardSubDiag16Regbase", 1)[0]
+    score_factors = prepare.split(
+        "__aicore__ inline void PrepareScoreFactorsBulk", 1
+    )[1].split("__aicore__ inline void PrepareGateProductsBulk", 1)[0]
+    finish_deferred = prepare.split(
+        "__aicore__ inline void FinishDeferredSafeChunk", 1
+    )[1].split("__aicore__ inline void FinishDeferredSafeChunkPair", 1)[0]
+    assert "return 2;" in prepare.split(
+        "__aicore__ inline constexpr uint64_t GateBufferDepth", 1
+    )[1].split("__aicore__ inline uint64_t GateInputSlotBytes", 1)[0]
+    assert "CastHalf2Float<InputT>" in regbase
+    assert "LoadAlign<float, LoadDist::DIST_BRC_B32>(betaReg, beta + row);" in regbase
+    assert "vDirect + offset" in regbase
+    assert "CopyVectorOut(vNew_" in score_factors
+    assert "HV_ % KDA_SCORE_LANES != 0" in finish_deferred
 
 
 def test_fwd_h_gk_only_path_skips_scalar_gate_scaling():
@@ -717,3 +878,16 @@ def test_tiling_key_has_design_rationale():
     design = (OP_ROOT / "docs/design.md").read_text(encoding="utf-8")
     assert "模板化方案与 tiling key" in design
     assert "编译期" in design and "独立" in design
+
+
+def test_a5_gate_chunk_bulk_regbase_is_arch_guarded():
+    gate = (
+        ROOT
+        / "fla/ops/ascendc/kda/kda_gate_cumsum/op_kernel/kda_gate_cumsum.cpp"
+    ).read_text(encoding="utf-8")
+    marker = "__aicore__ inline void ProcessChunkBulkFp32"
+    prefix, suffix = gate.split(marker, 1)
+    assert prefix.rstrip().endswith(
+        "#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310"
+    )
+    assert "AccumulateGateChunk128Regbase" in suffix.split("#endif", 1)[0]

@@ -52,6 +52,35 @@ static __simd_vf__ inline void AccumulateGateRowRegbase(__ubuf__ float *input, _
     }
 }
 
+static __simd_vf__ inline void AccumulateGateChunk128Regbase(__ubuf__ float *input,
+                                                              __ubuf__ float *output,
+                                                              uint16_t rows)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t FLOAT_ELEMENTS_PER_REG = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+    constexpr uint16_t ROW_ELEMENTS = 2 * FLOAT_ELEMENTS_PER_REG;
+
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    RegTensor<float> accZeroReg;
+    RegTensor<float> accOneReg;
+    Duplicate(accZeroReg, 0.0f, floatMask);
+    Duplicate(accOneReg, 0.0f, floatMask);
+    for (uint16_t row = 0; row < rows; ++row) {
+        uint32_t rowOffset = static_cast<uint32_t>(row) * ROW_ELEMENTS;
+        RegTensor<float> inputZeroReg;
+        RegTensor<float> inputOneReg;
+        LoadAlign<float, LoadDist::DIST_NORM>(inputZeroReg, input + rowOffset);
+        LoadAlign<float, LoadDist::DIST_NORM>(
+            inputOneReg, input + rowOffset + FLOAT_ELEMENTS_PER_REG);
+        Muls(inputZeroReg, inputZeroReg, RCP_LN2, floatMask);
+        Muls(inputOneReg, inputOneReg, RCP_LN2, floatMask);
+        Add(accZeroReg, accZeroReg, inputZeroReg, floatMask);
+        Add(accOneReg, accOneReg, inputOneReg, floatMask);
+        StoreAlign(output + rowOffset, accZeroReg, floatMask);
+        StoreAlign(output + rowOffset + FLOAT_ELEMENTS_PER_REG, accOneReg, floatMask);
+    }
+}
+
 #endif
 
 template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE>
@@ -416,6 +445,7 @@ private:
         }
     }
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
     __aicore__ inline void ProcessChunkBulkFp32(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
     {
         uint64_t rows = end - start;
@@ -424,34 +454,22 @@ private:
         }
         uint32_t elems = static_cast<uint32_t>(rows * k_);
         LocalTensor<float> buffer0 = chunkBuf_.Get<float>();
-        LocalTensor<float> buffer1 = buffer0[GATE_BULK_ELEMENTS];
         CopyFloatVectorIn(buffer0, g_, Offset(b, start, hv, 0), elems);
         SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
-        Muls(buffer0, buffer0, RCP_LN2, elems);
+        AccumulateGateChunk128Regbase(
+            (__ubuf__ float *)buffer0.GetPhyAddr(), (__ubuf__ float *)buffer0.GetPhyAddr(),
+            static_cast<uint16_t>(rows));
         PipeBarrier<PIPE_V>();
-
-        bool sourceIsBuffer0 = true;
-        for (uint32_t stride = 1; stride < rows; stride <<= 1) {
-            LocalTensor<float> src = sourceIsBuffer0 ? buffer0 : buffer1;
-            LocalTensor<float> dst = sourceIsBuffer0 ? buffer1 : buffer0;
-            uint32_t prefixElems = static_cast<uint32_t>(stride * k_);
-            uint32_t suffixElems = elems - prefixElems;
-            Adds(dst, src, 0.0f, prefixElems);
-            Add(dst[prefixElems], src[prefixElems], src, suffixElems);
-            PipeBarrier<PIPE_V>();
-            sourceIsBuffer0 = !sourceIsBuffer0;
-        }
-
-        LocalTensor<float> output = sourceIsBuffer0 ? buffer0 : buffer1;
         SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
         WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
-        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), output, elems);
+        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), buffer0, elems);
         SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
         WaitFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
     }
+#endif
 
     GlobalTensor<T> g_;
     GlobalTensor<float> aLog_;

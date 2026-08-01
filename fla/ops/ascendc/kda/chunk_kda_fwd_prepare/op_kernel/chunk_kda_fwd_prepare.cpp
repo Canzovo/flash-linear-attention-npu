@@ -26,5 +26,19 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd_prepare(
                 q, k, v, gk, beta, nullptr, cu_seqlens, chunk_indices,
                 aqk, akk, qg, qg_scaled, w_seed, u_seed, userWorkspace, tilingData, pipe);
         }
+    } else if (TILING_KEY_IS(2)) {
+        KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
+        TPipe pipe;
+        if (tilingData.safeGate) {
+            KdaPrepare::RunChunkKdaPrepare<true, DTYPE_Q, DTYPE_GK, DTYPE_BETA,
+                ChunkKdaFwdPrepareTilingData, 64, 128, 128>(
+                q, k, v, gk, beta, nullptr, cu_seqlens, chunk_indices,
+                aqk, akk, qg, qg_scaled, w_seed, u_seed, userWorkspace, tilingData, pipe);
+        } else {
+            KdaPrepare::RunChunkKdaPrepare<false, DTYPE_Q, DTYPE_GK, DTYPE_BETA,
+                ChunkKdaFwdPrepareTilingData, 64, 128, 128>(
+                q, k, v, gk, beta, nullptr, cu_seqlens, chunk_indices,
+                aqk, akk, qg, qg_scaled, w_seed, u_seed, userWorkspace, tilingData, pipe);
+        }
     }
 }

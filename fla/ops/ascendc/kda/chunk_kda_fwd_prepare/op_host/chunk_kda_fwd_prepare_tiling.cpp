@@ -135,7 +135,8 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
     tiling.set_prepareAkkFp32Offset(akkFp32Offset);
     tiling.set_prepareScratchOffset(scratchOffset);
 
-    context->SetTilingKey(1);
+    const bool useTypical128 = chunkSize == 64 && kDim == 128 && vDim == 128;
+    context->SetTilingKey(useTypical128 ? 2 : 1);
     context->SetScheduleMode(KDA_BATCH_MODE);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
