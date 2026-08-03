@@ -22,6 +22,7 @@ import ctypes
 
 from ._kda_policy import kda_fwd_optional_output_mask
 from ._runtime import (
+    ACL_FORMAT_ND,
     call_aclnn as _runtime_call_aclnn,
     chunk_num as _chunk_num,
     empty as _empty,
@@ -76,6 +77,29 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_void_p),
     ],
+    "aclnnChunkKdaBwdIntra": [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int64,
+        ctypes.c_bool,
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_void_p),
+    ],
     "aclnnKdaGateCumsum": [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -116,7 +140,11 @@ _GET_WORKSPACE_ARGTYPES = {
 }
 
 
-def _call_aclnn(name: str, build_args, outputs):
+def _call_aclnn(
+    name: str,
+    build_args,
+    outputs,
+):
     return _runtime_call_aclnn(
         name,
         build_args,
@@ -940,6 +968,287 @@ def npu_kda_gate_cumsum(
         ],
         out,
     )
+
+
+# Dense BSND Host code transposes all ten inputs to BNSD. Its four internal
+# outputs alias the transposed gradient inputs, so bounding this input footprint
+# bounds the dominant per-call workspace without changing kernel/tiling.
+_KDA_BSND_TRANSPOSE_WORKSPACE_BUDGET_BYTES = 960 * 1024 * 1024
+
+
+def _chunk_kda_bwd_intra_bsnd_segment_tokens(
+    tensors,
+    seqlen,
+    chunk_size,
+    *,
+    workspace_budget_bytes=None,
+):
+    """Return a chunk-aligned BSND segment length for bounded transposes."""
+
+    if workspace_budget_bytes is None:
+        workspace_budget_bytes = _KDA_BSND_TRANSPOSE_WORKSPACE_BUDGET_BYTES
+    total_transpose_bytes = sum(
+        int(tensor.numel()) * int(tensor.element_size()) for tensor in tensors
+    )
+    if total_transpose_bytes <= workspace_budget_bytes:
+        return int(seqlen)
+
+    bytes_per_token = total_transpose_bytes // int(seqlen)
+    budget_tokens = int(workspace_budget_bytes) // bytes_per_token
+    aligned_tokens = (budget_tokens // int(chunk_size)) * int(chunk_size)
+    return min(int(seqlen), max(int(chunk_size), aligned_tokens))
+
+
+def npu_chunk_kda_bwd_intra(
+    q,
+    k,
+    gk,
+    beta,
+    dAqk,
+    dAkk,
+    dq,
+    dk,
+    db,
+    dg,
+    *,
+    cu_seqlens=None,
+    chunk_indices=None,
+    chunk_size=64,
+    safe_gate=True,
+    layout="BSND",
+):
+    """Run the safe-gate KDA intra-chunk backward kernel.
+
+    BNSD is the native performance layout. BSND is converted through the same
+    layout-swap operator used by the existing KDA forward path for dense input.
+    Varlen uses zero-copy TND [T,H,D], with BSND [1,T,H,D] accepted as a
+    storage-compatible form. q/k must be BF16; beta accepts BF16 or FP32.
+    """
+    import torch
+
+    tensors = {
+        "q": q,
+        "k": k,
+        "gk": gk,
+        "beta": beta,
+        "dAqk": dAqk,
+        "dAkk": dAkk,
+        "dq": dq,
+        "dk": dk,
+        "db": db,
+        "dg": dg,
+    }
+    layout = str(layout)
+    if layout not in {"BSND", "BNSD", "TND"}:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: supports dense BSND/BNSD or varlen TND."
+        )
+    if not bool(safe_gate):
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: safe_gate=False is reserved but not supported in v1."
+        )
+    chunk_size = int(chunk_size)
+    if chunk_size != 64:
+        raise RuntimeError("npu_chunk_kda_bwd_intra: chunk_size must be 64.")
+    expected_dtypes = {
+        "q": torch.bfloat16,
+        "k": torch.bfloat16,
+        "gk": torch.float32,
+        "dAqk": torch.float32,
+        "dAkk": torch.float32,
+        "dq": torch.float32,
+        "dk": torch.float32,
+        "db": torch.float32,
+        "dg": torch.float32,
+    }
+    for name, tensor in tensors.items():
+        if name == "beta":
+            if tensor.dtype not in {torch.bfloat16, torch.float32}:
+                raise RuntimeError(
+                    "npu_chunk_kda_bwd_intra: beta must be torch.bfloat16 "
+                    "or torch.float32."
+                )
+        elif tensor.dtype != expected_dtypes[name]:
+            raise RuntimeError(
+                f"npu_chunk_kda_bwd_intra: {name} must be {expected_dtypes[name]}."
+            )
+        if tensor.device != q.device:
+            raise RuntimeError(
+                f"npu_chunk_kda_bwd_intra: {name} must be on the same device as q."
+            )
+        if not tensor.is_contiguous():
+            raise RuntimeError(
+                f"npu_chunk_kda_bwd_intra: {name} must be contiguous; implicit copies are disabled."
+            )
+    if chunk_indices is not None and cu_seqlens is None:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: chunk_indices requires cu_seqlens."
+        )
+    is_varlen = cu_seqlens is not None
+    if is_varlen and layout == "BNSD":
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: varlen supports TND or BSND, not BNSD."
+        )
+    if not is_varlen and layout == "TND":
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: TND requires cu_seqlens."
+        )
+
+    q_shape = _shape(q)
+    expected_rank = 3 if layout == "TND" else 4
+    if len(q_shape) != expected_rank:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: q rank does not match layout."
+        )
+    if layout == "TND":
+        seqlen, heads, head_dim = q_shape
+        batch = 1
+        scalar_shape = (seqlen, heads)
+        matrix_shape = (seqlen, heads, chunk_size)
+    elif layout == "BSND":
+        batch, seqlen, heads, head_dim = q_shape
+        scalar_shape = (batch, seqlen, heads)
+        matrix_shape = (batch, seqlen, heads, chunk_size)
+    else:
+        batch, heads, seqlen, head_dim = q_shape
+        scalar_shape = (batch, heads, seqlen)
+        matrix_shape = (batch, heads, seqlen, chunk_size)
+    if batch <= 0 or heads <= 0 or seqlen <= 0:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: B/H/T must be positive."
+        )
+    if (is_varlen and head_dim != 128) or (
+        not is_varlen and head_dim not in {64, 128, 256}
+    ):
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: varlen supports K=128; "
+            "dense supports K=64, 128 or 256."
+        )
+    if is_varlen and layout == "BSND" and batch != 1:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: varlen BSND compatibility requires B=1."
+        )
+    for name in ("k", "gk", "dq", "dk", "dg"):
+        if _shape(tensors[name]) != q_shape:
+            raise RuntimeError(
+                f"npu_chunk_kda_bwd_intra: {name} must have the same shape as q."
+            )
+    if _shape(beta) != scalar_shape or _shape(db) != scalar_shape:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: beta/db shape must match the selected layout."
+        )
+    if _shape(dAqk) != matrix_shape or _shape(dAkk) != matrix_shape:
+        raise RuntimeError(
+            "npu_chunk_kda_bwd_intra: dAqk/dAkk shape must match the selected layout."
+        )
+
+    cu_seqlens_arg = None
+    chunk_indices_arg = None
+    if is_varlen:
+        cu_seqlens_arg = tuple(int(value) for value in cu_seqlens)
+        if not 2 <= len(cu_seqlens_arg) <= 65:
+            raise RuntimeError(
+                "npu_chunk_kda_bwd_intra: cu_seqlens must contain 2..65 entries."
+            )
+        if cu_seqlens_arg[0] != 0 or cu_seqlens_arg[-1] != seqlen:
+            raise RuntimeError(
+                "npu_chunk_kda_bwd_intra: cu_seqlens must start at 0 and end at T."
+            )
+        canonical_chunks = []
+        for seq, (begin, end) in enumerate(
+            zip(cu_seqlens_arg[:-1], cu_seqlens_arg[1:])
+        ):
+            if begin < 0 or end < begin:
+                raise RuntimeError(
+                    "npu_chunk_kda_bwd_intra: cu_seqlens must be nondecreasing."
+                )
+            for local_chunk in range((end - begin + chunk_size - 1) // chunk_size):
+                canonical_chunks.extend((seq, local_chunk))
+        if not canonical_chunks:
+            raise RuntimeError(
+                "npu_chunk_kda_bwd_intra: varlen input has no non-empty sequence."
+            )
+        if chunk_indices is not None:
+            chunk_indices_arg = tuple(int(value) for value in chunk_indices)
+            if chunk_indices_arg != tuple(canonical_chunks):
+                raise RuntimeError(
+                    "npu_chunk_kda_bwd_intra: chunk_indices must use canonical "
+                    "sequence-major order."
+                )
+
+    dq_out = _empty_like(dq)
+    dk_out = _empty_like(dk)
+    db_out = _empty_like(db)
+    dg_out = _empty_like(dg)
+    outputs = (dq_out, dk_out, db_out, dg_out)
+    layout_buffer = ctypes.create_string_buffer(layout.encode("utf-8"))
+
+    # The custom op consumes dense BSND/BNSD as an ND tensor. Standard contiguous
+    # rank-4 NPU tensors can carry an NCHW tag despite row-major storage, so
+    # override descriptor metadata without a format conversion or data copy.
+    def nd_tensor(ctx, tensor, name):
+        return ctx.tensor(
+            tensor,
+            name,
+            acl_format_override=ACL_FORMAT_ND,
+            storage_shape_override=_shape(tensor),
+        )
+
+    input_tensors = (
+        q, k, gk, beta, dAqk, dAkk, dq, dk, db, dg
+    )
+    input_names = (
+        "q", "k", "gk", "beta", "dAqk",
+        "dAkk", "dq", "dk", "db", "dg",
+    )
+    output_names = ("dq_out", "dk_out", "db_out", "dg_out")
+
+    def launch(call_inputs, call_outputs):
+        def build_args(ctx):
+            return [
+                *(
+                    nd_tensor(ctx, tensor, name)
+                    for tensor, name in zip(call_inputs, input_names)
+                ),
+                ctx.int_array(cu_seqlens_arg),
+                ctx.int_array(chunk_indices_arg),
+                ctypes.c_int64(chunk_size),
+                ctypes.c_bool(True),
+                ctypes.cast(layout_buffer, ctypes.c_char_p),
+                *(
+                    nd_tensor(ctx, tensor, name)
+                    for tensor, name in zip(call_outputs, output_names)
+                ),
+            ]
+
+        return _call_aclnn(
+            "aclnnChunkKdaBwdIntra",
+            build_args,
+            call_outputs,
+        )
+
+    if not is_varlen and layout == "BSND" and batch == 1:
+        segment_tokens = _chunk_kda_bwd_intra_bsnd_segment_tokens(
+            input_tensors,
+            seqlen,
+            chunk_size,
+        )
+        if segment_tokens < seqlen:
+            # Intra-chunk math has no dependency across chunk boundaries. B=1
+            # makes every token slice physically contiguous; each launch writes
+            # directly into disjoint views of the final full-size outputs.
+            for begin in range(0, seqlen, segment_tokens):
+                length = min(segment_tokens, seqlen - begin)
+                segment_inputs = tuple(
+                    tensor.narrow(1, begin, length) for tensor in input_tensors
+                )
+                segment_outputs = tuple(
+                    tensor.narrow(1, begin, length) for tensor in outputs
+                )
+                launch(segment_inputs, segment_outputs)
+            return outputs
+
+    return launch(input_tensors, outputs)
 
 
 def npu_solve_tri(x, *, cu_seqlens=None, chunk_indices=None, layout="bsnd"):

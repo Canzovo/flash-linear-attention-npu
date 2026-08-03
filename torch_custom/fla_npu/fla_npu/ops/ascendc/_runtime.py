@@ -210,22 +210,41 @@ def zeros(shape_: Iterable[int], like, *, dtype=None):
 class _AclTensor:
     """持有一次 aclnn 调用生命周期内的 aclTensor descriptor。"""
 
-    def __init__(self, runtime: "_AclnnRuntime", tensor):
+    def __init__(
+        self,
+        runtime: "_AclnnRuntime",
+        tensor,
+        *,
+        acl_format_override: Optional[int] = None,
+        storage_shape_override: Optional[Iterable[int]] = None,
+    ):
         tensor = ensure_npu_tensor(tensor, "tensor")
         self._runtime = runtime
         self._tensor = tensor
         self._shape = (ctypes.c_int64 * tensor.dim())(*shape(tensor))
         self._stride = (ctypes.c_int64 * tensor.dim())(*stride(tensor))
-        self._storage_shape = (ctypes.c_int64 * 1)(storage_numel(tensor))
+        descriptor_storage_shape = (
+            (storage_numel(tensor),)
+            if storage_shape_override is None
+            else tuple(int(dim) for dim in storage_shape_override)
+        )
+        self._storage_shape = (ctypes.c_int64 * len(descriptor_storage_shape))(
+            *descriptor_storage_shape
+        )
+        descriptor_format = (
+            acl_format(tensor)
+            if acl_format_override is None
+            else int(acl_format_override)
+        )
         self.ptr = runtime.acl_create_tensor(
             self._shape,
             ctypes.c_uint64(tensor.dim()),
             ctypes.c_int(dtype_to_acl(tensor.dtype)),
             self._stride,
             ctypes.c_int64(int(tensor.storage_offset())),
-            ctypes.c_int(acl_format(tensor)),
+            ctypes.c_int(descriptor_format),
             self._storage_shape,
-            ctypes.c_uint64(1),
+            ctypes.c_uint64(len(descriptor_storage_shape)),
             ctypes.c_void_p(storage_data_ptr(tensor)),
         )
         if not self.ptr:
@@ -269,7 +288,14 @@ class _CallContext:
         self.resources = []
         self.keepalive_tensors = []
 
-    def tensor(self, tensor, name: str = "tensor") -> ctypes.c_void_p:
+    def tensor(
+        self,
+        tensor,
+        name: str = "tensor",
+        *,
+        acl_format_override: Optional[int] = None,
+        storage_shape_override: Optional[Iterable[int]] = None,
+    ) -> ctypes.c_void_p:
         if tensor is None:
             return ctypes.c_void_p()
         tensor = ensure_npu_tensor(tensor, name)
@@ -279,7 +305,15 @@ class _CallContext:
                 f"{name} must be on npu:{self.device_index}, got npu:{tensor_device_index}; "
                 "one aclnn call cannot mix tensors from different NPU devices."
             )
-        desc = _AclTensor(self.runtime, tensor)
+        if acl_format_override is None and storage_shape_override is None:
+            desc = _AclTensor(self.runtime, tensor)
+        else:
+            desc = _AclTensor(
+                self.runtime,
+                tensor,
+                acl_format_override=acl_format_override,
+                storage_shape_override=storage_shape_override,
+            )
         self.resources.append(desc)
         return ctypes.c_void_p(desc.ptr)
 
