@@ -1752,6 +1752,32 @@ def test_kda_gate_cumsum_safe_gate_matches_reference():
     _assert_close("gate cumsum safe", got, ref, rtol=2e-3, atol=2e-3)
 
 
+def test_kda_gate_cumsum_fp32_k128_safe_gate_without_bias_matches_reference():
+    device = _device()
+    if device.type == "cpu":
+        return
+    torch.manual_seed(20260803)
+    raw = torch.randn(1, 2, 65, 128, dtype=torch.float32).to(device)
+    a_log = (torch.randn(2, dtype=torch.float32) * 0.1).to(device)
+    got = fla_ascendc.kda_gate_cumsum(
+        raw,
+        64,
+        A_log=a_log,
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+    )
+    ref = _kda_gate_cumsum_reference(
+        raw.detach().cpu(),
+        64,
+        A_log=a_log.detach().cpu(),
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+    )
+    _assert_close("gate cumsum fp32 k128 safe without bias", got, ref, rtol=2e-3, atol=2e-3)
+
+
 def test_chunk_kda_fwd_raw_gate_safe_modes_match_reference():
     device = _device()
     if device.type == "cpu":
@@ -2132,6 +2158,7 @@ if __name__ == "__main__":
         test_kda_gate_cumsum_bnsd_direct_matches_reference()
         test_kda_gate_cumsum_ntd_direct_matches_reference()
         test_kda_gate_cumsum_safe_gate_matches_reference()
+        test_kda_gate_cumsum_fp32_k128_safe_gate_without_bias_matches_reference()
         test_chunk_kda_fwd_raw_gate_safe_modes_match_reference()
         test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference()
         test_kda_gate_cumsum_layout_is_not_inferred_from_shape()
@@ -2170,6 +2197,7 @@ if __name__ == "__main__":
     test_kda_gate_cumsum_bnsd_direct_matches_reference()
     test_kda_gate_cumsum_ntd_direct_matches_reference()
     test_kda_gate_cumsum_safe_gate_matches_reference()
+    test_kda_gate_cumsum_fp32_k128_safe_gate_without_bias_matches_reference()
     test_chunk_kda_fwd_raw_gate_safe_modes_match_reference()
     test_kda_gate_cumsum_safe_gate_multitask_last_row_matches_reference()
     test_kda_gate_cumsum_layout_is_not_inferred_from_shape()

@@ -81,6 +81,62 @@ static __simd_vf__ inline void AccumulateGateChunk128Regbase(__ubuf__ float *inp
     }
 }
 
+template <bool HAS_BIAS>
+static __simd_vf__ inline void AccumulateSafeGateChunk128Regbase(
+    __ubuf__ float *input, __ubuf__ float *bias, __ubuf__ float *output,
+    uint16_t rows, float expA, float lowerBound)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint16_t FLOAT_ELEMENTS_PER_REG = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+    constexpr uint16_t ROW_ELEMENTS = 2 * FLOAT_ELEMENTS_PER_REG;
+
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    RegTensor<float> accZeroReg;
+    RegTensor<float> accOneReg;
+    RegTensor<float> oneZeroReg;
+    RegTensor<float> oneOneReg;
+    RegTensor<float> biasZeroReg;
+    RegTensor<float> biasOneReg;
+    Duplicate(accZeroReg, 0.0f, floatMask);
+    Duplicate(accOneReg, 0.0f, floatMask);
+    Duplicate(oneZeroReg, 1.0f, floatMask);
+    Duplicate(oneOneReg, 1.0f, floatMask);
+    if constexpr (HAS_BIAS) {
+        LoadAlign<float, LoadDist::DIST_NORM>(biasZeroReg, bias);
+        LoadAlign<float, LoadDist::DIST_NORM>(biasOneReg, bias + FLOAT_ELEMENTS_PER_REG);
+    }
+
+    const float gateScale = lowerBound * RCP_LN2;
+    for (uint16_t row = 0; row < rows; ++row) {
+        uint32_t rowOffset = static_cast<uint32_t>(row) * ROW_ELEMENTS;
+        RegTensor<float> gateZeroReg;
+        RegTensor<float> gateOneReg;
+        RegTensor<float> sigmoidZeroReg;
+        RegTensor<float> sigmoidOneReg;
+        LoadAlign<float, LoadDist::DIST_NORM>(gateZeroReg, input + rowOffset);
+        LoadAlign<float, LoadDist::DIST_NORM>(
+            gateOneReg, input + rowOffset + FLOAT_ELEMENTS_PER_REG);
+        if constexpr (HAS_BIAS) {
+            Add(gateZeroReg, gateZeroReg, biasZeroReg, floatMask);
+            Add(gateOneReg, gateOneReg, biasOneReg, floatMask);
+        }
+        Muls(gateZeroReg, gateZeroReg, -expA, floatMask);
+        Muls(gateOneReg, gateOneReg, -expA, floatMask);
+        Exp(gateZeroReg, gateZeroReg, floatMask);
+        Exp(gateOneReg, gateOneReg, floatMask);
+        Adds(gateZeroReg, gateZeroReg, 1.0f, floatMask);
+        Adds(gateOneReg, gateOneReg, 1.0f, floatMask);
+        Div(sigmoidZeroReg, oneZeroReg, gateZeroReg, floatMask);
+        Div(sigmoidOneReg, oneOneReg, gateOneReg, floatMask);
+        Muls(sigmoidZeroReg, sigmoidZeroReg, gateScale, floatMask);
+        Muls(sigmoidOneReg, sigmoidOneReg, gateScale, floatMask);
+        Add(accZeroReg, accZeroReg, sigmoidZeroReg, floatMask);
+        Add(accOneReg, accOneReg, sigmoidOneReg, floatMask);
+        StoreAlign(output + rowOffset, accZeroReg, floatMask);
+        StoreAlign(output + rowOffset + FLOAT_ELEMENTS_PER_REG, accOneReg, floatMask);
+    }
+}
+
 #endif
 
 template <typename T, bool USE_GATE_IN_KERNEL, bool SAFE_GATE>
@@ -355,7 +411,21 @@ private:
 
     __aicore__ inline void ProcessChunk(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
     {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+        if constexpr (USE_GATE_IN_KERNEL && SAFE_GATE && IsSameType<T, float>::value) {
+            if (k_ == GATE_BULK_COLS && chunkSize_ == GATE_BULK_ROWS && end - start == GATE_BULK_ROWS) {
+                ProcessChunkBulkFp32SafeVec(b, hv, start);
+                return;
+            }
+        }
+#endif
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if constexpr (USE_GATE_IN_KERNEL && SAFE_GATE && IsSameType<T, float>::value) {
+            if (k_ == GATE_BULK_COLS && chunkSize_ == GATE_BULK_ROWS) {
+                ProcessChunkBulkFp32Safe(b, hv, start, end);
+                return;
+            }
+        }
         if constexpr (!USE_GATE_IN_KERNEL && IsSameType<T, float>::value) {
             if (k_ == GATE_BULK_COLS && chunkSize_ == GATE_BULK_ROWS) {
                 ProcessChunkBulkFp32(b, hv, start, end);
@@ -445,7 +515,107 @@ private:
         }
     }
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+    __aicore__ inline void ScanGateChunk64x128(LocalTensor<float> input, LocalTensor<float> output)
+    {
+        constexpr uint32_t rowElements = GATE_BULK_COLS;
+        Adds(input, output, 0.0f, rowElements);
+        Add(input[rowElements], output[rowElements], output, (GATE_BULK_ROWS - 1) * rowElements);
+        PipeBarrier<PIPE_V>();
+
+        Adds(output, input, 0.0f, 2 * rowElements);
+        Add(output[2 * rowElements], input[2 * rowElements], input, (GATE_BULK_ROWS - 2) * rowElements);
+        PipeBarrier<PIPE_V>();
+
+        Adds(input, output, 0.0f, 4 * rowElements);
+        Add(input[4 * rowElements], output[4 * rowElements], output, (GATE_BULK_ROWS - 4) * rowElements);
+        PipeBarrier<PIPE_V>();
+
+        Adds(output, input, 0.0f, 8 * rowElements);
+        Add(output[8 * rowElements], input[8 * rowElements], input, (GATE_BULK_ROWS - 8) * rowElements);
+        PipeBarrier<PIPE_V>();
+
+        Adds(input, output, 0.0f, 16 * rowElements);
+        Add(input[16 * rowElements], output[16 * rowElements], output, (GATE_BULK_ROWS - 16) * rowElements);
+        PipeBarrier<PIPE_V>();
+
+        Adds(output, input, 0.0f, 32 * rowElements);
+        Add(output[32 * rowElements], input[32 * rowElements], input, (GATE_BULK_ROWS - 32) * rowElements);
+        PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void ProcessChunkBulkFp32SafeVec(uint64_t b, uint64_t hv, uint64_t start)
+    {
+        constexpr uint32_t elems = GATE_BULK_ELEMENTS;
+        LocalTensor<float> input = chunkBuf_.Get<float>();
+        LocalTensor<float> output = chunkBuf_.Get<float>()[GATE_BULK_ELEMENTS];
+        CopyFloatVectorIn(input, g_, Offset(b, start, hv, 0), elems);
+        SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
+        WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
+
+        Duplicate(output, 1.0f, elems);
+        if (hasDtBias_) {
+            LocalTensor<float> bias = biasBuf_.Get<float>();
+            for (uint32_t row = 0; row < GATE_BULK_ROWS; ++row) {
+                Add(input[row * GATE_BULK_COLS], input[row * GATE_BULK_COLS], bias, GATE_BULK_COLS);
+            }
+            PipeBarrier<PIPE_V>();
+        }
+        Muls(input, input, -expA_, elems);
+        PipeBarrier<PIPE_V>();
+        Exp(input, input, elems);
+        PipeBarrier<PIPE_V>();
+        Adds(input, input, 1.0f, elems);
+        PipeBarrier<PIPE_V>();
+        Div(output, output, input, elems);
+        PipeBarrier<PIPE_V>();
+        Muls(output, output, lowerBound_ * RCP_LN2, elems);
+        PipeBarrier<PIPE_V>();
+        ScanGateChunk64x128(input, output);
+
+        SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
+        WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
+        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), output, elems);
+        SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
+        WaitFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
+    }
+#endif
+
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    __aicore__ inline void ProcessChunkBulkFp32Safe(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
+    {
+        uint64_t rows = end - start;
+        if (rows == 0) {
+            return;
+        }
+        uint32_t elems = static_cast<uint32_t>(rows * k_);
+        LocalTensor<float> input = chunkBuf_.Get<float>();
+        LocalTensor<float> output = chunkBuf_.Get<float>()[GATE_BULK_ELEMENTS];
+        CopyFloatVectorIn(input, g_, Offset(b, start, hv, 0), elems);
+        SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
+        WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
+        LocalTensor<float> bias = biasBuf_.Get<float>();
+        if (hasDtBias_) {
+            AccumulateSafeGateChunk128Regbase<true>(
+                (__ubuf__ float *)input.GetPhyAddr(), (__ubuf__ float *)bias.GetPhyAddr(),
+                (__ubuf__ float *)output.GetPhyAddr(), static_cast<uint16_t>(rows), expA_, lowerBound_);
+        } else {
+            AccumulateSafeGateChunk128Regbase<false>(
+                (__ubuf__ float *)input.GetPhyAddr(), (__ubuf__ float *)bias.GetPhyAddr(),
+                (__ubuf__ float *)output.GetPhyAddr(), static_cast<uint16_t>(rows), expA_, lowerBound_);
+        }
+        PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
+        WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
+        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), output, elems);
+        SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
+        SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
+        WaitFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
+    }
+
     __aicore__ inline void ProcessChunkBulkFp32(uint64_t b, uint64_t hv, uint64_t start, uint64_t end)
     {
         uint64_t rows = end - start;
