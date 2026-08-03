@@ -1,0 +1,764 @@
+diff --git a/.gitignore b/.gitignore
+index 93ab446..bbc20f2 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -69,3 +69,5 @@ examples/fast_kernel_launch_example/ascend_ops.egg-info
+ examples/fast_kernel_launch_example/build/
+ examples/fast_kernel_launch_example/dist
+ .history/
++
++test_performance.py
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 081864b..b6a4127 100644
+--- a/README.md
++++ b/README.md
+@@ -155,6 +155,7 @@ bash test.sh --device 0 --op causal_conv1d   # 单个 AscendC 测试任务
+ - `gdn_fwd_o`
+ - `gdn_fwd_h`
+ - `recompute_w_u_fwd`
++- `recurrent_gated_delta_rule`
+ 
+ 
+ ### 算子调用方式参考
+diff --git a/docs/agents/torch-npu-decoupled-architecture.md b/docs/agents/torch-npu-decoupled-architecture.md
+index e504f08..d6e93ff 100644
+--- a/docs/agents/torch-npu-decoupled-architecture.md
++++ b/docs/agents/torch-npu-decoupled-architecture.md
+@@ -290,7 +290,7 @@ wrapper 必须明确选择以下一种语义：
+ | Compiler-visible mutable | cache/state 更新且需要图编译 | 使用 `torch.library.custom_op` 和准确 `mutates_args`；返回值不隐式 alias 输入；执行 `opcheck` 和 eager/compile 状态对比 |
+ | Functional state | 训练或导出需要显式状态流 | 不修改输入 cache，返回 `(y, new_state)`；新旧状态不 alias |
+ 
+-当前 `causal_conv1d` 的 `conv_states` 在 prefill、decode 和 speculative 路径中都可能被修改。公共入口通过 `MUTATED_ARGUMENTS` 声明该参数，拒绝 `conv_states.requires_grad=True`，并在 ctypes launch 成功后调用 `torch.autograd.graph.increment_version()`。这补齐了 eager autograd 的版本检查，但不会让 raw ctypes 自动变成 compiler-visible op。
++当前 `causal_conv1d` 的 `conv_states` 在 prefill、decode 和 speculative 路径中都可能被修改，`recurrent_gated_delta_rule` 也会原地更新 `state`。公共入口通过 `MUTATED_ARGUMENTS` 声明这些参数，拒绝对应状态 tensor 的 `requires_grad=True`，并在 ctypes launch 成功后调用 `torch.autograd.graph.increment_version()`。这补齐了 eager autograd 的版本检查，但不会让 raw ctypes 自动变成 compiler-visible op。
+ 
+ `ctx.mark_dirty()` 只服务正确实现的 `torch.autograd.Function`，不能替代 mutation schema，也不能让 `torch.compile` 看见任意 ctypes 写入。
+ 
+@@ -539,7 +539,7 @@ fla_npu 默认不会主动 import、链接或注册 torch_npu dispatcher；目
+ | version counter | PyTorch 为 tensor 维护的修改次数，用于 autograd 检查保存值是否被改写 | ctypes 修改后需调用 `increment_version` 补记 |
+ | `increment_version()` | 主动推进 tensor version counter 的 Python API | ctypes 成功修改状态 tensor 后调用，让 autograd 看见这次修改 |
+ | `ctx.mark_dirty()` | `autograd.Function` 告知 autograd“某个输入会被原地修改”的 API | 只适用于正确实现的 `autograd.Function`，不能替代 dispatcher mutation schema |
+-| `MUTATED_ARGUMENTS` | 本仓维护的 raw ctypes mutable 参数清单 | 当前声明 `causal_conv1d.conv_states` |
++| `MUTATED_ARGUMENTS` | 本仓维护的 raw ctypes mutable 参数清单 | 当前声明 `causal_conv1d.conv_states` 和 `recurrent_gated_delta_rule.state` |
+ | functional op / functional state | 不修改输入，而是返回新的输出/状态 | 最容易被 autograd、导出和图编译正确理解 |
+ | eager mode | Python 调用到哪里就立即执行到哪里的普通运行模式 | 默认 raw ctypes 路径首先保证 eager 正确性 |
+ | graph break | 编译器无法安全捕获某段代码时结束当前图，回到 Python eager 执行 | 未适配的 ctypes side effect 应明确 graph break |
+diff --git a/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/README.md b/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/README.md
+index b730def..11124f0 100644
+--- a/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/README.md
++++ b/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/README.md
+@@ -118,9 +118,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
+ 
+ ### 3.5 补充说明
+ 
+-- 输入张量 `query/key/value/beta/g` 支持非连续 Tensor 输入。
++- 输入张量 `query/key/value/beta/g/gk` 支持非连续 Tensor 输入。
+ - `stateRef` 为原地输入输出，cann版本大于等于9.1.0后支持非连续 Tensor，其余版本不支持。
+-- `gk` 当前版本暂不支持，须传 `None`。
++- `g` 与 `gk` 相互独立，既可以分别传入，也可以同时传入；两者均为 `None` 时不施加衰减。
+ 
+ ---
+ 
+@@ -142,7 +142,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
+ ### 4.2 数值语义
+ 
+ - `g` 传 `None` 时：$\alpha_t = e^0 = 1$，即无标量衰减
+-- `gk` 当前版本暂不支持，须传 `None`
++- `gk` 传 `None` 时：$\alpha_{kt} = e^0 = \mathbf{1}$，即无逐维衰减
++- `gk` 传入 `(T, Nv, Dk)` 的 `FLOAT32` Tensor 时，算子计算 $\alpha_{kt}=e^{gk_t}$，并在状态更新前沿 `Dk` 维逐元素施加衰减
++- `g` 和 `gk` 可以任意组合：仅 `g`、仅 `gk`、两者同时传入或两者均为 `None`
+ - `scaleValue` 推荐设置为：
+ 
+ ```text
+@@ -151,15 +153,16 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
+ 
+ ---
+ 
+-## 5. Torch 测试调用示例
++## 5. Python 稳定入口调用示例
+ 
+ ### 5.1 定长场景（每序列处理相同数量 token）
+ 
+ ```python
+ import torch
+-import torch_npu
+ import math
+ 
++from fla_npu.ops import ascendc as ascendc_ops
++
+ def test_recurrent_gated_delta_rule_fixed():
+     B, mtp = 4, 2           # 4 个 batch，每序列 2 个 token
+     T = B * mtp             # 累积 token 数
+@@ -174,13 +177,14 @@ def test_recurrent_gated_delta_rule_fixed():
+     state = torch.randn(BlockNum, Nv, Dv, Dk, dtype=torch.bfloat16).to(device)
+     beta  = torch.rand(T, Nv, dtype=torch.bfloat16).to(device)
+     g     = torch.randn(T, Nv, dtype=torch.float32).to(device)
++    gk    = torch.randn(T, Nv, Dk, dtype=torch.float32).to(device)
+ 
+     # actual_seq_lengths: shape (B+1,)，首元素为无效序列长度（不参与计算），其余 B 个元素为各 batch 的有效序列长度（总和须等于 T）
+     actual_seq_lengths = torch.tensor([0] + [mtp] * B, dtype=torch.int32).to(device)
+     # ssm_state_indices: 第 i 个 token 使用 state[ssm_state_indices[i]]
+     ssm_state_indices  = torch.arange(T, dtype=torch.int32).to(device)
+ 
+-    out = torch_npu.npu_recurrent_gated_delta_rule(
++    out = ascendc_ops.npu_recurrent_gated_delta_rule(
+         query, key, value, state,
+         beta=beta,
+         scale=scale,
+@@ -188,7 +192,7 @@ def test_recurrent_gated_delta_rule_fixed():
+         ssm_state_indices=ssm_state_indices,
+         num_accepted_tokens=None,   # None = 每序列接受 1 个 token（默认）
+         g=g,
+-        gk=None                     # 当前版本暂不支持，须传 None
++        gk=gk                       # 可与 g 同时使用；传 None 表示无逐维衰减
+     )
+ 
+     assert out.shape == (T, Nv, Dv)
+@@ -205,9 +209,10 @@ if __name__ == "__main__":
+ 
+ ```python
+ import torch
+-import torch_npu
+ import math
+ 
++from fla_npu.ops import ascendc as ascendc_ops
++
+ def test_recurrent_gated_delta_rule_varlen():
+     B, mtp = 4, 2
+     T = B * mtp
+@@ -222,6 +227,7 @@ def test_recurrent_gated_delta_rule_varlen():
+     state = torch.randn(BlockNum, Nv, Dv, Dk, dtype=torch.bfloat16).to(device)
+     beta  = torch.rand(T, Nv, dtype=torch.bfloat16).to(device)
+     g     = torch.randn(T, Nv, dtype=torch.float32).to(device)
++    gk    = torch.randn(T, Nv, Dk, dtype=torch.float32).to(device)
+ 
+     # actual_seq_lengths: shape (B+1,)，首元素为无效序列长度（不参与计算），其余 B 个元素为各 batch 的有效序列长度（总和须等于 T）
+     actual_seq_lengths = torch.tensor([0] + [mtp] * B, dtype=torch.int32).to(device)
+@@ -231,7 +237,7 @@ def test_recurrent_gated_delta_rule_varlen():
+     # 需满足 num_accepted_tokens[i] <= actual_seq_lengths[i] <= 8
+     num_accepted_tokens = torch.tensor([2, 1, 2, 1], dtype=torch.int32).to(device)
+ 
+-    out = torch_npu.npu_recurrent_gated_delta_rule(
++    out = ascendc_ops.npu_recurrent_gated_delta_rule(
+         query, key, value, state,
+         beta=beta,
+         scale=scale,
+@@ -239,7 +245,7 @@ def test_recurrent_gated_delta_rule_varlen():
+         ssm_state_indices=ssm_state_indices,
+         num_accepted_tokens=num_accepted_tokens,
+         g=g,
+-        gk=None
++        gk=gk
+     )
+ 
+     assert out.shape == (T, Nv, Dv)
+diff --git a/scripts/check_packaged_wheel_api.py b/scripts/check_packaged_wheel_api.py
+index 7f22789..ab8cde8 100644
+--- a/scripts/check_packaged_wheel_api.py
++++ b/scripts/check_packaged_wheel_api.py
+@@ -29,6 +29,7 @@ ASCENDC_NAMES = (
+     "prepare_wy_repr_bwd_da",
+     "prepare_wy_repr_bwd_full",
+     "recompute_w_u_fwd",
++    "recurrent_gated_delta_rule",
+     "solve_tri",
+ )
+ 
+@@ -173,6 +174,8 @@ def main() -> int:
+ 
+     if ascendc.BACKWARD_OPS.get("causal_conv1d") != "causal_conv1d_bwd":
+         raise AssertionError("causal_conv1d backward binding metadata is missing")
++    if ascendc.MUTATED_ARGUMENTS.get("recurrent_gated_delta_rule") != ("state",):
++        raise AssertionError("recurrent_gated_delta_rule mutation metadata is missing")
+ 
+     if args.check_triton and not args.skip_triton:
+         from fla_npu.ops import triton
+diff --git a/tests/operators/_shared/npu_generalization.py b/tests/operators/_shared/npu_generalization.py
+index a10df91..7eaf669 100644
+--- a/tests/operators/_shared/npu_generalization.py
++++ b/tests/operators/_shared/npu_generalization.py
+@@ -447,10 +447,19 @@ def _run_recurrent_gated_delta_rule(torch, ops, case, device):
+         gk = -_tensor(torch, (T, Hv, K), torch.float32, device, positive=True, scale=0.02)
+     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32, device=device)
+     out = ops.recurrent_gated_delta_rule(
+-        q, k, v, beta, state, actual, indices, g=g, gk=gk,
+-        num_accepted_tokens=accepted_tensor, scale_value=float(case["attrs"]["scale_value"]),
++        q,
++        k,
++        v,
++        state,
++        beta=beta,
++        scale=float(case["attrs"]["scale_value"]),
++        actual_seq_lengths=actual,
++        ssm_state_indices=indices,
++        g=g,
++        gk=gk,
++        num_accepted_tokens=accepted_tensor,
+     )
+-    return out, ((T, Hv, V), (Ds, Hv, V, K))
++    return (out, state), ((T, Hv, V), (Ds, Hv, V, K))
+ 
+ 
+ RUNNERS = {
+diff --git a/torch_custom/fla_npu/README.md b/torch_custom/fla_npu/README.md
+index 538ad9f..7daa78d 100644
+--- a/torch_custom/fla_npu/README.md
++++ b/torch_custom/fla_npu/README.md
+@@ -69,6 +69,31 @@ from fla_npu.ops.ascendc import recompute_w_u_fwd
+ result = recompute_w_u_fwd(...)
+ ```
+ 
++带原地状态更新的 `recurrent_gated_delta_rule` 同样使用稳定入口；调用成功后 `state`
++会被原地更新：
++
++```python
++from fla_npu.ops import ascendc as ascendc_ops
++
++out = ascendc_ops.npu_recurrent_gated_delta_rule(
++    query,
++    key,
++    value,
++    state,
++    beta=beta,
++    scale=scale,
++    actual_seq_lengths=actual_seq_lengths,
++    ssm_state_indices=ssm_state_indices,
++    num_accepted_tokens=None,
++    g=g,
++    gk=gk,  # 可选；传 None 表示不施加逐维衰减
++)
++```
++
++`state` 不得设置 `requires_grad=True`。raw ctypes 路径会维护 eager autograd 的版本计数，
++但在增加准确的 mutation schema、FakeTensor 和 `opcheck` 前，不声明支持
++`torch.compile`、functionalization 或 `torch.export`。
++
+ 测试中不要默认调用：
+ 
+ ```python
+diff --git a/torch_custom/fla_npu/fla_npu/ops/ascendc/__init__.py b/torch_custom/fla_npu/fla_npu/ops/ascendc/__init__.py
+index 7a2224e..a6a0351 100644
+--- a/torch_custom/fla_npu/fla_npu/ops/ascendc/__init__.py
++++ b/torch_custom/fla_npu/fla_npu/ops/ascendc/__init__.py
+@@ -38,6 +38,7 @@ _ASCENDC_OPS = (
+     "npu_chunk_fwd_o",
+     "npu_chunk_gated_delta_rule_fwd_h",
+     "npu_recompute_w_u_fwd",
++    "npu_recurrent_gated_delta_rule",
+     "npu_chunk_local_cumsum",
+     "npu_chunk_scaled_dot_kkt",
+     "npu_solve_tri",
+@@ -57,6 +58,8 @@ BACKWARD_OPS = {
+ MUTATED_ARGUMENTS = {
+     "causal_conv1d": ("conv_states",),
+     "npu_causal_conv1d": ("conv_states",),
++    "recurrent_gated_delta_rule": ("state",),
++    "npu_recurrent_gated_delta_rule": ("state",),
+ }
+ 
+ _LEGACY_TORCH_OPS_WARNING = (
+diff --git a/torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py b/torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py
+index 4cb168c..40b6dd7 100644
+--- a/torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py
++++ b/torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py
+@@ -493,6 +493,47 @@ def npu_recompute_w_u_fwd(
+     )
+ 
+ 
++def npu_recurrent_gated_delta_rule(
++    query,
++    key,
++    value,
++    state,
++    *,
++    beta,
++    scale=1.0,
++    actual_seq_lengths,
++    ssm_state_indices,
++    num_accepted_tokens=None,
++    g=None,
++    gk=None,
++):
++    """Run recurrent GDN and update ``state`` in place.
++
++    ``g`` and ``gk`` are independent optional gates. Passing ``None`` for
++    either input disables that decay term by using an effective factor of one.
++    """
++
++    out = _empty_like(value)
++    return _call_aclnn(
++        "aclnnRecurrentGatedDeltaRule",
++        lambda ctx: [
++            ctx.tensor(query, "query"),
++            ctx.tensor(key, "key"),
++            ctx.tensor(value, "value"),
++            ctx.tensor(beta, "beta"),
++            ctx.tensor(state, "state"),
++            ctx.tensor(actual_seq_lengths, "actual_seq_lengths"),
++            ctx.tensor(ssm_state_indices, "ssm_state_indices"),
++            ctx.tensor(g, "g"),
++            ctx.tensor(gk, "gk"),
++            ctx.tensor(num_accepted_tokens, "num_accepted_tokens"),
++            ctypes.c_float(float(scale)),
++            ctx.tensor(out, "out"),
++        ],
++        out,
++    )
++
++
+ def _chunk_local_cumsum_output_dtype(g, output_dtype):
+     import torch
+ 
+diff --git a/torch_custom/fla_npu/test/test.sh b/torch_custom/fla_npu/test/test.sh
+index 0665482..82c2836 100644
+--- a/torch_custom/fla_npu/test/test.sh
++++ b/torch_custom/fla_npu/test/test.sh
+@@ -35,7 +35,7 @@ usage() {
+     echo "  prepare_wy_repr_bwd_full, chunk_gated_delta_rule_bwd_dhu,"
+     echo "  chunk_bwd_dv_local, causal_conv1d, prepare_wy_repr_bwd_da,"
+     echo "  chunk_bwd_dqkwg, gdn_fwd_o, gdn_fwd_h, recompute_w_u_fwd,"
+-    echo "  chunk_local_cumsum"
++    echo "  recurrent_gated_delta_rule, chunk_local_cumsum"
+     exit 1
+ }
+ 
+@@ -119,6 +119,7 @@ run_test "chunk_bwd_dqkwg"                 "python3 test_npu_chunk_bwd_dqkwg.py"
+ run_test "gdn_fwd_o"                       "bash run_gdn_fwd_o.sh"
+ run_test "gdn_fwd_h"                       "bash run_gdn_fwd_h.sh"
+ run_test "recompute_w_u_fwd"                "python3 test_npu_recompute_w_u_fwd.py"
++run_test "recurrent_gated_delta_rule"       "python3 test_npu_recurrent_gated_delta_rule.py"
+ run_test "chunk_local_cumsum"              "python3 test_npu_chunk_local_cumsum.py"
+ run_test "chunk_scaled_dot_kkt"            "python3 test_npu_chunk_scaled_dot_kkt.py"
+ 
+diff --git a/torch_custom/fla_npu/test/test_ascendc_mutation_contract.py b/torch_custom/fla_npu/test/test_ascendc_mutation_contract.py
+index 512b323..f6e5553 100644
+--- a/torch_custom/fla_npu/test/test_ascendc_mutation_contract.py
++++ b/torch_custom/fla_npu/test/test_ascendc_mutation_contract.py
+@@ -63,7 +63,27 @@ def load_ascendc_module(raw_calls):
+         raw_calls.append(conv_states)
+         return "output"
+ 
+-    ctypes_module.ASCENDC_CTYPES_OPS = {"npu_causal_conv1d": npu_causal_conv1d}
++    def npu_recurrent_gated_delta_rule(
++        query,
++        key,
++        value,
++        state,
++        *,
++        beta,
++        scale=1.0,
++        actual_seq_lengths,
++        ssm_state_indices,
++        num_accepted_tokens=None,
++        g=None,
++        gk=None,
++    ):
++        raw_calls.append(state)
++        return "output"
++
++    ctypes_module.ASCENDC_CTYPES_OPS = {
++        "npu_causal_conv1d": npu_causal_conv1d,
++        "npu_recurrent_gated_delta_rule": npu_recurrent_gated_delta_rule,
++    }
+     modules = {
+         "fla_npu": fake_fla_npu,
+         "fla_npu.ops": fake_ops,
+@@ -114,6 +134,62 @@ class AscendCMutationContractTest(unittest.TestCase):
+         self.assertEqual(raw_calls, [])
+         self.assertEqual(incremented, [])
+ 
++    def test_recurrent_gdn_increments_state_version_after_launch(self):
++        raw_calls = []
++        incremented = []
++        module, spec, modules = load_ascendc_module(raw_calls)
++        modules["torch"] = fake_torch(incremented)
++
++        with mock.patch.dict(sys.modules, modules):
++            assert spec.loader is not None
++            spec.loader.exec_module(module)
++            self.assertIs(
++                module.recurrent_gated_delta_rule,
++                module.npu_recurrent_gated_delta_rule,
++            )
++            state = FakeTensor()
++            result = module.npu_recurrent_gated_delta_rule(
++                FakeTensor(),
++                FakeTensor(),
++                FakeTensor(),
++                state,
++                beta=FakeTensor(),
++                actual_seq_lengths=FakeTensor(),
++                ssm_state_indices=FakeTensor(),
++            )
++
++        self.assertEqual(result, "output")
++        self.assertEqual(raw_calls, [state])
++        self.assertEqual(incremented, [state])
++        self.assertEqual(
++            module.MUTATED_ARGUMENTS["npu_recurrent_gated_delta_rule"],
++            ("state",),
++        )
++
++    def test_recurrent_gdn_state_requiring_grad_is_rejected_before_launch(self):
++        raw_calls = []
++        incremented = []
++        module, spec, modules = load_ascendc_module(raw_calls)
++        modules["torch"] = fake_torch(incremented)
++
++        with mock.patch.dict(sys.modules, modules):
++            assert spec.loader is not None
++            spec.loader.exec_module(module)
++            state = FakeTensor(requires_grad=True)
++            with self.assertRaisesRegex(RuntimeError, r"state.*must not require gradients"):
++                module.npu_recurrent_gated_delta_rule(
++                    FakeTensor(),
++                    FakeTensor(),
++                    FakeTensor(),
++                    state,
++                    beta=FakeTensor(),
++                    actual_seq_lengths=FakeTensor(),
++                    ssm_state_indices=FakeTensor(),
++                )
++
++        self.assertEqual(raw_calls, [])
++        self.assertEqual(incremented, [])
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/torch_custom/fla_npu/test/test_npu_recurrent_gated_delta_rule.py b/torch_custom/fla_npu/test/test_npu_recurrent_gated_delta_rule.py
+new file mode 100644
+index 0000000..fd30f74
+--- /dev/null
++++ b/torch_custom/fla_npu/test/test_npu_recurrent_gated_delta_rule.py
+@@ -0,0 +1,180 @@
++# -----------------------------------------------------------------------------------------------------------
++# Copyright (c) 2026 Tianjin University, Ltd.
++# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++# CANN Open Software License Agreement Version 2.0 (the "License").
++# Please refer to the License for details. You may not use this file except in compliance with the License.
++# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++# See LICENSE in the root of the software repository for the full text of the License.
++# -----------------------------------------------------------------------------------------------------------
++
++from __future__ import annotations
++
++import os
++import unittest
++
++import torch
++
++from fla_npu.ops import ascendc as ascendc_ops
++
++
++torch.npu.set_device(int(os.environ.get("TEST_DEVICE_ID", 0)))
++
++
++def recurrent_gated_delta_rule_ref(
++    query,
++    key,
++    value,
++    state,
++    beta,
++    actual_seq_lengths,
++    ssm_state_indices,
++    *,
++    scale=1.0,
++    num_accepted_tokens=None,
++    g=None,
++    gk=None,
++):
++    query_f = query.float() * float(scale)
++    key_f = key.float()
++    value_f = value.float()
++    beta_f = beta.float()
++    final_state = state.float().clone()
++    out = torch.zeros_like(value_f)
++    alpha = None if g is None else torch.exp(g.float())
++    alpha_k = None if gk is None else torch.exp(gk.float())
++
++    seq_start = int(actual_seq_lengths[0].item())
++    for batch_idx, seq_len_tensor in enumerate(actual_seq_lengths[1:]):
++        seq_len = int(seq_len_tensor.item())
++        seq_end = seq_start + seq_len
++        state_token_idx = seq_start
++        if num_accepted_tokens is not None:
++            state_token_idx += int(num_accepted_tokens[batch_idx].item()) - 1
++        state_offset = int(ssm_state_indices[state_token_idx].item())
++
++        for value_head in range(value.shape[1]):
++            key_head = value_head // (value.shape[1] // key.shape[1])
++            recurrent_state = final_state[state_offset, value_head].clone()
++            for token_idx in range(seq_start, seq_end):
++                if alpha is not None:
++                    recurrent_state *= alpha[token_idx, value_head]
++                if alpha_k is not None:
++                    recurrent_state *= alpha_k[token_idx, value_head].unsqueeze(0)
++
++                delta = value_f[token_idx, value_head] - torch.mv(
++                    recurrent_state,
++                    key_f[token_idx, key_head],
++                )
++                recurrent_state += torch.outer(
++                    delta * beta_f[token_idx, value_head],
++                    key_f[token_idx, key_head],
++                )
++                out[token_idx, value_head] = torch.mv(
++                    recurrent_state,
++                    query_f[token_idx, key_head],
++                )
++                final_state[
++                    int(ssm_state_indices[token_idx].item()),
++                    value_head,
++                ] = recurrent_state
++        seq_start = seq_end
++
++    return out.to(value.dtype), final_state.to(state.dtype)
++
++
++def make_inputs(*, use_g, use_gk, use_accepted_tokens):
++    torch.manual_seed(42)
++    actual_seq_lengths = torch.tensor([1, 2], dtype=torch.int32)
++    total_tokens = int(actual_seq_lengths.sum().item())
++    key_heads, value_heads, key_dim, value_dim = 2, 4, 128, 128
++
++    query = torch.nn.functional.normalize(
++        torch.rand(total_tokens, key_heads, key_dim, dtype=torch.float32),
++        dim=-1,
++    ).to(torch.bfloat16)
++    key = torch.nn.functional.normalize(
++        torch.rand(total_tokens, key_heads, key_dim, dtype=torch.float32),
++        dim=-1,
++    ).to(torch.bfloat16)
++    value = torch.rand(total_tokens, value_heads, value_dim, dtype=torch.bfloat16)
++    state = torch.rand(
++        total_tokens,
++        value_heads,
++        value_dim,
++        key_dim,
++        dtype=torch.bfloat16,
++    )
++    beta = torch.rand(total_tokens, value_heads, dtype=torch.bfloat16)
++    ssm_state_indices = torch.arange(total_tokens, dtype=torch.int32)
++    g = -torch.rand(total_tokens, value_heads, dtype=torch.float32) if use_g else None
++    gk = (
++        -torch.rand(total_tokens, value_heads, key_dim, dtype=torch.float32)
++        if use_gk
++        else None
++    )
++    num_accepted_tokens = (
++        torch.tensor([1], dtype=torch.int32) if use_accepted_tokens else None
++    )
++    return {
++        "query": query,
++        "key": key,
++        "value": value,
++        "state": state,
++        "beta": beta,
++        "actual_seq_lengths": actual_seq_lengths,
++        "ssm_state_indices": ssm_state_indices,
++        "num_accepted_tokens": num_accepted_tokens,
++        "g": g,
++        "gk": gk,
++        "scale": key_dim**-0.5,
++    }
++
++
++@unittest.skipIf(not torch.npu.is_available(), "NPU is not available")
++class TestRecurrentGatedDeltaRule(unittest.TestCase):
++    def test_output_and_inplace_state_match_cpu_reference(self):
++        cases = (
++            (True, False, False),
++            (False, True, True),
++            (True, True, False),
++        )
++        for use_g, use_gk, use_accepted_tokens in cases:
++            with self.subTest(
++                use_g=use_g,
++                use_gk=use_gk,
++                use_accepted_tokens=use_accepted_tokens,
++            ):
++                inputs = make_inputs(
++                    use_g=use_g,
++                    use_gk=use_gk,
++                    use_accepted_tokens=use_accepted_tokens,
++                )
++                expected_out, expected_state = recurrent_gated_delta_rule_ref(**inputs)
++                npu_inputs = {
++                    name: value.npu() if isinstance(value, torch.Tensor) else value
++                    for name, value in inputs.items()
++                }
++                state_version = npu_inputs["state"]._version
++
++                actual_out = ascendc_ops.npu_recurrent_gated_delta_rule(**npu_inputs)
++                torch.npu.synchronize()
++
++                self.assertIsInstance(actual_out, torch.Tensor)
++                self.assertEqual(npu_inputs["state"]._version, state_version + 1)
++                torch.testing.assert_close(
++                    actual_out.cpu().float(),
++                    expected_out.float(),
++                    rtol=2e-2,
++                    atol=5e-2,
++                )
++                torch.testing.assert_close(
++                    npu_inputs["state"].cpu().float(),
++                    expected_state.float(),
++                    rtol=2e-2,
++                    atol=5e-2,
++                )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/torch_custom/fla_npu/test/test_recurrent_gated_delta_rule_ctypes.py b/torch_custom/fla_npu/test/test_recurrent_gated_delta_rule_ctypes.py
+new file mode 100644
+index 0000000..fa1cbd9
+--- /dev/null
++++ b/torch_custom/fla_npu/test/test_recurrent_gated_delta_rule_ctypes.py
+@@ -0,0 +1,144 @@
++# -----------------------------------------------------------------------------------------------------------
++# Copyright (c) 2026 Tianjin University, Ltd.
++# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++# CANN Open Software License Agreement Version 2.0 (the "License").
++# Please refer to the License for details. You may not use this file except in compliance with the License.
++# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++# See LICENSE in the root of the software repository for the full text of the License.
++# -----------------------------------------------------------------------------------------------------------
++
++from __future__ import annotations
++
++import ctypes
++import importlib.util
++import sys
++import types
++import unittest
++from pathlib import Path
++from unittest import mock
++
++
++CTYPES_PATH = (
++    Path(__file__).resolve().parents[1]
++    / "fla_npu"
++    / "ops"
++    / "ascendc"
++    / "_aclnn_ctypes.py"
++)
++
++
++class FakeTensor:
++    def __init__(self, name):
++        self.name = name
++
++
++class FakeContext:
++    def tensor(self, value, name):
++        return (name, value)
++
++
++def load_ctypes_module():
++    package = types.ModuleType("fla_npu.ops.ascendc")
++    package.__path__ = []
++    policy = types.ModuleType("fla_npu.ops.ascendc._kda_policy")
++    policy.kda_fwd_optional_output_mask = lambda **kwargs: ()
++    runtime = types.ModuleType("fla_npu.ops.ascendc._runtime")
++    runtime.call_aclnn = lambda *args, **kwargs: None
++    runtime.chunk_num = lambda *args, **kwargs: 0
++    runtime.empty = lambda *args, **kwargs: FakeTensor("empty")
++    runtime.empty_like = lambda tensor, **kwargs: FakeTensor(
++        f"empty_like:{tensor.name}"
++    )
++    runtime.optional_bool = lambda value, default: default if value is None else bool(value)
++    runtime.optional_float = (
++        lambda value, default: default if value is None else float(value)
++    )
++    runtime.optional_int = lambda value, default: default if value is None else int(value)
++    runtime.shape = lambda tensor: ()
++    runtime.zeros = lambda *args, **kwargs: FakeTensor("zeros")
++
++    modules = {
++        "fla_npu.ops.ascendc": package,
++        "fla_npu.ops.ascendc._kda_policy": policy,
++        "fla_npu.ops.ascendc._runtime": runtime,
++    }
++    spec = importlib.util.spec_from_file_location(
++        "fla_npu.ops.ascendc._aclnn_ctypes",
++        CTYPES_PATH,
++    )
++    module = importlib.util.module_from_spec(spec)
++    modules["fla_npu.ops.ascendc._aclnn_ctypes"] = module
++    with mock.patch.dict(sys.modules, modules):
++        assert spec.loader is not None
++        spec.loader.exec_module(module)
++    return module
++
++
++class RecurrentGatedDeltaRuleCtypesTest(unittest.TestCase):
++    def test_wrapper_matches_aclnn_header_order_and_allocates_value_shaped_output(self):
++        module = load_ctypes_module()
++        tensors = {
++            name: FakeTensor(name)
++            for name in (
++                "query",
++                "key",
++                "value",
++                "state",
++                "beta",
++                "actual_seq_lengths",
++                "ssm_state_indices",
++                "g",
++                "gk",
++                "num_accepted_tokens",
++            )
++        }
++        captured = {}
++
++        def fake_call(name, build_args, output):
++            captured["name"] = name
++            captured["args"] = build_args(FakeContext())
++            captured["output"] = output
++            return output
++
++        module._call_aclnn = fake_call
++        result = module.npu_recurrent_gated_delta_rule(
++            tensors["query"],
++            tensors["key"],
++            tensors["value"],
++            tensors["state"],
++            beta=tensors["beta"],
++            scale=0.125,
++            actual_seq_lengths=tensors["actual_seq_lengths"],
++            ssm_state_indices=tensors["ssm_state_indices"],
++            num_accepted_tokens=tensors["num_accepted_tokens"],
++            g=tensors["g"],
++            gk=tensors["gk"],
++        )
++
++        self.assertEqual(captured["name"], "aclnnRecurrentGatedDeltaRule")
++        self.assertIs(result, captured["output"])
++        self.assertEqual(result.name, "empty_like:value")
++        self.assertEqual(
++            [arg[0] for arg in captured["args"][:10]],
++            [
++                "query",
++                "key",
++                "value",
++                "beta",
++                "state",
++                "actual_seq_lengths",
++                "ssm_state_indices",
++                "g",
++                "gk",
++                "num_accepted_tokens",
++            ],
++        )
++        self.assertIsInstance(captured["args"][10], ctypes.c_float)
++        self.assertAlmostEqual(captured["args"][10].value, 0.125)
++        self.assertIs(captured["args"][8][1], tensors["gk"])
++        self.assertEqual(captured["args"][11], ("out", result))
++
++
++if __name__ == "__main__":
++    unittest.main()

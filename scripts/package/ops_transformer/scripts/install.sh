@@ -701,8 +701,10 @@ merge_vendor_to_wheel_opp() {
     cp -a "${src_vendor}/." "${dst_vendor}/"
   fi
 
-  if [ -f "${dst_vendor}/op_api/lib/libcust_opapi.so" ]; then
-    copy_wheel_file "${dst_vendor}/op_api/lib/libcust_opapi.so" "${dst_vendor}/op_api/lib/libopapi.so"
+  local op_api_alias="${dst_vendor}/op_api/lib/libopapi.so"
+  if [ -e "${op_api_alias}" ] || [ -L "${op_api_alias}" ]; then
+    rm -f "${op_api_alias}"
+    logandprint "[INFO]: Removed conflicting custom libopapi.so alias; CANN must provide libopapi.so."
   fi
 
   mkdir -p "${dst_vendor}/bin"

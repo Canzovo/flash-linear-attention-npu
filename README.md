@@ -155,6 +155,7 @@ bash test.sh --device 0 --op causal_conv1d   # 单个 AscendC 测试任务
 - `gdn_fwd_o`
 - `gdn_fwd_h`
 - `recompute_w_u_fwd`
+- `recurrent_gated_delta_rule`
 
 
 ### 算子调用方式参考

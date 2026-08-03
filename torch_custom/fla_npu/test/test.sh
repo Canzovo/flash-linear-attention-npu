@@ -35,7 +35,7 @@ usage() {
     echo "  prepare_wy_repr_bwd_full, chunk_gated_delta_rule_bwd_dhu,"
     echo "  chunk_bwd_dv_local, causal_conv1d, prepare_wy_repr_bwd_da,"
     echo "  chunk_bwd_dqkwg, gdn_fwd_o, gdn_fwd_h, recompute_w_u_fwd,"
-    echo "  chunk_local_cumsum"
+    echo "  recurrent_gated_delta_rule, chunk_local_cumsum"
     exit 1
 }
 
@@ -119,6 +119,7 @@ run_test "chunk_bwd_dqkwg"                 "python3 test_npu_chunk_bwd_dqkwg.py"
 run_test "gdn_fwd_o"                       "bash run_gdn_fwd_o.sh"
 run_test "gdn_fwd_h"                       "bash run_gdn_fwd_h.sh"
 run_test "recompute_w_u_fwd"                "python3 test_npu_recompute_w_u_fwd.py"
+run_test "recurrent_gated_delta_rule"       "python3 test_npu_recurrent_gated_delta_rule.py"
 run_test "chunk_local_cumsum"              "python3 test_npu_chunk_local_cumsum.py"
 run_test "chunk_scaled_dot_kkt"            "python3 test_npu_chunk_scaled_dot_kkt.py"
 

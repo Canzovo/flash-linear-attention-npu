@@ -38,6 +38,7 @@ _ASCENDC_OPS = (
     "npu_chunk_fwd_o",
     "npu_chunk_gated_delta_rule_fwd_h",
     "npu_recompute_w_u_fwd",
+    "npu_recurrent_gated_delta_rule",
     "npu_chunk_local_cumsum",
     "npu_chunk_scaled_dot_kkt",
     "npu_solve_tri",
@@ -58,6 +59,8 @@ BACKWARD_OPS = {
 MUTATED_ARGUMENTS = {
     "causal_conv1d": ("conv_states",),
     "npu_causal_conv1d": ("conv_states",),
+    "recurrent_gated_delta_rule": ("state",),
+    "npu_recurrent_gated_delta_rule": ("state",),
 }
 
 _LEGACY_TORCH_OPS_WARNING = (
@@ -87,8 +90,7 @@ def _prepare_direct_runtime(*, raise_on_error: bool = True) -> None:
         if raise_on_error:
             raise RuntimeError(
                 "Unable to initialize fla_npu Ascend C op_api libraries. "
-                "Please source the CANN set_env.sh before importing "
-                "fla_npu.ops.ascendc or calling Ascend C operators."
+                f"Root cause: {exc}"
             ) from exc
     else:
         _DIRECT_RUNTIME_ERROR = None

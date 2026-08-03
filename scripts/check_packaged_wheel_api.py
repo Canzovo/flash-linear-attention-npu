@@ -29,6 +29,7 @@ ASCENDC_NAMES = (
     "prepare_wy_repr_bwd_da",
     "prepare_wy_repr_bwd_full",
     "recompute_w_u_fwd",
+    "recurrent_gated_delta_rule",
     "solve_tri",
 )
 
@@ -173,6 +174,8 @@ def main() -> int:
 
     if ascendc.BACKWARD_OPS.get("causal_conv1d") != "causal_conv1d_bwd":
         raise AssertionError("causal_conv1d backward binding metadata is missing")
+    if ascendc.MUTATED_ARGUMENTS.get("recurrent_gated_delta_rule") != ("state",):
+        raise AssertionError("recurrent_gated_delta_rule mutation metadata is missing")
 
     if args.check_triton and not args.skip_triton:
         from fla_npu.ops import triton

@@ -447,10 +447,19 @@ def _run_recurrent_gated_delta_rule(torch, ops, case, device):
         gk = -_tensor(torch, (T, Hv, K), torch.float32, device, positive=True, scale=0.02)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32, device=device)
     out = ops.recurrent_gated_delta_rule(
-        q, k, v, beta, state, actual, indices, g=g, gk=gk,
-        num_accepted_tokens=accepted_tensor, scale_value=float(case["attrs"]["scale_value"]),
+        q,
+        k,
+        v,
+        state,
+        beta=beta,
+        scale=float(case["attrs"]["scale_value"]),
+        actual_seq_lengths=actual,
+        ssm_state_indices=indices,
+        g=g,
+        gk=gk,
+        num_accepted_tokens=accepted_tensor,
     )
-    return out, ((T, Hv, V), (Ds, Hv, V, K))
+    return (out, state), ((T, Hv, V), (Ds, Hv, V, K))
 
 
 RUNNERS = {

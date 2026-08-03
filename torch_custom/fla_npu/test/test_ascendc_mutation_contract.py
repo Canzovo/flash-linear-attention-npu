@@ -63,7 +63,27 @@ def load_ascendc_module(raw_calls):
         raw_calls.append(conv_states)
         return "output"
 
-    ctypes_module.ASCENDC_CTYPES_OPS = {"npu_causal_conv1d": npu_causal_conv1d}
+    def npu_recurrent_gated_delta_rule(
+        query,
+        key,
+        value,
+        state,
+        *,
+        beta,
+        scale=1.0,
+        actual_seq_lengths,
+        ssm_state_indices,
+        num_accepted_tokens=None,
+        g=None,
+        gk=None,
+    ):
+        raw_calls.append(state)
+        return "output"
+
+    ctypes_module.ASCENDC_CTYPES_OPS = {
+        "npu_causal_conv1d": npu_causal_conv1d,
+        "npu_recurrent_gated_delta_rule": npu_recurrent_gated_delta_rule,
+    }
     modules = {
         "fla_npu": fake_fla_npu,
         "fla_npu.ops": fake_ops,
@@ -113,6 +133,81 @@ class AscendCMutationContractTest(unittest.TestCase):
 
         self.assertEqual(raw_calls, [])
         self.assertEqual(incremented, [])
+
+    def test_recurrent_gdn_increments_state_version_after_launch(self):
+        raw_calls = []
+        incremented = []
+        module, spec, modules = load_ascendc_module(raw_calls)
+        modules["torch"] = fake_torch(incremented)
+
+        with mock.patch.dict(sys.modules, modules):
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            self.assertIs(
+                module.recurrent_gated_delta_rule,
+                module.npu_recurrent_gated_delta_rule,
+            )
+            state = FakeTensor()
+            result = module.npu_recurrent_gated_delta_rule(
+                FakeTensor(),
+                FakeTensor(),
+                FakeTensor(),
+                state,
+                beta=FakeTensor(),
+                actual_seq_lengths=FakeTensor(),
+                ssm_state_indices=FakeTensor(),
+            )
+
+        self.assertEqual(result, "output")
+        self.assertEqual(raw_calls, [state])
+        self.assertEqual(incremented, [state])
+        self.assertEqual(
+            module.MUTATED_ARGUMENTS["npu_recurrent_gated_delta_rule"],
+            ("state",),
+        )
+
+    def test_recurrent_gdn_state_requiring_grad_is_rejected_before_launch(self):
+        raw_calls = []
+        incremented = []
+        module, spec, modules = load_ascendc_module(raw_calls)
+        modules["torch"] = fake_torch(incremented)
+
+        with mock.patch.dict(sys.modules, modules):
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            state = FakeTensor(requires_grad=True)
+            with self.assertRaisesRegex(RuntimeError, r"state.*must not require gradients"):
+                module.npu_recurrent_gated_delta_rule(
+                    FakeTensor(),
+                    FakeTensor(),
+                    FakeTensor(),
+                    state,
+                    beta=FakeTensor(),
+                    actual_seq_lengths=FakeTensor(),
+                    ssm_state_indices=FakeTensor(),
+                )
+
+        self.assertEqual(raw_calls, [])
+        self.assertEqual(incremented, [])
+
+    def test_direct_runtime_error_preserves_root_cause(self):
+        raw_calls = []
+        module, spec, modules = load_ascendc_module(raw_calls)
+
+        with mock.patch.dict(sys.modules, modules):
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            module._DIRECT_RUNTIME_READY = False
+
+            def fail_to_load_opapi():
+                raise RuntimeError("custom OPP contains libopapi.so")
+
+            modules["fla_npu"].load_ascendc_opapi_libraries = fail_to_load_opapi
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Root cause: custom OPP contains libopapi\.so",
+            ):
+                module._prepare_direct_runtime()
 
 
 if __name__ == "__main__":

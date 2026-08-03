@@ -521,6 +521,47 @@ def npu_recompute_w_u_fwd(
     )
 
 
+def npu_recurrent_gated_delta_rule(
+    query,
+    key,
+    value,
+    state,
+    *,
+    beta,
+    scale=1.0,
+    actual_seq_lengths,
+    ssm_state_indices,
+    num_accepted_tokens=None,
+    g=None,
+    gk=None,
+):
+    """Run recurrent GDN and update ``state`` in place.
+
+    ``g`` and ``gk`` are independent optional gates. Passing ``None`` for
+    either input disables that decay term by using an effective factor of one.
+    """
+
+    out = _empty_like(value)
+    return _call_aclnn(
+        "aclnnRecurrentGatedDeltaRule",
+        lambda ctx: [
+            ctx.tensor(query, "query"),
+            ctx.tensor(key, "key"),
+            ctx.tensor(value, "value"),
+            ctx.tensor(beta, "beta"),
+            ctx.tensor(state, "state"),
+            ctx.tensor(actual_seq_lengths, "actual_seq_lengths"),
+            ctx.tensor(ssm_state_indices, "ssm_state_indices"),
+            ctx.tensor(g, "g"),
+            ctx.tensor(gk, "gk"),
+            ctx.tensor(num_accepted_tokens, "num_accepted_tokens"),
+            ctypes.c_float(float(scale)),
+            ctx.tensor(out, "out"),
+        ],
+        out,
+    )
+
+
 def _chunk_local_cumsum_output_dtype(g, output_dtype):
     import torch
 

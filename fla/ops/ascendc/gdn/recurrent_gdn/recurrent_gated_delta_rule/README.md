@@ -118,9 +118,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 
 ### 3.5 补充说明
 
-- 输入张量 `query/key/value/beta/g` 支持非连续 Tensor 输入。
+- 输入张量 `query/key/value/beta/g/gk` 支持非连续 Tensor 输入。
 - `stateRef` 为原地输入输出，cann版本大于等于9.1.0后支持非连续 Tensor，其余版本不支持。
-- `gk` 当前版本暂不支持，须传 `None`。
+- `g` 与 `gk` 相互独立，既可以分别传入，也可以同时传入；两者均为 `None` 时不施加衰减。
 
 ---
 
@@ -142,7 +142,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 ### 4.2 数值语义
 
 - `g` 传 `None` 时：$\alpha_t = e^0 = 1$，即无标量衰减
-- `gk` 当前版本暂不支持，须传 `None`
+- `gk` 传 `None` 时：$\alpha_{kt} = e^0 = \mathbf{1}$，即无逐维衰减
+- `gk` 传入 `(T, Nv, Dk)` 的 `FLOAT32` Tensor 时，算子计算 $\alpha_{kt}=e^{gk_t}$，并在状态更新前沿 `Dk` 维逐元素施加衰减
+- `g` 和 `gk` 可以任意组合：仅 `g`、仅 `gk`、两者同时传入或两者均为 `None`
 - `scaleValue` 推荐设置为：
 
 ```text
@@ -151,14 +153,15 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 
 ---
 
-## 5. Torch 测试调用示例
+## 5. Python 稳定入口调用示例
 
 ### 5.1 定长场景（每序列处理相同数量 token）
 
 ```python
 import torch
-import torch_npu
 import math
+
+from fla_npu.ops import ascendc as ascendc_ops
 
 def test_recurrent_gated_delta_rule_fixed():
     B, mtp = 4, 2           # 4 个 batch，每序列 2 个 token
@@ -174,13 +177,14 @@ def test_recurrent_gated_delta_rule_fixed():
     state = torch.randn(BlockNum, Nv, Dv, Dk, dtype=torch.bfloat16).to(device)
     beta  = torch.rand(T, Nv, dtype=torch.bfloat16).to(device)
     g     = torch.randn(T, Nv, dtype=torch.float32).to(device)
+    gk    = torch.randn(T, Nv, Dk, dtype=torch.float32).to(device)
 
     # actual_seq_lengths: shape (B+1,)，首元素为无效序列长度（不参与计算），其余 B 个元素为各 batch 的有效序列长度（总和须等于 T）
     actual_seq_lengths = torch.tensor([0] + [mtp] * B, dtype=torch.int32).to(device)
     # ssm_state_indices: 第 i 个 token 使用 state[ssm_state_indices[i]]
     ssm_state_indices  = torch.arange(T, dtype=torch.int32).to(device)
 
-    out = torch_npu.npu_recurrent_gated_delta_rule(
+    out = ascendc_ops.npu_recurrent_gated_delta_rule(
         query, key, value, state,
         beta=beta,
         scale=scale,
@@ -188,7 +192,7 @@ def test_recurrent_gated_delta_rule_fixed():
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=None,   # None = 每序列接受 1 个 token（默认）
         g=g,
-        gk=None                     # 当前版本暂不支持，须传 None
+        gk=gk                       # 可与 g 同时使用；传 None 表示无逐维衰减
     )
 
     assert out.shape == (T, Nv, Dv)
@@ -205,8 +209,9 @@ if __name__ == "__main__":
 
 ```python
 import torch
-import torch_npu
 import math
+
+from fla_npu.ops import ascendc as ascendc_ops
 
 def test_recurrent_gated_delta_rule_varlen():
     B, mtp = 4, 2
@@ -222,6 +227,7 @@ def test_recurrent_gated_delta_rule_varlen():
     state = torch.randn(BlockNum, Nv, Dv, Dk, dtype=torch.bfloat16).to(device)
     beta  = torch.rand(T, Nv, dtype=torch.bfloat16).to(device)
     g     = torch.randn(T, Nv, dtype=torch.float32).to(device)
+    gk    = torch.randn(T, Nv, Dk, dtype=torch.float32).to(device)
 
     # actual_seq_lengths: shape (B+1,)，首元素为无效序列长度（不参与计算），其余 B 个元素为各 batch 的有效序列长度（总和须等于 T）
     actual_seq_lengths = torch.tensor([0] + [mtp] * B, dtype=torch.int32).to(device)
@@ -231,7 +237,7 @@ def test_recurrent_gated_delta_rule_varlen():
     # 需满足 num_accepted_tokens[i] <= actual_seq_lengths[i] <= 8
     num_accepted_tokens = torch.tensor([2, 1, 2, 1], dtype=torch.int32).to(device)
 
-    out = torch_npu.npu_recurrent_gated_delta_rule(
+    out = ascendc_ops.npu_recurrent_gated_delta_rule(
         query, key, value, state,
         beta=beta,
         scale=scale,
@@ -239,7 +245,7 @@ def test_recurrent_gated_delta_rule_varlen():
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         g=g,
-        gk=None
+        gk=gk
     )
 
     assert out.shape == (T, Nv, Dv)

@@ -69,6 +69,31 @@ from fla_npu.ops.ascendc import recompute_w_u_fwd
 result = recompute_w_u_fwd(...)
 ```
 
+带原地状态更新的 `recurrent_gated_delta_rule` 同样使用稳定入口；调用成功后 `state`
+会被原地更新：
+
+```python
+from fla_npu.ops import ascendc as ascendc_ops
+
+out = ascendc_ops.npu_recurrent_gated_delta_rule(
+    query,
+    key,
+    value,
+    state,
+    beta=beta,
+    scale=scale,
+    actual_seq_lengths=actual_seq_lengths,
+    ssm_state_indices=ssm_state_indices,
+    num_accepted_tokens=None,
+    g=g,
+    gk=gk,  # 可选；传 None 表示不施加逐维衰减
+)
+```
+
+`state` 不得设置 `requires_grad=True`。raw ctypes 路径会维护 eager autograd 的版本计数，
+但在增加准确的 mutation schema、FakeTensor 和 `opcheck` 前，不声明支持
+`torch.compile`、functionalization 或 `torch.export`。
+
 测试中不要默认调用：
 
 ```python

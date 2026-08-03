@@ -176,6 +176,26 @@ source {set_env!s}
                 (installed_vendor / "op_api" / "lib" / "libopapi.so").exists()
             )
 
+    def test_run_package_wheel_merge_removes_conflicting_alias(self) -> None:
+        install_script = (
+            REPO_ROOT
+            / "scripts"
+            / "package"
+            / "ops_transformer"
+            / "scripts"
+            / "install.sh"
+        ).read_text(encoding="utf-8")
+        merge_start = install_script.index("merge_vendor_to_wheel_opp() {")
+        merge_end = install_script.index("update_wheel_vendors_config() {", merge_start)
+        merge_function = install_script[merge_start:merge_end]
+
+        self.assertIn('rm -f "${op_api_alias}"', merge_function)
+        self.assertNotIn(
+            'copy_wheel_file "${dst_vendor}/op_api/lib/libcust_opapi.so" '
+            '"${dst_vendor}/op_api/lib/libopapi.so"',
+            merge_function,
+        )
+
     def test_runtime_rejects_conflicting_libopapi_alias(self) -> None:
         runtime_globals = runpy.run_path(
             str(
