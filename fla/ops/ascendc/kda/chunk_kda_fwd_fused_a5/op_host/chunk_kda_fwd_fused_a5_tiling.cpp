@@ -128,7 +128,7 @@ ge::graphStatus Tiling4ChunkKdaFwdFusedA5(gert::TilingContext *context)
         gkDesc->GetDataType() == ge::DT_FLOAT && useGateInKernel && safeGate && hasALog &&
         !isVarLen && chunkSize == 64 && kDim == 128 && vDim == 128 &&
         vHeads % 2 == 0 && seqlen % chunkSize == 0;
-    const bool fusePostWu = false;
+    const bool fusePostWu = computeGateInPrepare;
 
     const uint64_t dataBytes = qDesc->GetDataType() == ge::DT_FLOAT ? sizeof(float) : sizeof(uint16_t);
     const uint64_t tokenHeads = static_cast<uint64_t>(batch) * vHeads * seqlen;
