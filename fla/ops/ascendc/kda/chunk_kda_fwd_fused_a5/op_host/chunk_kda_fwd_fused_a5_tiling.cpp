@@ -128,7 +128,9 @@ ge::graphStatus Tiling4ChunkKdaFwdFusedA5(gert::TilingContext *context)
         gkDesc->GetDataType() == ge::DT_FLOAT && useGateInKernel && safeGate && hasALog &&
         !isVarLen && chunkSize == 64 && kDim == 128 && vDim == 128 &&
         vHeads % 2 == 0 && seqlen % chunkSize == 0;
-    const bool fusePostWu = computeGateInPrepare;
+    const bool fuseRecurrentPostWu =
+        computeGateInPrepare && !storeQG && !storeVNew && !storeH;
+    const bool fusePostWu = computeGateInPrepare && !fuseRecurrentPostWu;
 
     const uint64_t dataBytes = qDesc->GetDataType() == ge::DT_FLOAT ? sizeof(float) : sizeof(uint16_t);
     const uint64_t tokenHeads = static_cast<uint64_t>(batch) * vHeads * seqlen;
@@ -146,7 +148,7 @@ ge::graphStatus Tiling4ChunkKdaFwdFusedA5(gert::TilingContext *context)
     const uint64_t qgScaledBytes = tokenHeads * kDim * dataBytes;
 
     const uint64_t postWuScratchOffset = AlignWorkspace(qgScaledOffset + qgScaledBytes);
-    const uint64_t postWuScratchBytes = fusePostWu ? 0 :
+    const uint64_t postWuScratchBytes = (fusePostWu || fuseRecurrentPostWu) ? 0 :
         tokenHeads * static_cast<uint64_t>(kDim) * sizeof(float);
     uint64_t gdnOffset = AlignWorkspace(postWuScratchOffset + postWuScratchBytes);
     const uint64_t vWorkspaceOffset = gdnOffset;
@@ -191,6 +193,7 @@ ge::graphStatus Tiling4ChunkKdaFwdFusedA5(gert::TilingContext *context)
     tiling.set_safeGate(safeGate);
     tiling.set_inputSequenceMajor(inputSequenceMajor);
     tiling.set_fusePostWu(fusePostWu);
+    tiling.set_fuseRecurrentPostWu(fuseRecurrentPostWu);
     tiling.set_computeGateInPrepare(computeGateInPrepare);
     tiling.set_hasALog(hasALog);
     tiling.set_hasDtBias(hasDtBias);

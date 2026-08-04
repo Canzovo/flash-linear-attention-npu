@@ -21,6 +21,7 @@ TILING_DATA_FIELD_DEF(bool, isVarLen);
 TILING_DATA_FIELD_DEF(bool, safeGate);
 TILING_DATA_FIELD_DEF(bool, inputSequenceMajor);
 TILING_DATA_FIELD_DEF(bool, fusePostWu);
+TILING_DATA_FIELD_DEF(bool, fuseRecurrentPostWu);
 TILING_DATA_FIELD_DEF(bool, computeGateInPrepare);
 TILING_DATA_FIELD_DEF(bool, hasALog);
 TILING_DATA_FIELD_DEF(bool, hasDtBias);

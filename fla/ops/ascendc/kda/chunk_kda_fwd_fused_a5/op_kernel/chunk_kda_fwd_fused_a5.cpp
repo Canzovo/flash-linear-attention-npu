@@ -42,7 +42,7 @@ __aicore__ inline void Run(
     AscendC::SyncAll<false>();
     pipe.Reset();
 
-    if (!tiling.fusePostWu) {
+    if (!tiling.fusePostWu && !tiling.fuseRecurrentPostWu) {
         KdaPostWu::RunChunkKdaPostWu<T, GK_T, BETA_T>(
             q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
             w, akk, u, w, u, kg, vNew, userWorkspace, tiling, pipe);
@@ -52,7 +52,7 @@ __aicore__ inline void Run(
 
     ChunkKdaFwdRecurrentA5<T, GK_T, TilingData> recurrent;
     recurrent.Init(
-        gk, initialState, attnOut, finalState, aqk, w, u, qgScaled,
+        gk, initialState, attnOut, finalState, aqk, akk, w, u, qgScaled,
         kg, vNew, h, tiling);
     recurrent.Process();
 }

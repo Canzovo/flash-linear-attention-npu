@@ -58,12 +58,18 @@ constexpr uint32_t KDA_REC_L1_W3_OFFSET = 240 * 1024;
 constexpr uint32_t KDA_REC_L1_Q3_OFFSET = 256 * 1024;
 constexpr uint32_t KDA_REC_L1_KG3_OFFSET = 272 * 1024;
 constexpr uint32_t KDA_REC_L1_AQK3_OFFSET = 288 * 1024;
+constexpr uint32_t KDA_REC_L1_AKK_OFFSET = 304 * 1024;
+constexpr uint32_t KDA_REC_L1_U_OFFSET = 336 * 1024;
 constexpr uint32_t KDA_REC_L1_STAGING_DEPTH = 4;
+constexpr uint32_t KDA_REC_L1_AKK_SLOT_BYTES = 8 * 1024;
+constexpr uint32_t KDA_REC_L1_U_SLOT_BYTES = 16 * 1024;
 
 constexpr uint32_t KDA_REC_L0A_STATE_OFFSET = 0;
 constexpr uint32_t KDA_REC_L0A_VNEW_OFFSET = 16 * 1024;
+constexpr uint32_t KDA_REC_L0A_POST_OFFSET = 32 * 1024;
 constexpr uint32_t KDA_REC_L0B_STATE_OFFSET = 0;
 constexpr uint32_t KDA_REC_L0B_VNEW_OFFSET = 32 * 1024;
+constexpr uint32_t KDA_REC_L0B_POST_OFFSET = 32 * 1024;
 
 constexpr uint32_t KDA_REC_UB_STATE_OFFSET = 0;
 constexpr uint32_t KDA_REC_UB_STATE_TYPED_OFFSET = 32 * 1024;
@@ -92,7 +98,7 @@ public:
 
     __aicore__ inline void Init(
         GM_ADDR gk, GM_ADDR initialState, GM_ADDR attnOut, GM_ADDR finalState,
-        GM_ADDR aqk, GM_ADDR w, GM_ADDR u, GM_ADDR qgScaled, GM_ADDR kg,
+        GM_ADDR aqk, GM_ADDR akk, GM_ADDR w, GM_ADDR u, GM_ADDR qgScaled, GM_ADDR kg,
         GM_ADDR vNew, GM_ADDR h, const TilingData &tiling)
     {
         gk_.SetGlobalBuffer(reinterpret_cast<__gm__ GK_T *>(gk));
@@ -102,6 +108,7 @@ public:
         attnOut_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(attnOut));
         finalState_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(finalState));
         aqk_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(aqk));
+        akk_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(akk));
         w_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(w));
         u_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(u));
         qgScaled_.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(qgScaled));
@@ -116,11 +123,14 @@ public:
         storeFinalState_ = tiling.storeFinalState;
         storeVNew_ = tiling.storeVNew;
         storeH_ = tiling.storeH;
+        fuseRecurrentPostWu_ = tiling.fuseRecurrentPostWu;
         coreNum_ = tiling.prepareUsedCoreNum;
         statePublishCount_[0] = 0;
         statePublishCount_[1] = 0;
         vnewPublishCount_[0] = 0;
         vnewPublishCount_[1] = 0;
+        wPublishCount_[0] = 0;
+        wPublishCount_[1] = 0;
     }
 
     __aicore__ inline void Process()
@@ -261,18 +271,27 @@ private:
         return slot == 2 ? KDA_REC_L1_AQK2_OFFSET : KDA_REC_L1_AQK3_OFFSET;
     }
 
-    template <typename DirectTileCopy>
-    __aicore__ inline void PublishDirect(
-        LocalTensor<float> l0C, uint32_t m, uint32_t n,
+    __aicore__ inline uint32_t L1AkkOffset(uint32_t slot) const
+    {
+        return KDA_REC_L1_AKK_OFFSET + slot * KDA_REC_L1_AKK_SLOT_BYTES;
+    }
+
+    __aicore__ inline uint32_t L1UOffset(uint32_t slot) const
+    {
+        return KDA_REC_L1_U_OFFSET + slot * KDA_REC_L1_U_SLOT_BYTES;
+    }
+
+    template <typename DirectTileCopy, typename TensorL0C>
+    __aicore__ inline void PublishDirectTile(
+        TensorL0C tensorL0C, uint32_t m, uint32_t n,
         TEventID mToFixEvent, TEventID fixToMEvent)
     {
-        auto layoutL0C = tla::MakeLayoutL0C(m, n);
         auto layoutUb = tla::MakeLayout<float, LayoutRM>(m, n);
-        auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
         auto tensorUb = tla::MakeTensor(
             resource_.ubBuf.template GetBufferByByte<float>(KDA_REC_UB_DIRECT_OFFSET),
             layoutUb, Catlass::Arch::PositionUB{});
-        using CopyL0CToDst = typename DirectTileCopy::template CopyL0CToDst<decltype(tensorUb)>;
+        using CopyL0CToDst =
+            typename DirectTileCopy::template CopyL0CToDst<decltype(tensorUb)>;
         CopyL0CToDst copyL0CToDst;
 
         CrossCoreWaitFlag<0x4, PIPE_FIX>(KDA_REC_DIRECT_FREE_FLAG);
@@ -287,17 +306,30 @@ private:
         SetFlag<HardEvent::FIX_M>(fixToMEvent);
     }
 
+    template <typename DirectTileCopy>
+    __aicore__ inline void PublishDirect(
+        LocalTensor<float> l0C, uint32_t m, uint32_t n,
+        TEventID mToFixEvent, TEventID fixToMEvent)
+    {
+        auto layoutL0C = tla::MakeLayoutL0C(m, n);
+        auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
+        PublishDirectTile<DirectTileCopy>(
+            tensorL0C, m, n, mToFixEvent, fixToMEvent);
+    }
+
     __aicore__ inline void PrefetchIndependentProductsAic(
         uint64_t b, uint64_t hv, uint64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 3);
         WaitFlag<HardEvent::MTE1_MTE2>(aicL1ReuseEvents_[slot]);
         using LayoutTagL1ARm = typename TileCopyRM::LayoutTagL1A;
+        using LayoutTagL1BRm = typename TileCopyRM::LayoutTagL1B;
         using LayoutTagL1ACm = typename TileCopyCM::LayoutTagL1A;
 
         auto layoutToken = tla::MakeLayout<T, LayoutRM>(KDA_REC_CHUNK, KDA_REC_DIM);
         auto layoutKg = tla::MakeLayout<T, LayoutCM>(KDA_REC_DIM, KDA_REC_CHUNK);
         auto layoutAqk = tla::MakeLayout<T, LayoutRM>(KDA_REC_CHUNK, KDA_REC_CHUNK);
+        auto layoutAkk = tla::MakeLayout<T, LayoutRM>(KDA_REC_CHUNK, KDA_REC_CHUNK);
         auto tensorW = tla::MakeTensor(
             w_[ChunkMatrixOffset(b, hv, chunk)], layoutToken, Catlass::Arch::PositionGM{});
         auto tensorQ = tla::MakeTensor(
@@ -307,6 +339,10 @@ private:
             kg_[ChunkMatrixOffset(b, hv, chunk)], layoutKg, Catlass::Arch::PositionGM{});
         auto tensorAqk = tla::MakeTensor(
             aqk_[ChunkScoreOffset(b, hv, chunk)], layoutAqk, Catlass::Arch::PositionGM{});
+        auto tensorAkk = tla::MakeTensor(
+            akk_[ChunkScoreOffset(b, hv, chunk)], layoutAkk, Catlass::Arch::PositionGM{});
+        auto tensorU = tla::MakeTensor(
+            u_[ChunkMatrixOffset(b, hv, chunk)], layoutToken, Catlass::Arch::PositionGM{});
         auto blockW = GetTile(tensorW, tla::MakeCoord(0, 0),
                               tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
         auto blockQ = GetTile(tensorQ, tla::MakeCoord(0, 0),
@@ -315,10 +351,16 @@ private:
                                tla::MakeShape(KDA_REC_DIM, KDA_REC_CHUNK));
         auto blockAqk = GetTile(tensorAqk, tla::MakeCoord(0, 0),
                                 tla::MakeShape(KDA_REC_CHUNK, KDA_REC_CHUNK));
+        auto blockAkk = GetTile(tensorAkk, tla::MakeCoord(0, 0),
+                                tla::MakeShape(KDA_REC_CHUNK, KDA_REC_CHUNK));
+        auto blockU = GetTile(tensorU, tla::MakeCoord(0, 0),
+                              tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
         using CopyGmToL1ARmW = typename TileCopyRM::template CopyGmToL1A<decltype(blockW)>;
         using CopyGmToL1ARmQ = typename TileCopyRM::template CopyGmToL1A<decltype(blockQ)>;
         using CopyGmToL1ACm = typename TileCopyCM::template CopyGmToL1A<decltype(blockKg)>;
         using CopyGmToL1ARmAqk = typename TileCopyRM::template CopyGmToL1A<decltype(blockAqk)>;
+        using CopyGmToL1ARmAkk = typename TileCopyRM::template CopyGmToL1A<decltype(blockAkk)>;
+        using CopyGmToL1BRmU = typename TileCopyRM::template CopyGmToL1B<decltype(blockU)>;
 
         LocalTensor<T> l1W = resource_.l1Buf.template GetBufferByByte<T>(
             L1WOffset(slot));
@@ -328,6 +370,10 @@ private:
             L1KgOffset(slot));
         LocalTensor<T> l1Aqk = resource_.l1Buf.template GetBufferByByte<T>(
             L1AqkOffset(slot));
+        LocalTensor<T> l1Akk = resource_.l1Buf.template GetBufferByByte<T>(
+            L1AkkOffset(slot));
+        LocalTensor<T> l1U = resource_.l1Buf.template GetBufferByByte<T>(
+            L1UOffset(slot));
         auto tensorL1W = tla::MakeTensor(
             l1W, tla::MakeLayout<T, LayoutTagL1ARm>(KDA_REC_CHUNK, KDA_REC_DIM),
             Catlass::Arch::PositionL1{});
@@ -340,16 +386,108 @@ private:
         auto tensorL1Aqk = tla::MakeTensor(
             l1Aqk, tla::MakeLayout<T, LayoutTagL1ARm>(KDA_REC_CHUNK, KDA_REC_CHUNK),
             Catlass::Arch::PositionL1{});
+        auto tensorL1Akk = tla::MakeTensor(
+            l1Akk, tla::MakeLayout<T, LayoutTagL1ARm>(KDA_REC_CHUNK, KDA_REC_CHUNK),
+            Catlass::Arch::PositionL1{});
+        auto tensorL1U = tla::MakeTensor(
+            l1U, tla::MakeLayout<T, LayoutTagL1BRm>(KDA_REC_CHUNK, KDA_REC_DIM),
+            Catlass::Arch::PositionL1{});
 
         CopyGmToL1ARmW{}(tensorL1W, blockW);
         CopyGmToL1ARmQ{}(tensorL1Q, blockQ);
         CopyGmToL1ACm{}(tensorL1Kg, blockKg);
         CopyGmToL1ARmAqk{}(tensorL1Aqk, blockAqk);
+        if (fuseRecurrentPostWu_) {
+            CopyGmToL1ARmAkk{}(tensorL1Akk, blockAkk);
+            CopyGmToL1BRmU{}(tensorL1U, blockU);
+        }
         SetFlag<HardEvent::MTE2_MTE1>(aicMte2ToMte1Event_);
     }
 
+    __aicore__ inline void ComputePostWuAic(uint64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 3);
+        using LayoutTagL1A = typename TileCopyRM::LayoutTagL1A;
+        using LayoutTagL1B = typename TileCopyRM::LayoutTagL1B;
+        using LayoutTagL0A = typename TileCopyRM::LayoutTagL0A;
+        using LayoutTagL0B = typename TileCopyRM::LayoutTagL0B;
+        using CopyL1ToL0A = typename TileCopyRM::CopyL1ToL0A;
+        using CopyL1ToL0B = typename TileCopyRM::CopyL1ToL0B;
+        using TileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, T, LayoutTagL1A>;
+
+        LocalTensor<T> l1Akk = resource_.l1Buf.template GetBufferByByte<T>(
+            L1AkkOffset(slot));
+        LocalTensor<T> l1W = resource_.l1Buf.template GetBufferByByte<T>(
+            L1WOffset(slot));
+        LocalTensor<T> l1U = resource_.l1Buf.template GetBufferByByte<T>(
+            L1UOffset(slot));
+        LocalTensor<T> l0A = resource_.l0ABuf.template GetBufferByByte<T>(
+            KDA_REC_L0A_POST_OFFSET);
+        LocalTensor<T> l0B = resource_.l0BBuf.template GetBufferByByte<T>(
+            KDA_REC_L0B_POST_OFFSET);
+        LocalTensor<float> l0C = resource_.l0CBuf.template GetBufferByByte<float>(0);
+
+        auto tensorL1Akk = tla::MakeTensor(
+            l1Akk, tla::MakeLayout<T, LayoutTagL1A>(KDA_REC_CHUNK, KDA_REC_CHUNK),
+            Catlass::Arch::PositionL1{});
+        auto tensorL1W = tla::MakeTensor(
+            l1W, tla::MakeLayout<T, LayoutTagL1B>(KDA_REC_CHUNK, KDA_REC_DIM),
+            Catlass::Arch::PositionL1{});
+        auto tensorL1U = tla::MakeTensor(
+            l1U, tla::MakeLayout<T, LayoutTagL1B>(KDA_REC_CHUNK, KDA_REC_DIM),
+            Catlass::Arch::PositionL1{});
+        auto tensorL0A = tla::MakeTensor(
+            l0A, tla::MakeLayout<T, LayoutTagL0A>(KDA_REC_CHUNK, KDA_REC_CHUNK),
+            Catlass::Arch::PositionL0A{});
+        auto tensorL0B = tla::MakeTensor(
+            l0B, tla::MakeLayout<T, LayoutTagL0B>(KDA_REC_CHUNK, 2 * KDA_REC_DIM),
+            Catlass::Arch::PositionL0B{});
+        auto tensorL0C = tla::MakeTensor(
+            l0C, tla::MakeLayoutL0C(KDA_REC_CHUNK, 2 * KDA_REC_DIM),
+            Catlass::Arch::PositionL0C{});
+        auto tileL1Akk = GetTile(tensorL1Akk, tla::MakeCoord(0, 0),
+                                 tla::MakeShape(KDA_REC_CHUNK, KDA_REC_CHUNK));
+        auto tileL1W = GetTile(tensorL1W, tla::MakeCoord(0, 0),
+                               tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
+        auto tileL1U = GetTile(tensorL1U, tla::MakeCoord(0, 0),
+                               tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
+        auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0),
+                               tla::MakeShape(KDA_REC_CHUNK, KDA_REC_CHUNK));
+        auto tileL0BW = GetTile(tensorL0B, tla::MakeCoord(0, 0),
+                                tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
+        auto tileL0BU = GetTile(tensorL0B, tla::MakeCoord(0, KDA_REC_DIM),
+                                tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
+        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0),
+                               tla::MakeShape(KDA_REC_CHUNK, 2 * KDA_REC_DIM));
+        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0),
+                               tla::MakeShape(KDA_REC_CHUNK, 2 * KDA_REC_DIM));
+        auto tileL0CW = GetTile(tensorL0C, tla::MakeCoord(0, 0),
+                                tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
+        auto tileL0CU = GetTile(tensorL0C, tla::MakeCoord(0, KDA_REC_DIM),
+                                tla::MakeShape(KDA_REC_CHUNK, KDA_REC_DIM));
+
+        WaitFlag<HardEvent::MTE2_MTE1>(aicMte2ToMte1Event_);
+        WaitFlag<HardEvent::M_MTE1>(stateL0FreeEvent_);
+        CopyL1ToL0A{}(tileL0A, tileL1Akk);
+        CopyL1ToL0B{}(tileL0BW, tileL1W);
+        CopyL1ToL0B{}(tileL0BU, tileL1U);
+        SetFlag<HardEvent::MTE1_M>(aicMte1ToMEvent_);
+        WaitFlag<HardEvent::MTE1_M>(aicMte1ToMEvent_);
+        TileMmad{}(tileL0C, tileL0A, tileL0B, KDA_REC_CHUNK,
+                   2 * KDA_REC_DIM, KDA_REC_CHUNK, true, 0);
+        SetFlag<HardEvent::M_MTE1>(stateL0FreeEvent_);
+        PublishDirectTile<DirectTileCopyRM>(
+            tileL0CW, KDA_REC_CHUNK, KDA_REC_DIM,
+            aicMToFixEvent_, aicFixToMEvent_);
+        WaitFlag<HardEvent::FIX_M>(aicFixToMEvent_);
+        PublishDirectTile<DirectTileCopyRM>(
+            tileL0CU, KDA_REC_CHUNK, KDA_REC_DIM,
+            aicMToFixEvent_, aicFixToMEvent_);
+        WaitFlag<HardEvent::FIX_M>(aicFixToMEvent_);
+    }
+
     __aicore__ inline void ComputeStateProductsAic(
-        uint64_t b, uint64_t hv, uint64_t chunk)
+        uint64_t b, uint64_t hv, uint64_t chunk, bool inputsReady = false)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 3);
         using LayoutTagL1A = typename TileCopyRM::LayoutTagL1A;
@@ -400,7 +538,9 @@ private:
         CopyL1ToL0B copyL1ToL0B;
         TileMmad tileMmad;
 
-        WaitFlag<HardEvent::MTE2_MTE1>(aicMte2ToMte1Event_);
+        if (!inputsReady) {
+            WaitFlag<HardEvent::MTE2_MTE1>(aicMte2ToMte1Event_);
+        }
         WaitFlag<HardEvent::M_MTE1>(stateL0FreeEvent_);
         copyL1ToL0A(tileL0A, tileL1W);
         copyL1ToL0B(tileL0B, tileL1B);
@@ -414,6 +554,10 @@ private:
             aicMToFixEvent_, aicFixToMEvent_);
         SetL1SlotFlagAicToAiv<PIPE_FIX>(KDA_REC_STATE_FREE_FLAG, 0);
         SetL1SlotFlagAicToAiv<PIPE_FIX>(KDA_REC_STATE_FREE_FLAG, 1);
+        if (fuseRecurrentPostWu_) {
+            SetL1SlotFlagAicToAiv<PIPE_FIX>(KDA_REC_STATE_FREE_FLAG, 0);
+            SetL1SlotFlagAicToAiv<PIPE_FIX>(KDA_REC_STATE_FREE_FLAG, 1);
+        }
 
         WaitFlag<HardEvent::M_MTE1>(stateL0FreeEvent_);
         WaitFlag<HardEvent::FIX_M>(aicFixToMEvent_);
@@ -546,9 +690,16 @@ private:
             const uint64_t hv = task % heads_;
             PrefetchIndependentProductsAic(b, hv, 0);
             for (uint64_t chunk = 0; chunk < totalChunks_; ++chunk) {
+                if (fuseRecurrentPostWu_) {
+                    ComputePostWuAic(chunk);
+                }
                 WaitL1SlotReadyMte1(KDA_REC_STATE_READY_FLAG, 0);
                 WaitL1SlotReadyMte1(KDA_REC_STATE_READY_FLAG, 1);
-                ComputeStateProductsAic(b, hv, chunk);
+                if (fuseRecurrentPostWu_) {
+                    WaitL1SlotReadyMte1(KDA_REC_STATE_READY_FLAG, 0);
+                    WaitL1SlotReadyMte1(KDA_REC_STATE_READY_FLAG, 1);
+                }
+                ComputeStateProductsAic(b, hv, chunk, fuseRecurrentPostWu_);
                 WaitL1SlotReadyMte1(KDA_REC_VNEW_READY_FLAG, 0);
                 WaitL1SlotReadyMte1(KDA_REC_VNEW_READY_FLAG, 1);
                 ComputeVnewProductsAic(
@@ -649,12 +800,47 @@ private:
 
         CrossCoreWaitFlag<0x4, PIPE_V>(KDA_REC_DIRECT_READY_FLAG);
         WaitFlag<HardEvent::MTE3_MTE2>(aivMte3ToMte2Event_);
-        DataCopy(ioTyped, u_[ChunkMatrixOffset(b, hv, chunk, tokenBegin)],
-                 KDA_REC_TOKEN_SUB_ELEMS);
-        SetFlag<HardEvent::MTE2_V>(aivMte2ToVEvent_);
-        WaitFlag<HardEvent::MTE2_V>(aivMte2ToVEvent_);
-        Cast(vnew, ioTyped, RoundMode::CAST_NONE, KDA_REC_TOKEN_SUB_ELEMS);
-        PipeBarrier<PIPE_V>();
+        if (fuseRecurrentPostWu_) {
+            Cast(ioTyped, direct, RoundMode::CAST_RINT, KDA_REC_TOKEN_SUB_ELEMS);
+            PipeBarrier<PIPE_V>();
+            CrossCoreSetFlag<0x4, PIPE_V>(KDA_REC_DIRECT_FREE_FLAG);
+
+            SetFlag<HardEvent::V_MTE3>(aivVToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(aivVToMte3Event_);
+            LocalTensor<T> l1W = resource_.l1Buf.template GetBufferByByte<T>(
+                L1WOffset(chunk & 3));
+            WaitL1SlotFreeMte3(
+                KDA_REC_STATE_FREE_FLAG, wPublishCount_[subBlockIdx]);
+            DataCopyParams wCopyParams;
+            wCopyParams.blockCount = KDA_REC_SUB_CHUNK;
+            wCopyParams.blockLen = 1;
+            wCopyParams.srcGap = KDA_REC_DIM / 16 - 1;
+            wCopyParams.dstGap = 0;
+            for (uint32_t colBlock = 0; colBlock < KDA_REC_DIM / 16; ++colBlock) {
+                const uint32_t dstOffset =
+                    colBlock * KDA_REC_CHUNK * 16 + tokenBegin * 16;
+                DataCopy(l1W[dstOffset], ioTyped[colBlock * 16], wCopyParams);
+            }
+            SetFlag<HardEvent::MTE3_V>(aivMte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(aivMte3ToVEvent_);
+            SetL1SlotFlagAivToAic<PIPE_MTE3>(KDA_REC_STATE_READY_FLAG);
+            ++wPublishCount_[subBlockIdx];
+
+            CrossCoreWaitFlag<0x4, PIPE_V>(KDA_REC_DIRECT_READY_FLAG);
+            Cast(ioTyped, direct, RoundMode::CAST_RINT, KDA_REC_TOKEN_SUB_ELEMS);
+            PipeBarrier<PIPE_V>();
+            Cast(vnew, ioTyped, RoundMode::CAST_NONE, KDA_REC_TOKEN_SUB_ELEMS);
+            PipeBarrier<PIPE_V>();
+            CrossCoreSetFlag<0x4, PIPE_V>(KDA_REC_DIRECT_FREE_FLAG);
+            CrossCoreWaitFlag<0x4, PIPE_V>(KDA_REC_DIRECT_READY_FLAG);
+        } else {
+            DataCopy(ioTyped, u_[ChunkMatrixOffset(b, hv, chunk, tokenBegin)],
+                     KDA_REC_TOKEN_SUB_ELEMS);
+            SetFlag<HardEvent::MTE2_V>(aivMte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(aivMte2ToVEvent_);
+            Cast(vnew, ioTyped, RoundMode::CAST_NONE, KDA_REC_TOKEN_SUB_ELEMS);
+            PipeBarrier<PIPE_V>();
+        }
         Sub(vnew, vnew, direct, KDA_REC_TOKEN_SUB_ELEMS);
         PipeBarrier<PIPE_V>();
         CrossCoreSetFlag<0x4, PIPE_V>(KDA_REC_DIRECT_FREE_FLAG);
@@ -788,6 +974,7 @@ private:
     GlobalTensor<T> attnOut_;
     GlobalTensor<float> finalState_;
     GlobalTensor<T> aqk_;
+    GlobalTensor<T> akk_;
     GlobalTensor<T> w_;
     GlobalTensor<T> u_;
     GlobalTensor<T> qgScaled_;
@@ -796,6 +983,7 @@ private:
     GlobalTensor<T> h_;
     uint32_t statePublishCount_[2] = {0, 0};
     uint32_t vnewPublishCount_[2] = {0, 0};
+    uint32_t wPublishCount_[2] = {0, 0};
     TEventID aicMte2ToMte1Event_ = KDA_REC_MTE_W_EVENT;
     TEventID aicL1ReuseEvents_[KDA_REC_L1_STAGING_DEPTH] = {0, 1, 2, 3};
     TEventID stateL0FreeEvent_ = KDA_REC_M_EVENT;
@@ -817,6 +1005,7 @@ private:
     bool storeFinalState_ = false;
     bool storeVNew_ = false;
     bool storeH_ = false;
+    bool fuseRecurrentPostWu_ = false;
 };
 
 } // namespace KdaFusedA5
