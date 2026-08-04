@@ -1,9 +1,10 @@
 """Use Ascend C KDA forward behind the Triton-Ascend KDA model API.
 
 The adapter preserves the public and autograd-facing contract of
-``triton_ascend_kernels.attention.fla.kda.chunk_kda``. Only its low-level
-forward function is replaced. The third-party Triton backward remains active
-and consumes the saved tensors returned by this adapter.
+``triton_ascend_kernels.attention.fla.kda.chunk_kda``. Its low-level KDA
+forward and forward L2Norm implementation are replaced. The third-party
+Triton backward remains active and consumes the saved tensors returned by
+this adapter.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ _TARGET_MODULES = (
     "triton_ascend_kernels.attention.fla.kda.chunk_fwd",
     "triton_ascend_kernels.attention.fla.kda.chunk",
 )
+_L2NORM_TARGET_MODULE = "triton_ascend_kernels.attention.fla.kda.chunk"
 _EXPECTED_PARAMETERS = {
     "q",
     "k",
@@ -42,6 +44,7 @@ _EXPECTED_PARAMETERS = {
 }
 
 _ORIGINALS: Dict[str, Callable[..., Any]] = {}
+_L2NORM_ORIGINALS: Dict[str, Callable[..., Any]] = {}
 
 
 def _install_triton_extra_ascend_compat() -> bool:
@@ -93,6 +96,22 @@ def _load_ascendc_ops():
     from fla_npu.ops.ascendc import chunk_kda_fwd
 
     return chunk_kda_fwd
+
+
+def _load_optimized_l2norm_fwd():
+    """Load the packaged fixed-grid L2Norm used by the model adapter."""
+
+    try:
+        from fla_npu.ops.triton import l2norm_fwd
+    except ModuleNotFoundError as error:
+        # Source-tree tests do not materialize setup.py's package_dir mapping.
+        if not (error.name or "").startswith(
+            "fla_npu.ops.triton.triton_core"
+        ):
+            raise
+        from fla.ops.triton.triton_core.l2norm import l2norm_fwd
+
+    return l2norm_fwd
 
 
 def triton_ascend_chunk_kda_fwd(
@@ -228,9 +247,15 @@ def install_triton_ascend_kda_adapter() -> bool:
         _validate_target(original, name)
         originals[name] = original
 
+    l2norm_module = modules[_TARGET_MODULES.index(_L2NORM_TARGET_MODULE)]
+    original_l2norm = getattr(l2norm_module, "l2norm_fwd")
+    optimized_l2norm = _load_optimized_l2norm_fwd()
+
     _ORIGINALS.update(originals)
+    _L2NORM_ORIGINALS[_L2NORM_TARGET_MODULE] = original_l2norm
     for module in modules:
         module.chunk_kda_fwd = triton_ascend_chunk_kda_fwd
+    l2norm_module.l2norm_fwd = optimized_l2norm
     return True
 
 
@@ -243,7 +268,11 @@ def remove_triton_ascend_kda_adapter() -> bool:
         module = importlib.import_module(name)
         if getattr(module, "chunk_kda_fwd", None) is triton_ascend_chunk_kda_fwd:
             module.chunk_kda_fwd = original
+    for name, original in tuple(_L2NORM_ORIGINALS.items()):
+        module = importlib.import_module(name)
+        module.l2norm_fwd = original
     _ORIGINALS.clear()
+    _L2NORM_ORIGINALS.clear()
     return True
 
 

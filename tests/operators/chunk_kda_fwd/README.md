@@ -62,10 +62,14 @@ A2/A3/A5 通过 `FLA_NPU_SOC` 选择。精度逐项比较全部公开输出并�
 适配目标固定为
 `Ascend/triton-ascend-kernels@4cd4b506d4153ac18ac1ca8f4c770eac9fd3fcc8`
 和 `triton-ascend==3.2.1`。
-适配器只替换该仓 `ChunkKDAFunction` 使用的低层 `chunk_kda_fwd`：
+适配器替换该仓 `ChunkKDAFunction` 使用的低层 `chunk_kda_fwd`，并将
+`chunk.py` 的前向 L2Norm 切换为仓内固定网格实现：
 
 - 正向使用 `fla_npu.ops.ascendc.chunk_kda_fwd`；
+- Q/K 前向 L2Norm 使用 `fla_npu.ops.triton.l2norm_fwd`，避免长序列按
+  `T` 拆成多次 launch；
 - 反向仍使用模型现有 Triton-Ascend KDA 实现；
+- L2Norm 反向不替换，继续使用模型现有实现；
 - 输入保持 BSND，不修改模型张量准备；
 - AscendC 的 BNSD 中间量在适配边界转回 BSND，供现有 Triton 反向直接消费；
 - 优先使用 `cu_seqlens_cpu` 一次性构造 L2 metadata，避免逐元素 NPU 到 Host 同步；

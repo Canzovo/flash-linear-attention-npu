@@ -113,7 +113,7 @@ def _l2norm_fwd_torch(x, eps=1e-6):
 
 
 def _model_l2norm_fwd(x):
-    """Call the model's Triton L2Norm instead of expanding it into torch ops."""
+    """Call the fixed-grid L2Norm installed by the model KDA adapter."""
     model_source_root = os.environ.get("FLA_NPU_MODEL_SOURCE_ROOT")
     if model_source_root and model_source_root not in sys.path:
         sys.path.insert(0, model_source_root)
@@ -121,45 +121,11 @@ def _model_l2norm_fwd(x):
     # Keep profiling on the same compatibility path as the production adapter.
     from fla_npu.adapters.triton_ascend_kda import (  # noqa: PLC0415
         _install_triton_extra_ascend_compat,
+        _load_optimized_l2norm_fwd,
     )
 
     _install_triton_extra_ascend_compat()
-    try:
-        from triton_ascend_kernels.attention.fla.kda.l2norm_kda import (  # noqa: PLC0415
-            l2norm_fwd,
-        )
-    except ImportError:
-        try:
-            from fla_npu.ops.triton import l2norm_fwd  # noqa: PLC0415
-        except ImportError:
-            try:
-                from fla.modules.backends.triton_ascend.l2norm import (  # noqa: PLC0415
-                    l2norm_fwd_npu as l2norm_fwd,
-                )
-            except ImportError as error:
-                raise RuntimeError(
-                    "the model-target KDA profile requires Triton-Ascend l2norm_fwd"
-                ) from error
-    # Triton-Ascend autotunes BT down to 8. Keep every candidate grid within
-    # the A5 coreDim limit while preserving the row-wise L2Norm semantics.
-    max_rows_per_launch = 65535 * 8
-    row_count = x.numel() // x.shape[-1]
-    if x.ndim != 4 or row_count <= max_rows_per_launch:
-        return l2norm_fwd(x)
-
-    sequence_dim = 1
-    rows_per_sequence = row_count // x.shape[sequence_dim]
-    sequence_tile = max(1, min(4096, max_rows_per_launch // rows_per_sequence))
-    normalized = []
-    reciprocal_std = []
-    for x_tile in torch.split(x, sequence_tile, dim=sequence_dim):
-        y_tile, rstd_tile = l2norm_fwd(x_tile.contiguous())
-        normalized.append(y_tile)
-        reciprocal_std.append(rstd_tile)
-    return (
-        torch.cat(normalized, dim=sequence_dim),
-        torch.cat(reciprocal_std, dim=sequence_dim),
-    )
+    return _load_optimized_l2norm_fwd()(x)
 
 
 def _make_model_shape_kda_dump(case=None, dump_path=None):

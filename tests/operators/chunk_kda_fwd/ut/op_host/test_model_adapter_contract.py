@@ -73,13 +73,28 @@ def _compatible_original(
     )
 
 
-def test_adapter_patches_and_restores_both_bound_forward_symbols():
-    adapter = _load_adapter()
+def _original_l2norm(x, eps=1e-6, output_dtype=None):
+    return x, (eps, output_dtype)
+
+
+def _optimized_l2norm(x, eps=1e-6, output_dtype=None):
+    return x, (eps, output_dtype)
+
+
+def _adapter_target_modules(adapter):
     modules = {
         name: types.SimpleNamespace(chunk_kda_fwd=_compatible_original)
         for name in adapter._TARGET_MODULES
     }
+    modules[adapter._L2NORM_TARGET_MODULE].l2norm_fwd = _original_l2norm
+    return modules
+
+
+def test_adapter_patches_and_restores_both_bound_forward_symbols():
+    adapter = _load_adapter()
+    modules = _adapter_target_modules(adapter)
     adapter._load_ascendc_ops = lambda: None
+    adapter._load_optimized_l2norm_fwd = lambda: _optimized_l2norm
     adapter._install_triton_extra_ascend_compat = lambda: False
     adapter.importlib.import_module = modules.__getitem__
 
@@ -90,6 +105,10 @@ def test_adapter_patches_and_restores_both_bound_forward_symbols():
         module.chunk_kda_fwd is adapter.triton_ascend_chunk_kda_fwd
         for module in modules.values()
     )
+    assert (
+        modules[adapter._L2NORM_TARGET_MODULE].l2norm_fwd
+        is _optimized_l2norm
+    )
 
     assert adapter.remove_triton_ascend_kda_adapter() is True
     assert adapter.remove_triton_ascend_kda_adapter() is False
@@ -97,6 +116,9 @@ def test_adapter_patches_and_restores_both_bound_forward_symbols():
     assert all(
         module.chunk_kda_fwd is _compatible_original
         for module in modules.values()
+    )
+    assert (
+        modules[adapter._L2NORM_TARGET_MODULE].l2norm_fwd is _original_l2norm
     )
 
 
@@ -114,7 +136,9 @@ def test_adapter_signature_failure_does_not_leave_partial_install_state():
             chunk_kda_fwd=incompatible_original
         ),
     }
+    modules[adapter._L2NORM_TARGET_MODULE].l2norm_fwd = _original_l2norm
     adapter._load_ascendc_ops = lambda: None
+    adapter._load_optimized_l2norm_fwd = lambda: _optimized_l2norm
     adapter._install_triton_extra_ascend_compat = lambda: False
     adapter.importlib.import_module = modules.__getitem__
 
@@ -133,10 +157,7 @@ def test_adapter_signature_failure_does_not_leave_partial_install_state():
 def test_adapter_registers_packaged_opp_before_importing_triton():
     adapter = _load_adapter()
     events = []
-    modules = {
-        name: types.SimpleNamespace(chunk_kda_fwd=_compatible_original)
-        for name in adapter._TARGET_MODULES
-    }
+    modules = _adapter_target_modules(adapter)
 
     def load_ascendc_ops():
         events.append("ascendc")
@@ -147,6 +168,9 @@ def test_adapter_registers_packaged_opp_before_importing_triton():
         return modules[name]
 
     adapter._load_ascendc_ops = load_ascendc_ops
+    adapter._load_optimized_l2norm_fwd = lambda: events.append(
+        "optimized_l2norm"
+    ) or _optimized_l2norm
     adapter._install_triton_extra_ascend_compat = lambda: events.append(
         "triton_compat"
     )
@@ -157,6 +181,7 @@ def test_adapter_registers_packaged_opp_before_importing_triton():
         "ascendc",
         "triton_compat",
         *adapter._TARGET_MODULES,
+        "optimized_l2norm",
     ]
 
 
@@ -203,6 +228,7 @@ def test_adapter_does_not_patch_reverse_cumsum_or_backward_modules():
     source = ADAPTER_PATH.read_text(encoding="utf-8")
     assert "cumsum_kda.chunk_local_cumsum" not in source
     assert "chunk_bwd.chunk_kda_bwd" not in source
+    assert adapter._L2NORM_TARGET_MODULE == adapter._TARGET_MODULES[1]
 
 
 def test_model_backward_h96_case_is_pinned_in_manifest():
