@@ -25,6 +25,7 @@ constexpr size_t ATTR_LOGICAL_BATCH_IDX = 5;
 constexpr size_t ATTR_LOGICAL_SEQLEN_IDX = 6;
 constexpr size_t ATTR_LOGICAL_HEADS_IDX = 7;
 constexpr size_t ATTR_LOGICAL_HEAD_DIM_IDX = 8;
+constexpr size_t ATTR_DEFER_TO_PREPARE_IDX = 9;
 constexpr int64_t MAX_K_DIM = 256;
 } // namespace
 
@@ -50,6 +51,18 @@ ge::graphStatus Tiling4KdaGateCumsum(gert::TilingContext *context)
     bool useGate = *attrs->GetAttrPointer<bool>(ATTR_USE_GATE_IDX);
     bool safeGate = *attrs->GetAttrPointer<bool>(ATTR_SAFE_GATE_IDX);
     float lowerBound = *attrs->GetAttrPointer<float>(ATTR_LOWER_BOUND_IDX);
+    bool deferToPrepare = *attrs->GetAttrPointer<bool>(ATTR_DEFER_TO_PREPARE_IDX);
+
+    const auto gShapePtr = context->GetInputShape(INPUT_G_IDX);
+    if (gShapePtr == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    const auto &gShape = gShapePtr->GetStorageShape();
+    const bool inputSequenceMajor =
+        (rank == 4 && gShape.GetDimNum() == 4 && gShape.GetDim(0) == batch &&
+         gShape.GetDim(1) == t && gShape.GetDim(2) == hv && gShape.GetDim(3) == k) ||
+        (rank == 3 && gShape.GetDimNum() == 3 && gShape.GetDim(0) == t &&
+         gShape.GetDim(1) == hv && gShape.GetDim(2) == k);
 
     const auto cuShape = context->GetOptionalInputShape(INPUT_CU_SEQLENS_IDX);
     int64_t hasCuSeqlens = (cuShape != nullptr) ? 1 : 0;
@@ -60,8 +73,11 @@ ge::graphStatus Tiling4KdaGateCumsum(gert::TilingContext *context)
     int64_t taskCount = hasCuSeqlens ? seqNum * hv : batch * hv * maxChunks;
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    const bool skipKernel =
+        deferToPrepare &&
+        ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
     uint32_t coreNum = ascendcPlatform.GetCoreNumAiv();
-    uint32_t blockDim = static_cast<uint32_t>(std::min<int64_t>(taskCount, coreNum));
+    uint32_t blockDim = skipKernel ? 1 : static_cast<uint32_t>(std::min<int64_t>(taskCount, coreNum));
     context->SetBlockDim(blockDim == 0 ? 1 : blockDim);
 
     size_t *workspace = context->GetWorkspaceSizes(1);
@@ -86,8 +102,10 @@ ge::graphStatus Tiling4KdaGateCumsum(gert::TilingContext *context)
     tiling.set_dataType(dataType);
     tiling.set_useGateInKernel(useGate ? 1 : 0);
     tiling.set_safeGate(safeGate ? 1 : 0);
+    tiling.set_inputSequenceMajor(inputSequenceMajor ? 1 : 0);
     tiling.set_lowerBound(lowerBound);
     tiling.set_usedCoreNum(blockDim == 0 ? 1 : blockDim);
+    tiling.set_skipKernel(skipKernel ? 1 : 0);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

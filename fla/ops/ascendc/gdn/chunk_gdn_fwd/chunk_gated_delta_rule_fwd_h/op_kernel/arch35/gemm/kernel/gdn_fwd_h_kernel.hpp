@@ -58,13 +58,13 @@ using namespace tla;
 namespace Catlass::Gemm::Kernel {
 
 struct GDNFwdHTileShapes128 {
-    using L1TileShape = Shape<_128, _128, _128>;
+    using L1TileShape = tla::Shape<_128, _128, _128>;
     using L0TileShape = L1TileShape;
 };
 
 struct GDNFwdHTileShapes256 {
-    using L1TileShape = Shape<_128, _256, _128>;
-    using L0TileShape = Shape<_128, _256, _64>;
+    using L1TileShape = tla::Shape<_128, _256, _128>;
+    using L0TileShape = tla::Shape<_128, _256, _64>;
 };
 
 template <bool KGated, bool ScalarGated, bool UseExp2>
@@ -440,11 +440,9 @@ public:
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
-                                constexpr bool useKDecayWorkspace = kGated && scalarGated;
-                                int64_t cube2OffsetK = useKDecayWorkspace
-                                    ? cube2Offsets.kDecayWorkOffset : cube2Offsets.wkOffset;
+                                int64_t cube2OffsetK = kGated ? cube2Offsets.kDecayWorkOffset : cube2Offsets.wkOffset;
                                 int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
-                                auto tensorK = useKDecayWorkspace
+                                auto tensorK = kGated
                                     ? tla::MakeTensor(gmKDecayWorkspace[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{})
                                     : tla::MakeTensor(gmK[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{});
                                 auto vUpdateLayout = tla::MakeLayout<ElementVUpdate, LayoutVUpdate>(cube2Offsets.blockTokens, cube2Offsets.vBlockDim);
@@ -482,11 +480,9 @@ public:
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
                                 // step 3: h[i+1] = k.T @ v_work
-                                constexpr bool useKDecayWorkspace = kGated && scalarGated;
-                                int64_t cube2OffsetK = useKDecayWorkspace
-                                    ? cube2Offsets.kDecayWorkOffset : cube2Offsets.wkOffset;
+                                int64_t cube2OffsetK = kGated ? cube2Offsets.kDecayWorkOffset : cube2Offsets.wkOffset;
                                 int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
-                                auto tensorK = useKDecayWorkspace
+                                auto tensorK = kGated
                                     ? tla::MakeTensor(gmKDecayWorkspace[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{})
                                     : tla::MakeTensor(gmK[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{});
                                 auto vUpdateLayout = tla::MakeLayout<ElementVUpdate, LayoutVUpdate>(cube2Offsets.blockTokens, cube2Offsets.vBlockDim);
@@ -632,8 +628,6 @@ public:
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1); // preset u
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pongBaseEvent);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3); // preset KDA u stage 1
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3 + pongBaseEvent);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3); // preset g
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pongBaseEvent);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0); // preset h_update
@@ -744,8 +738,6 @@ public:
             }
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1); // preset u
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pongBaseEvent);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3); // drain KDA u stage 1
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3 + pongBaseEvent);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3); // preset g
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pongBaseEvent);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0); // drain h_update

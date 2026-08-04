@@ -1,9 +1,3 @@
-/**
- * Copyright (c) 2026 Tianjin University, Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * the BSD 3-Clause License (the "License").
- */
-
 #pragma once
 
 #include <cstdint>
@@ -11,7 +5,7 @@
 
 namespace optiling {
 
-BEGIN_TILING_DATA_DEF(ChunkKdaFwdPrepareTilingData)
+BEGIN_TILING_DATA_DEF(ChunkKdaFwdFusedA5TilingData)
 TILING_DATA_FIELD_DEF(int64_t, batch);
 TILING_DATA_FIELD_DEF(int64_t, seqNum);
 TILING_DATA_FIELD_DEF(int64_t, qHeadNum);
@@ -36,9 +30,30 @@ TILING_DATA_FIELD_DEF(int64_t, postWuUsedCoreNum);
 TILING_DATA_FIELD_DEF(int64_t, prepareAqkFp32Offset);
 TILING_DATA_FIELD_DEF(int64_t, prepareAkkFp32Offset);
 TILING_DATA_FIELD_DEF(int64_t, prepareScratchOffset);
+TILING_DATA_FIELD_DEF(int64_t, qgScaledOffset);
+TILING_DATA_FIELD_DEF(int64_t, postWuScratchOffset);
+TILING_DATA_FIELD_DEF(int64_t, outputUsedCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, outputScratchOffset);
+
+TILING_DATA_FIELD_DEF(int64_t, kNumHead);
+TILING_DATA_FIELD_DEF(int64_t, vNumHead);
+TILING_DATA_FIELD_DEF(bool, useInitialState);
+TILING_DATA_FIELD_DEF(bool, storeFinalState);
+TILING_DATA_FIELD_DEF(bool, storeQG);
+TILING_DATA_FIELD_DEF(bool, storeVNew);
+TILING_DATA_FIELD_DEF(bool, storeH);
+TILING_DATA_FIELD_DEF(int64_t, isVariedLen);
+TILING_DATA_FIELD_DEF(int64_t, shapeBatch);
+TILING_DATA_FIELD_DEF(int64_t, tokenBatch);
+TILING_DATA_FIELD_DEF(int64_t, vWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, vUpdateWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, kDecayWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, hWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, numSeqWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, numChunksWorkspaceOffset);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(ChunkKdaFwdPrepare, ChunkKdaFwdPrepareTilingData)
+REGISTER_TILING_DATA_CLASS(ChunkKdaFwdFusedA5, ChunkKdaFwdFusedA5TilingData)
 
-struct ChunkKdaFwdPrepareCompileInfo {};
+struct ChunkKdaFwdFusedA5CompileInfo {};
 } // namespace optiling

@@ -22,6 +22,7 @@ namespace l0op {
 OP_TYPE_REGISTER(ChunkKdaFwdPrepare);
 OP_TYPE_REGISTER(ChunkKdaFwdPostWu);
 OP_TYPE_REGISTER(ChunkKdaFwdFinalize);
+OP_TYPE_REGISTER(ChunkKdaFwdFusedA5);
 
 namespace {
 const aclIntArray *BuildPackedChunkMetadata(const aclIntArray *cuSeqlens,
@@ -88,6 +89,9 @@ KdaCoreOutputs KdaChunkForward(
     const aclTensor *v,
     const aclTensor *gk,
     const aclTensor *beta,
+    const aclTensor *rawG,
+    const aclTensor *aLogOptional,
+    const aclTensor *dtBiasOptional,
     const aclTensor *initialStateOptional,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
@@ -96,6 +100,14 @@ KdaCoreOutputs KdaChunkForward(
     bool outputFinalState,
     int64_t totalChunks,
     bool safeGate,
+    bool inputSequenceMajor,
+    bool useGateInKernel,
+    double lowerBound,
+    bool deferGateCumsum,
+    bool enablePrivateA5Path,
+    bool storeQG,
+    bool storeVNew,
+    bool storeH,
     const aclTensor *attnOut,
     const aclTensor *finalStateOut,
     const aclTensor *aqkOut,
@@ -108,9 +120,12 @@ KdaCoreOutputs KdaChunkForward(
     const aclTensor *hOut,
     aclOpExecutor *executor)
 {
-    L0_DFX(KdaChunkForward, q, k, v, gk, beta, initialStateOptional, cuSeqlensOptional, chunkIndicesOptional,
+    L0_DFX(KdaChunkForward, q, k, v, gk, beta, rawG, aLogOptional, dtBiasOptional,
+           initialStateOptional, cuSeqlensOptional, chunkIndicesOptional,
            scale, chunkSize,
-           outputFinalState, totalChunks, safeGate, attnOut, finalStateOut, aqkOut, akkOut,
+           outputFinalState, totalChunks, safeGate, inputSequenceMajor, useGateInKernel,
+           lowerBound, deferGateCumsum, enablePrivateA5Path, storeQG, storeVNew, storeH,
+           attnOut, finalStateOut, aqkOut, akkOut,
            wOut, uOut, qgOut, kgOut, vNewOut, hOut);
 
     const aclTensor *actualCuSeqlens = nullptr;
@@ -140,8 +155,11 @@ KdaCoreOutputs KdaChunkForward(
     }
 
     auto qgScaled = executor->AllocTensor(qgOut->GetViewShape(), qgOut->GetDataType(), Format::FORMAT_ND);
-    auto wSeed = executor->AllocTensor(wOut->GetViewShape(), wOut->GetDataType(), Format::FORMAT_ND);
-    auto uSeed = executor->AllocTensor(uOut->GetViewShape(), uOut->GetDataType(), Format::FORMAT_ND);
+    // Prepare writes the seeds before PostWU is launched. PostWU loads a complete
+    // chunk into L1 before Fixpipe overwrites the same chunk, so w/u can safely
+    // serve as their own seed storage.
+    const aclTensor *wSeed = wOut;
+    const aclTensor *uSeed = uOut;
     if (qgScaled == nullptr || wSeed == nullptr || uSeed == nullptr) {
         OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "failed to allocate KDA stage tensors.");
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -149,19 +167,44 @@ KdaCoreOutputs KdaChunkForward(
 
     const auto &qShape = q->GetViewShape();
     const auto &vShape = v->GetViewShape();
-    const int64_t logicalBatch = qShape.GetDim(0);
-    const int64_t logicalQHeads = qShape.GetDim(1);
-    const int64_t logicalSeqlen = qShape.GetDim(2);
+    const auto &aqkShape = aqkOut->GetViewShape();
+    const int64_t logicalBatch = aqkShape.GetDim(0);
+    const int64_t logicalVHeads = aqkShape.GetDim(1);
+    const int64_t logicalSeqlen = aqkShape.GetDim(2);
+    const int64_t logicalQHeads = qShape.GetDim(inputSequenceMajor ? 2 : 1);
     const int64_t logicalKDim = qShape.GetDim(3);
-    const int64_t logicalVHeads = vShape.GetDim(1);
     const int64_t logicalVDim = vShape.GetDim(3);
+
+    const bool usePrivateFusedPath =
+        enablePrivateA5Path && chunkSize == 64 && logicalKDim == 128 && logicalVDim == 128 &&
+        cuSeqlensOptional == nullptr && logicalSeqlen % chunkSize == 0;
+    if (usePrivateFusedPath) {
+        auto fusedRet = ADD_TO_LAUNCHER_LIST_AICORE(
+            ChunkKdaFwdFusedA5,
+            OP_INPUT(q, k, v, gk, rawG, aLogOptional, dtBiasOptional, beta,
+                     initialStateOptional, actualCuSeqlens, actualChunkIndices),
+            OP_OUTPUT(attnOut, finalStateOut, aqkOut, akkOut, wOut, uOut,
+                      qgOut, kgOut, vNewOut, hOut),
+            OP_ATTR(scale, chunkSize, safeGate, logicalBatch, logicalSeqlen,
+                    logicalQHeads, logicalVHeads, logicalKDim, logicalVDim,
+                    totalChunks, useGateInKernel, static_cast<float>(lowerBound),
+                    deferGateCumsum, outputFinalState, storeQG, storeVNew, storeH));
+        if (fusedRet != ACLNN_SUCCESS) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwdFusedA5 failed.");
+            return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+        }
+        return {attnOut, finalStateOut, aqkOut, akkOut, wOut, uOut, qgOut, kgOut, vNewOut, hOut};
+    }
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkKdaFwdPrepare,
-        OP_INPUT(q, k, v, gk, beta, actualCuSeqlens, actualChunkIndices),
-        OP_OUTPUT(aqkOut, akkOut, qgOut, qgScaled, wSeed, uSeed),
+        OP_INPUT(q, k, v, gk, rawG, aLogOptional, dtBiasOptional, beta,
+                 actualCuSeqlens, actualChunkIndices),
+        OP_OUTPUT(aqkOut, akkOut, qgOut, qgScaled, wSeed, uSeed, kgOut),
         OP_ATTR(scale, chunkSize, safeGate, logicalBatch, logicalSeqlen,
-                logicalQHeads, logicalVHeads, logicalKDim, logicalVDim));
+                logicalQHeads, logicalVHeads, logicalKDim, logicalVDim,
+                useGateInKernel, static_cast<float>(lowerBound), deferGateCumsum));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwdPrepare failed.");
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
@@ -172,7 +215,7 @@ KdaCoreOutputs KdaChunkForward(
         OP_INPUT(k, gk, wSeed, akkOut, uSeed, actualCuSeqlens, actualChunkIndices),
         OP_OUTPUT(wOut, uOut, kgOut, vNewOut),
         OP_ATTR(chunkSize, logicalBatch, logicalSeqlen, logicalQHeads,
-                logicalVHeads, logicalKDim, logicalVDim));
+                logicalVHeads, logicalKDim, logicalVDim, safeGate));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwdPostWu failed.");
         return {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};

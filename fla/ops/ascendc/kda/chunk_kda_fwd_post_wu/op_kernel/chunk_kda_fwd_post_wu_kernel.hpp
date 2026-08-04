@@ -92,7 +92,12 @@ constexpr uint32_t KDA_POST_PIPELINE_L1_SLOT_BYTES = 24 * 1024;
 constexpr uint32_t KDA_POST_PIPELINE_L1_A_BYTES = 64 * 64 * sizeof(uint16_t);
 constexpr uint32_t KDA_POST_PIPELINE_L1_B_BYTES = 64 * 128 * sizeof(uint16_t);
 constexpr uint32_t KDA_POST_PIPELINE_L1_U_SLOT_BYTES = 64 * 128 * sizeof(uint16_t);
+constexpr uint32_t KDA_POST_PIPELINE_L0_A_SLOT_BYTES = 64 * 64 * sizeof(uint16_t);
+constexpr uint32_t KDA_POST_PIPELINE_L0_B_SLOT_BYTES = 64 * 256 * sizeof(uint16_t);
+constexpr uint32_t KDA_POST_PIPELINE_L0_C_SLOT_BYTES = 64 * 256 * sizeof(float);
 constexpr uint16_t KDA_POST_PIPELINE_STAGE_COUNT = 2;
+constexpr uint16_t KDA_POST_FUSED_BATCH_TASKS = 4;
+constexpr uint16_t KDA_POST_HEAD_PAIR_LANES = 2;
 constexpr uint16_t KDA_POST_PIPELINE_U_EVENT = KDA_POST_EVENT_FIX;
 constexpr bool KDA_ENABLE_POST_AIC_PIPELINE = true;
 
@@ -320,6 +325,7 @@ public:
         scale_ = tiling.scale;
         hasInitial_ = tiling.hasInitialState;
         isVarLen_ = tiling.isVarLen;
+        inputSequenceMajor_ = tiling.inputSequenceMajor;
         usedCoreNum_ = tiling.postWuUsedCoreNum;
         if ASCEND_IS_AIV {
             uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
@@ -349,6 +355,60 @@ public:
         ProcessPostAic();
     }
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    __aicore__ inline void ProcessPreparedHeadPairBatchA5(
+        const uint64_t *batchB, const uint64_t *batchHvBase,
+        const uint64_t *batchStart, uint16_t taskCount)
+    {
+        if (taskCount == 0) {
+            return;
+        }
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
+        Catlass::Arch::Resource<KdaArchTag> resource;
+        const uint16_t itemCount = taskCount * KDA_POST_HEAD_PAIR_LANES;
+        uint16_t slot = 0;
+        uint16_t usedSlotCount = 1;
+        uint16_t taskIdx = 0;
+        uint16_t lane = 0;
+        uint64_t b = batchB[taskIdx];
+        uint64_t hv = batchHvBase[taskIdx] + lane;
+        uint64_t start = batchStart[taskIdx];
+        InitializePostWuPipelineEvents();
+        PrefetchPostWuPipelineA5(resource, slot, b, hv, start, false);
+        PrefetchPostWuPipelineU(resource, slot, b, hv, start, false);
+
+        for (uint16_t item = 0; item < itemCount; ++item) {
+            const uint16_t nextItem = item + 1;
+            if (nextItem < itemCount) {
+                const uint16_t nextTaskIdx = nextItem / KDA_POST_HEAD_PAIR_LANES;
+                const uint16_t nextLane = nextItem % KDA_POST_HEAD_PAIR_LANES;
+                const uint16_t nextSlot = slot ^ 1;
+                const bool reuseSlot = nextItem >= KDA_POST_PIPELINE_STAGE_COUNT;
+                PrefetchPostWuPipelineA5(
+                    resource, nextSlot, batchB[nextTaskIdx],
+                    batchHvBase[nextTaskIdx] + nextLane, batchStart[nextTaskIdx], reuseSlot);
+                PrefetchPostWuPipelineU(
+                    resource, nextSlot, batchB[nextTaskIdx],
+                    batchHvBase[nextTaskIdx] + nextLane, batchStart[nextTaskIdx], reuseSlot);
+                if (!reuseSlot) {
+                    ++usedSlotCount;
+                }
+            }
+
+            ComputePrefetchedPostWuPipelineA5(resource, slot, b, hv, start);
+            if (nextItem < itemCount) {
+                taskIdx = nextItem / KDA_POST_HEAD_PAIR_LANES;
+                lane = nextItem % KDA_POST_HEAD_PAIR_LANES;
+                b = batchB[taskIdx];
+                hv = batchHvBase[taskIdx] + lane;
+                start = batchStart[taskIdx];
+                slot ^= 1;
+            }
+        }
+        FinalizePostWuPipelineEvents(usedSlotCount);
+    }
+#endif
+
 private:
     __aicore__ inline void AllocVectorEvents()
     {
@@ -377,6 +437,9 @@ private:
 
     __aicore__ inline uint64_t QOffset(uint64_t b, uint64_t h, uint64_t t, uint64_t d) const
     {
+        if (inputSequenceMajor_) {
+            return ((b * T_ + t) * H_ + h) * K_ + d;
+        }
         return ((b * H_ + h) * T_ + t) * K_ + d;
     }
 
@@ -490,6 +553,28 @@ private:
         }
         DataCopyParams params{1, static_cast<uint16_t>(rowBytes), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
+        DataCopyPad(dst, src[offset], params, padParams);
+    }
+
+    template <typename CopyT>
+    __aicore__ inline void CopyRowsIn(LocalTensor<CopyT> &dst, GlobalTensor<CopyT> &src,
+                                      uint64_t offset, uint64_t rows, uint64_t cols,
+                                      uint64_t rowStride)
+    {
+        if (rows == 0 || cols == 0) {
+            return;
+        }
+        if (rowStride == cols) {
+            CopyVectorIn(dst, src, offset, rows * cols);
+            return;
+        }
+        DataCopyExtParams params{
+            static_cast<uint16_t>(rows),
+            static_cast<uint32_t>(cols * sizeof(CopyT)),
+            static_cast<uint32_t>((rowStride - cols) * sizeof(CopyT)),
+            0,
+            0};
+        DataCopyPadExtParams<CopyT> padParams{false, 0, 0, 0};
         DataCopyPad(dst, src[offset], params, padParams);
     }
 
@@ -744,6 +829,16 @@ private:
         for (uint16_t slot = 0; slot < usedSlotCount; ++slot) {
             WaitFlag<HardEvent::MTE1_MTE2>(KDA_POST_EVENT + slot);
             WaitFlag<HardEvent::MTE1_MTE2>(KDA_POST_PIPELINE_U_EVENT + slot);
+            WaitFlag<HardEvent::M_MTE1>(KDA_POST_EVENT + slot);
+            WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT + slot);
+        }
+    }
+
+    __aicore__ inline void InitializePostWuPipelineEvents()
+    {
+        for (uint16_t slot = 0; slot < KDA_POST_PIPELINE_STAGE_COUNT; ++slot) {
+            SetFlag<HardEvent::M_MTE1>(KDA_POST_EVENT + slot);
+            SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT + slot);
         }
     }
 
@@ -846,6 +941,7 @@ private:
 
         constexpr uint32_t m = 64;
         constexpr uint32_t n = 128;
+        constexpr uint32_t packedN = 256;
         constexpr uint32_t k = 64;
         auto layoutC = tla::MakeLayout<T, LayoutTagC>(m, n);
         auto tensorWOut = tla::MakeTensor(
@@ -863,30 +959,34 @@ private:
         uint32_t uOffset = KDA_POST_PIPELINE_STAGE_COUNT * KDA_POST_PIPELINE_L1_SLOT_BYTES +
                            static_cast<uint32_t>(slot) * KDA_POST_PIPELINE_L1_U_SLOT_BYTES;
         LocalTensor<T> l1U = resource.l1Buf.template GetBufferByByte<T>(uOffset);
-        LocalTensor<T> l0A = resource.l0ABuf.template GetBufferByByte<T>(0);
-        LocalTensor<T> l0BW = resource.l0BBuf.template GetBufferByByte<T>(0);
-        LocalTensor<T> l0BU = resource.l0BBuf.template GetBufferByByte<T>(KDA_POST_PIPELINE_L1_B_BYTES);
-        LocalTensor<float> l0C = resource.l0CBuf.template GetBufferByByte<float>(0);
+        LocalTensor<T> l0A = resource.l0ABuf.template GetBufferByByte<T>(
+            static_cast<uint32_t>(slot) * KDA_POST_PIPELINE_L0_A_SLOT_BYTES);
+        LocalTensor<T> l0B = resource.l0BBuf.template GetBufferByByte<T>(
+            static_cast<uint32_t>(slot) * KDA_POST_PIPELINE_L0_B_SLOT_BYTES);
+        LocalTensor<float> l0C = resource.l0CBuf.template GetBufferByByte<float>(
+            static_cast<uint32_t>(slot) * KDA_POST_PIPELINE_L0_C_SLOT_BYTES);
 
         auto layoutL1A = tla::MakeLayout<T, LayoutTagL1A>(m, k);
         auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(k, n);
         auto layoutL0A = tla::MakeLayout<T, LayoutTagL0A>(m, k);
-        auto layoutL0B = tla::MakeLayout<T, LayoutTagL0B>(k, n);
-        auto layoutL0C = tla::MakeLayoutL0C(m, n);
+        auto layoutL0B = tla::MakeLayout<T, LayoutTagL0B>(k, packedN);
+        auto layoutL0C = tla::MakeLayoutL0C(m, packedN);
         auto tensorL1A = tla::MakeTensor(l1A, layoutL1A, Catlass::Arch::PositionL1{});
         auto tensorL1W = tla::MakeTensor(l1W, layoutL1B, Catlass::Arch::PositionL1{});
         auto tensorL1U = tla::MakeTensor(l1U, layoutL1B, Catlass::Arch::PositionL1{});
         auto tensorL0A = tla::MakeTensor(l0A, layoutL0A, Catlass::Arch::PositionL0A{});
-        auto tensorL0BW = tla::MakeTensor(l0BW, layoutL0B, Catlass::Arch::PositionL0B{});
-        auto tensorL0BU = tla::MakeTensor(l0BU, layoutL0B, Catlass::Arch::PositionL0B{});
+        auto tensorL0B = tla::MakeTensor(l0B, layoutL0B, Catlass::Arch::PositionL0B{});
         auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
         auto tileL1A = GetTile(tensorL1A, tla::MakeCoord(0, 0), tla::MakeShape(m, k));
         auto tileL1W = GetTile(tensorL1W, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
         auto tileL1U = GetTile(tensorL1U, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
         auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0), tla::MakeShape(m, k));
-        auto tileL0BW = GetTile(tensorL0BW, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
-        auto tileL0BU = GetTile(tensorL0BU, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
-        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
+        auto tileL0BW = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(k, n));
+        auto tileL0BU = GetTile(tensorL0B, tla::MakeCoord(0, n), tla::MakeShape(k, n));
+        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(k, packedN));
+        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, packedN));
+        auto tileL0CW = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
+        auto tileL0CU = GetTile(tensorL0C, tla::MakeCoord(0, n), tla::MakeShape(m, n));
 
         CopyL1ToL0A copyL1ToL0A;
         CopyL1ToL0B copyL1ToL0B;
@@ -896,31 +996,23 @@ private:
         uint16_t pipelineEvent = KDA_POST_EVENT + slot;
         uint16_t uPipelineEvent = KDA_POST_PIPELINE_U_EVENT + slot;
         WaitFlag<HardEvent::MTE2_MTE1>(pipelineEvent);
+        WaitFlag<HardEvent::MTE2_MTE1>(uPipelineEvent);
+        WaitFlag<HardEvent::M_MTE1>(pipelineEvent);
         copyL1ToL0A(tileL0A, tileL1A);
         copyL1ToL0B(tileL0BW, tileL1W);
-        SetFlag<HardEvent::MTE1_M>(KDA_POST_EVENT);
-        SetFlag<HardEvent::MTE1_MTE2>(pipelineEvent);
-        WaitFlag<HardEvent::MTE1_M>(KDA_POST_EVENT);
-        tileMmad(tileL0C, tileL0A, tileL0BW, m, n, k, true, 0);
-        SetFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
-
-        WaitFlag<HardEvent::MTE2_MTE1>(uPipelineEvent);
         copyL1ToL0B(tileL0BU, tileL1U);
-        SetFlag<HardEvent::MTE1_M>(KDA_POST_EVENT_NEXT);
+        SetFlag<HardEvent::MTE1_M>(pipelineEvent);
+        SetFlag<HardEvent::MTE1_MTE2>(pipelineEvent);
         SetFlag<HardEvent::MTE1_MTE2>(uPipelineEvent);
-        WaitFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
-        copyL0CToDst(blockWOut, tensorL0C);
-        SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
-
-        WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
-        WaitFlag<HardEvent::MTE1_M>(KDA_POST_EVENT_NEXT);
-        tileMmad(tileL0C, tileL0A, tileL0BU, m, n, k, true, 0);
-        SetFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
-        WaitFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
-        copyL0CToDst(blockUOut, tensorL0C);
-        PipeBarrier<PIPE_ALL>();
-        SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
-        WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
+        WaitFlag<HardEvent::MTE1_M>(pipelineEvent);
+        WaitFlag<HardEvent::FIX_M>(pipelineEvent);
+        tileMmad(tileL0C, tileL0A, tileL0B, m, packedN, k, true, 0);
+        SetFlag<HardEvent::M_MTE1>(pipelineEvent);
+        SetFlag<HardEvent::M_FIX>(pipelineEvent);
+        WaitFlag<HardEvent::M_FIX>(pipelineEvent);
+        copyL0CToDst(blockWOut, tileL0CW);
+        copyL0CToDst(blockUOut, tileL0CU);
+        SetFlag<HardEvent::FIX_M>(pipelineEvent);
     }
 #endif
 
@@ -1061,7 +1153,8 @@ private:
         uint64_t elems = rows * K_;
         LocalTensor<T> kStage = TypicalGateK(slot);
         LocalTensor<GK_T> gateStage = TypicalGateG(slot);
-        DataCopy(kStage, k_[QOffset(b, h, token, 0)], static_cast<uint32_t>(elems));
+        CopyRowsIn(kStage, k_, QOffset(b, h, token, 0), rows, K_,
+                   inputSequenceMajor_ ? H_ * K_ : K_);
         DataCopy(gateStage, gk_[KVOffset(b, hv, token, 0, K_)], static_cast<uint32_t>(elems));
         SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
     }
@@ -1181,8 +1274,8 @@ private:
             LocalTensor<T> kStage = TypicalGatePipelineK(slot);
             LocalTensor<float> gateStage = TypicalGatePipelineG(slot);
             LocalTensor<float> refStage = TypicalGatePipelineRef(slot);
-            DataCopy(kStage, k_[QOffset(b, h, start + rowBegin, 0)],
-                     static_cast<uint32_t>(elems));
+            CopyRowsIn(kStage, k_, QOffset(b, h, start + rowBegin, 0), rowEnd - rowBegin, K_,
+                       inputSequenceMajor_ ? H_ * K_ : K_);
             DataCopy(gateStage, gk_[KVOffset(b, hv, start + rowBegin, 0, K_)],
                      static_cast<uint32_t>(elems));
             DataCopy(refStage, gk_[KVOffset(b, hv, start + curT - 1, 0, K_)],
@@ -1278,7 +1371,8 @@ private:
             const uint64_t gateOffsetBytes = (typedOffset + elemCount) * sizeof(T);
             LocalTensor<GK_T> gateTyped = vecBuf_.Get<GK_T>()[
                 (gateOffsetBytes + sizeof(GK_T) - 1) / sizeof(GK_T)];
-            CopyVectorIn(typedLocal, k_, QOffset(b, h, token, 0), elemCount);
+            CopyRowsIn(typedLocal, k_, QOffset(b, h, token, 0), tileRows, K_,
+                       inputSequenceMajor_ ? H_ * K_ : K_);
             LoadAsFloatVector(gk_, KVOffset(b, hv, token, 0, K_), gLocal, gateTyped, elemCount);
             Cast(kLocal, typedLocal, RoundMode::CAST_NONE, static_cast<uint32_t>(elemCount));
             PipeBarrier<PIPE_V>();
@@ -1645,6 +1739,23 @@ private:
         uint64_t taskBegin = 0;
         uint64_t taskEnd = 0;
         GetHeadMajorTaskRange(coreIdx, coreNum, taskNum, taskBegin, taskEnd);
+        if (taskEnd - taskBegin < KDA_POST_PIPELINE_STAGE_COUNT) {
+            for (uint64_t task = taskBegin; task < taskEnd; ++task) {
+                uint64_t seq = 0;
+                uint64_t b = 0;
+                uint64_t h = 0;
+                uint64_t hv = 0;
+                uint64_t chunkIdx = 0;
+                uint64_t start = 0;
+                uint64_t end = 0;
+                if (ResolveHeadMajorChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
+                    (void)seq;
+                    (void)h;
+                    ProcessChunkPostAic(b, hv, chunkIdx, start, end);
+                }
+            }
+            return;
+        }
         uint64_t task = taskBegin;
         Catlass::Arch::Resource<KdaArchTag> resource;
 
@@ -1670,6 +1781,7 @@ private:
 
             uint16_t slot = 0;
             uint16_t usedSlotCount = 1;
+            InitializePostWuPipelineEvents();
             PrefetchPostWuPipelineA5(resource, slot, b, hv, start, false);
             PrefetchPostWuPipelineU(resource, slot, b, hv, start, false);
             while (true) {
@@ -1782,6 +1894,7 @@ private:
     bool isVarLen_ = false;
     bool hasChunkIndices_ = false;
     bool isAivOnly_ = false;
+    bool inputSequenceMajor_ = false;
     uint64_t usedCoreNum_ = 1;
     uint64_t solveCoreIdx_ = 0;
     __gm__ int64_t *chunkIndicesAddr_ = nullptr;

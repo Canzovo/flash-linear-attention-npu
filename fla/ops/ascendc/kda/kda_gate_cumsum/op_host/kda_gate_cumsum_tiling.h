@@ -26,8 +26,10 @@ TILING_DATA_FIELD_DEF(int64_t, hasDtBias);
 TILING_DATA_FIELD_DEF(int64_t, dataType);
 TILING_DATA_FIELD_DEF(int64_t, useGateInKernel);
 TILING_DATA_FIELD_DEF(int64_t, safeGate);
+TILING_DATA_FIELD_DEF(int64_t, inputSequenceMajor);
 TILING_DATA_FIELD_DEF(float, lowerBound);
 TILING_DATA_FIELD_DEF(int64_t, usedCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, skipKernel);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(KdaGateCumsum, KdaGateCumsumTilingData)

@@ -161,6 +161,7 @@ public:
         hasCuSeqlens_ = tiling.hasCuSeqlens != 0;
         hasALog_ = tiling.hasALog != 0;
         hasDtBias_ = tiling.hasDtBias != 0;
+        inputSequenceMajor_ = tiling.inputSequenceMajor != 0;
         lowerBound_ = tiling.lowerBound;
         usedCoreNum_ = static_cast<uint64_t>(tiling.usedCoreNum);
         maxChunks_ = (t_ + chunkSize_ - 1) / chunkSize_;
@@ -214,7 +215,21 @@ private:
         pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
     }
 
-    __aicore__ inline uint64_t Offset(uint64_t b, uint64_t t, uint64_t hv, uint64_t k) const
+    __aicore__ inline uint64_t InputOffset(uint64_t b, uint64_t t, uint64_t hv, uint64_t k) const
+    {
+        if (inputSequenceMajor_) {
+            if (rank_ == 4) {
+                return ((b * t_ + t) * hv_ + hv) * k_ + k;
+            }
+            return (t * hv_ + hv) * k_ + k;
+        }
+        if (rank_ == 4) {
+            return ((b * hv_ + hv) * t_ + t) * k_ + k;
+        }
+        return (hv * t_ + t) * k_ + k;
+    }
+
+    __aicore__ inline uint64_t OutputOffset(uint64_t b, uint64_t t, uint64_t hv, uint64_t k) const
     {
         if (rank_ == 4) {
             return ((b * hv_ + hv) * t_ + t) * k_ + k;
@@ -257,6 +272,23 @@ private:
             DataCopyParams params{1, static_cast<uint16_t>(rowBytes), 0, 0};
             DataCopyPad(dst[offset], src, params);
         }
+    }
+
+    __aicore__ inline void CopyGateRowsIn(LocalTensor<T> &dst, uint64_t b, uint64_t start,
+                                          uint64_t hv, uint64_t rows)
+    {
+        if (!inputSequenceMajor_) {
+            CopyVectorIn(dst, g_, InputOffset(b, start, hv, 0), rows * k_);
+            return;
+        }
+        DataCopyExtParams params{
+            static_cast<uint16_t>(rows),
+            static_cast<uint32_t>(k_ * sizeof(T)),
+            static_cast<uint32_t>((hv_ - 1) * k_ * sizeof(T)),
+            0,
+            0};
+        DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
+        DataCopyPad(dst, g_[InputOffset(b, start, hv, 0)], params, padParams);
     }
 
     __aicore__ inline void PrefetchGateRow(uint64_t offset, uint32_t slot)
@@ -442,7 +474,7 @@ private:
             return;
         }
 
-        PrefetchGateRow(Offset(b, start, hv, 0), 0);
+        PrefetchGateRow(InputOffset(b, start, hv, 0), 0);
 
         for (uint64_t rowIdx = 0; rowIdx < rows; ++rowIdx) {
             uint64_t token = start + rowIdx;
@@ -454,7 +486,7 @@ private:
                 if (rowIdx >= 1) {
                     WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_[nextSlot]);
                 }
-                PrefetchGateRow(Offset(b, token + 1, hv, 0), nextSlot);
+                PrefetchGateRow(InputOffset(b, token + 1, hv, 0), nextSlot);
             }
 
             uint32_t outputSlot = slot;
@@ -503,7 +535,7 @@ private:
             SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_[slot]);
             SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[outputSlot]);
             WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[outputSlot]);
-            CopyFloatVectorOut(gk_, Offset(b, token, hv, 0), output, k_);
+            CopyFloatVectorOut(gk_, OutputOffset(b, token, hv, 0), output, k_);
             SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[outputSlot]);
         }
 
@@ -549,7 +581,7 @@ private:
         constexpr uint32_t elems = GATE_BULK_ELEMENTS;
         LocalTensor<float> input = chunkBuf_.Get<float>();
         LocalTensor<float> output = chunkBuf_.Get<float>()[GATE_BULK_ELEMENTS];
-        CopyFloatVectorIn(input, g_, Offset(b, start, hv, 0), elems);
+        CopyGateRowsIn(input, b, start, hv, GATE_BULK_ROWS);
         SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
 
@@ -575,7 +607,7 @@ private:
 
         SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
         WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
-        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), output, elems);
+        CopyFloatVectorOut(gk_, OutputOffset(b, start, hv, 0), output, elems);
         SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
@@ -593,7 +625,7 @@ private:
         uint32_t elems = static_cast<uint32_t>(rows * k_);
         LocalTensor<float> input = chunkBuf_.Get<float>();
         LocalTensor<float> output = chunkBuf_.Get<float>()[GATE_BULK_ELEMENTS];
-        CopyFloatVectorIn(input, g_, Offset(b, start, hv, 0), elems);
+        CopyGateRowsIn(input, b, start, hv, rows);
         SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
         LocalTensor<float> bias = biasBuf_.Get<float>();
@@ -609,7 +641,7 @@ private:
         PipeBarrier<PIPE_V>();
         SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
         WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
-        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), output, elems);
+        CopyFloatVectorOut(gk_, OutputOffset(b, start, hv, 0), output, elems);
         SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
@@ -624,7 +656,7 @@ private:
         }
         uint32_t elems = static_cast<uint32_t>(rows * k_);
         LocalTensor<float> buffer0 = chunkBuf_.Get<float>();
-        CopyFloatVectorIn(buffer0, g_, Offset(b, start, hv, 0), elems);
+        CopyGateRowsIn(buffer0, b, start, hv, rows);
         SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[0]);
         AccumulateGateChunk128Regbase(
@@ -633,7 +665,7 @@ private:
         PipeBarrier<PIPE_V>();
         SetFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
         WaitFlag<HardEvent::V_MTE3>(outputVToMte3Event_[0]);
-        CopyFloatVectorOut(gk_, Offset(b, start, hv, 0), buffer0, elems);
+        CopyFloatVectorOut(gk_, OutputOffset(b, start, hv, 0), buffer0, elems);
         SetFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
         SetFlag<HardEvent::MTE3_V>(outputMte3ToVEvent_[0]);
@@ -675,6 +707,7 @@ private:
     bool hasCuSeqlens_ = false;
     bool hasALog_ = false;
     bool hasDtBias_ = false;
+    bool inputSequenceMajor_ = false;
     float expA_ = 1.0f;
     float lowerBound_ = -5.0f;
     uint64_t usedCoreNum_ = 1;
@@ -712,6 +745,9 @@ extern "C" __global__ __aicore__ void kda_gate_cumsum(GM_ADDR g, GM_ADDR aLog, G
     (void)workspace;
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     GET_TILING_DATA(tilingData, tiling);
+    if (tilingData.skipKernel != 0) {
+        return;
+    }
     TPipe pipe;
     if (tilingData.dataType == 2) {
         DispatchKdaGateCumsum<float>(g, aLog, dtBias, cuSeqlens, gk, tilingData, &pipe);

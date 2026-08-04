@@ -17,9 +17,13 @@ using KdaCoreOutputs = std::array<const aclTensor *, 10>;
 
 KdaCoreOutputs KdaChunkForward(
     const aclTensor *q, const aclTensor *k, const aclTensor *v, const aclTensor *gk, const aclTensor *beta,
+    const aclTensor *rawG, const aclTensor *aLogOptional, const aclTensor *dtBiasOptional,
     const aclTensor *initialStateOptional, const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional, double scale, int64_t chunkSize, bool outputFinalState,
-    int64_t totalChunks, bool safeGate, const aclTensor *attnOut,
+    int64_t totalChunks, bool safeGate, bool inputSequenceMajor, bool useGateInKernel,
+    double lowerBound, bool deferGateCumsum, bool enablePrivateA5Path,
+    bool storeQG, bool storeVNew, bool storeH,
+    const aclTensor *attnOut,
     const aclTensor *finalStateOut, const aclTensor *aqkOut,
     const aclTensor *akkOut, const aclTensor *wOut, const aclTensor *uOut, const aclTensor *qgOut,
     const aclTensor *kgOut, const aclTensor *vNewOut, const aclTensor *hOut, aclOpExecutor *executor);

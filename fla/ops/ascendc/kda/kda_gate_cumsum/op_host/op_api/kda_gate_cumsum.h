@@ -20,6 +20,7 @@ const std::array<const aclTensor *, 1> KdaGateCumsum(
     bool useGateInKernel,
     bool safeGate,
     double lowerBound,
+    bool deferToPrepare,
     const aclTensor *gkOut,
     aclOpExecutor *executor);
 } // namespace l0op

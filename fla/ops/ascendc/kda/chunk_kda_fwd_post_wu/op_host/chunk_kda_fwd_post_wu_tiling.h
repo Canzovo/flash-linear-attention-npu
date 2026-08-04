@@ -24,6 +24,8 @@ TILING_DATA_FIELD_DEF(int64_t, totalChunks);
 TILING_DATA_FIELD_DEF(float, scale);
 TILING_DATA_FIELD_DEF(bool, hasInitialState);
 TILING_DATA_FIELD_DEF(bool, isVarLen);
+TILING_DATA_FIELD_DEF(bool, inputSequenceMajor);
+TILING_DATA_FIELD_DEF(bool, skipPostWuAiv);
 TILING_DATA_FIELD_DEF(int64_t, postWuUsedCoreNum);
 TILING_DATA_FIELD_DEF(int64_t, postWuScratchOffset);
 END_TILING_DATA_DEF;

@@ -63,6 +63,7 @@ public:
         this->Attr("logical_v_heads").AttrType(REQUIRED).Int(1);
         this->Attr("logical_k_dim").AttrType(REQUIRED).Int(1);
         this->Attr("logical_v_dim").AttrType(REQUIRED).Int(1);
+        this->Attr("safe_gate").AttrType(REQUIRED).Bool(false);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

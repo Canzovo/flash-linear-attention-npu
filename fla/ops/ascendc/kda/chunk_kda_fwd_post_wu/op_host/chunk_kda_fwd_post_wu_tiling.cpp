@@ -22,6 +22,7 @@ constexpr size_t ATTR_LOGICAL_Q_HEADS_IDX = 3;
 constexpr size_t ATTR_LOGICAL_V_HEADS_IDX = 4;
 constexpr size_t ATTR_LOGICAL_K_DIM_IDX = 5;
 constexpr size_t ATTR_LOGICAL_V_DIM_IDX = 6;
+constexpr size_t ATTR_SAFE_GATE_IDX = 7;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_BATCH_MODE = 1;
 
@@ -62,8 +63,9 @@ bool ResolveSequenceInfo(gert::TilingContext *context, int64_t chunkSize, int64_
 
 ge::graphStatus Tiling4ChunkKdaFwdPostWu(gert::TilingContext *context)
 {
+    auto kDesc = context->GetInputDesc(INPUT_K_IDX);
     auto attrPtr = context->GetAttrs();
-    if (attrPtr == nullptr) {
+    if (kDesc == nullptr || attrPtr == nullptr) {
         return ge::GRAPH_FAILED;
     }
     const int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
@@ -73,10 +75,20 @@ ge::graphStatus Tiling4ChunkKdaFwdPostWu(gert::TilingContext *context)
     const int64_t vHeads = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_HEADS_IDX));
     const int64_t kDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_K_DIM_IDX));
     const int64_t vDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_DIM_IDX));
+    const bool safeGate = *(attrPtr->GetAttrPointer<bool>(ATTR_SAFE_GATE_IDX));
     if (batch <= 0 || seqlen <= 0 || qHeads <= 0 || vHeads <= 0 ||
         kDim <= 0 || vDim <= 0 || vHeads % qHeads != 0) {
         return ge::GRAPH_FAILED;
     }
+    const auto kShapePtr = context->GetInputShape(INPUT_K_IDX);
+    if (kShapePtr == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    const auto &kShape = kShapePtr->GetStorageShape();
+    const bool inputSequenceMajor =
+        kShape.GetDimNum() == 4 && kShape.GetDim(0) == batch &&
+        kShape.GetDim(1) == seqlen && kShape.GetDim(2) == qHeads &&
+        kShape.GetDim(3) == kDim;
     const bool hasCuSeqlens = context->GetOptionalInputTensor(INPUT_CU_SEQLENS_IDX) != nullptr;
     const auto chunkMetadata = context->GetOptionalInputShape(INPUT_CHUNK_INDICES_IDX);
     const int64_t totalChunks = hasCuSeqlens
@@ -90,6 +102,11 @@ ge::graphStatus Tiling4ChunkKdaFwdPostWu(gert::TilingContext *context)
 
     const auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     const uint32_t blockDim = platform.GetCoreNumAic() == 0 ? 1 : platform.GetCoreNumAic();
+    const bool skipPostWuAiv =
+        platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950 &&
+        kDesc->GetDataType() == ge::DT_BF16 && safeGate && !isVarLen &&
+        chunkSize == 64 && kDim == 128 && vDim == 128 && vHeads % 2 == 0 &&
+        seqlen % chunkSize == 0;
     context->SetBlockDim(blockDim);
     const uint64_t scratchBytes = static_cast<uint64_t>(batch) *
                                   static_cast<uint64_t>(vHeads) *
@@ -110,6 +127,8 @@ ge::graphStatus Tiling4ChunkKdaFwdPostWu(gert::TilingContext *context)
     tiling.set_scale(1.0f);
     tiling.set_hasInitialState(false);
     tiling.set_isVarLen(isVarLen);
+    tiling.set_inputSequenceMajor(inputSequenceMajor);
+    tiling.set_skipPostWuAiv(skipPostWuAiv);
     tiling.set_postWuUsedCoreNum(blockDim);
     tiling.set_postWuScratchOffset(0);
 

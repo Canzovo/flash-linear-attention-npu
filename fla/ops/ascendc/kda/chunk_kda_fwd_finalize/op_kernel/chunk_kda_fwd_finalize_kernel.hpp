@@ -715,7 +715,7 @@ private:
 
     __aicore__ inline void PrefetchOutputTileA5(Catlass::Arch::Resource<KdaArchTag> &resource, uint32_t slot,
                                                 uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
-                                                uint64_t curT, uint64_t nOffset)
+                                                uint64_t curT, uint64_t nOffset, bool reuseSlot)
     {
         using ElementA = T;
         using ElementB = T;
@@ -780,6 +780,9 @@ private:
         auto tensorL1B1 = tla::MakeTensor(
             l1B1, tla::MakeLayout<ElementB, LayoutTagL1B>(curT, curN), Catlass::Arch::PositionL1{});
 
+        if (reuseSlot) {
+            WaitFlag<HardEvent::MTE1_MTE2>(slot);
+        }
         copyGmToL1A0(tensorL1A0, blockQ);
         copyGmToL1B0(tensorL1B0, blockH);
         copyGmToL1A1(tensorL1A1, blockAqk);
@@ -809,6 +812,7 @@ private:
 
         constexpr uint16_t kMte1Event = 0;
         constexpr uint16_t kMmadEvent = 0;
+        constexpr uint16_t kFixEvent = 0;
         constexpr uint32_t kL1SlotBytes = 96 * 1024;
         constexpr uint32_t kL1A0Offset = 0;
         constexpr uint32_t kL1B0Offset = 64 * 128 * sizeof(ElementA);
@@ -874,6 +878,9 @@ private:
         TileMmad tileMmad;
 
         WaitFlag<HardEvent::MTE2_MTE1>(slot);
+        if constexpr (IsSameType<T, bfloat16_t>::value) {
+            WaitFlag<HardEvent::FIX_M>(kFixEvent);
+        }
         copyL1ToL0A(tileL0A0, tileL1A0);
         copyL1ToL0B(tileL0B0, tileL1B0);
         SetFlag<HardEvent::MTE1_M>(kMte1Event);
@@ -881,18 +888,33 @@ private:
         tileMmad(tileL0C, tileL0A0, tileL0B0, curM, curN, static_cast<uint32_t>(K_), true, 0b11);
         SetFlag<HardEvent::M_MTE1>(kMmadEvent);
         WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
-        copyL0CToDst(blockO, tileL0C, 0b11);
-        PipeBarrier<PIPE_ALL>();
+        if constexpr (!IsSameType<T, bfloat16_t>::value) {
+            copyL0CToDst(blockO, tileL0C, 0b11);
+            PipeBarrier<PIPE_ALL>();
+        }
 
         copyL1ToL0A(tileL0A1, tileL1A1);
         copyL1ToL0B(tileL0B1, tileL1B1);
         SetFlag<HardEvent::MTE1_M>(kMte1Event);
+        SetFlag<HardEvent::MTE1_MTE2>(slot);
         WaitFlag<HardEvent::MTE1_M>(kMte1Event);
-        tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT), true, 0b11);
-        SetFlag<HardEvent::M_MTE1>(kMmadEvent);
-        WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
-        copyL0CToDst(blockLocal, tileL0C, 0b11);
-        PipeBarrier<PIPE_ALL>();
+        tileMmad(tileL0C, tileL0A1, tileL0B1, curM, curN, static_cast<uint32_t>(curT),
+                 !IsSameType<T, bfloat16_t>::value, 0b11);
+        if constexpr (IsSameType<T, bfloat16_t>::value) {
+            SetFlag<HardEvent::M_FIX>(kFixEvent);
+            WaitFlag<HardEvent::M_FIX>(kFixEvent);
+            auto fixParams = FixpipeParamsV220(
+                curN, curM, curN, static_cast<uint32_t>(HV_ * V_), false);
+            fixParams.quantPre = QuantMode_t::F322BF16;
+            Fixpipe<T, float, CFG_ROW_MAJOR>(
+                vNew_[OutputOffset(b, hv, start, nOffset)], l0C, fixParams);
+            SetFlag<HardEvent::FIX_M>(kFixEvent);
+        } else {
+            SetFlag<HardEvent::M_MTE1>(kMmadEvent);
+            WaitFlag<HardEvent::M_MTE1>(kMmadEvent);
+            copyL0CToDst(blockLocal, tileL0C, 0b11);
+            PipeBarrier<PIPE_ALL>();
+        }
     }
 
     __aicore__ inline void ProcessOutAicPipelinedA5()
@@ -921,7 +943,11 @@ private:
         Catlass::Arch::Resource<KdaArchTag> resource;
         uint64_t nOffset = 0;
         uint32_t slot = 0;
-        PrefetchOutputTileA5(resource, slot, b, hv, chunkIdx, start, end - start, nOffset);
+        if constexpr (IsSameType<T, bfloat16_t>::value) {
+            SetFlag<HardEvent::FIX_M>(0);
+        }
+        PrefetchOutputTileA5(resource, slot, b, hv, chunkIdx, start, end - start, nOffset, false);
+        uint64_t outputTileIdx = 0;
 
         while (true) {
             uint64_t nextTask = currentTask;
@@ -948,15 +974,19 @@ private:
             const uint32_t nextSlot = slot ^ 1U;
             if (hasNext) {
                 PrefetchOutputTileA5(resource, nextSlot, nextB, nextHv, nextChunkIdx, nextStart,
-                                     nextEnd - nextStart, nextNOffset);
+                                     nextEnd - nextStart, nextNOffset,
+                                     outputTileIdx + 1 >= 2);
             }
             ComputePrefetchedOutputTileA5(resource, slot, b, hv, start, end - start, nOffset);
-            if (nOffset + 128 >= V_) {
-                Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+            if constexpr (!IsSameType<T, bfloat16_t>::value) {
+                if (nOffset + 128 >= V_) {
+                    Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+                }
             }
             if (!hasNext) {
                 break;
             }
+            ++outputTileIdx;
 
             currentTask = nextTask;
             seq = nextSeq;
@@ -968,6 +998,9 @@ private:
             end = nextEnd;
             nOffset = nextNOffset;
             slot = nextSlot;
+        }
+        if constexpr (IsSameType<T, bfloat16_t>::value) {
+            WaitFlag<HardEvent::FIX_M>(0);
         }
         SetMMLayoutTransform(false);
     }
@@ -1158,6 +1191,13 @@ private:
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if constexpr (IsSameType<T, bfloat16_t>::value) {
+            if (BT_ == 64 && K_ == 128 && V_ == 128) {
+                return;
+            }
+        }
+#endif
         uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
         if (subBlockNum == 0) {
             return;

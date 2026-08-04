@@ -13,8 +13,12 @@ namespace optiling {
 namespace {
 constexpr size_t INPUT_Q_IDX = 0;
 constexpr size_t INPUT_V_IDX = 2;
-constexpr size_t INPUT_CU_SEQLENS_IDX = 5;
-constexpr size_t INPUT_CHUNK_INDICES_IDX = 6;
+constexpr size_t INPUT_GK_IDX = 3;
+constexpr size_t INPUT_RAW_G_IDX = 4;
+constexpr size_t INPUT_A_LOG_IDX = 5;
+constexpr size_t INPUT_DT_BIAS_IDX = 6;
+constexpr size_t INPUT_CU_SEQLENS_IDX = 8;
+constexpr size_t INPUT_CHUNK_INDICES_IDX = 9;
 constexpr size_t ATTR_SCALE_IDX = 0;
 constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
 constexpr size_t ATTR_SAFE_GATE_IDX = 2;
@@ -24,6 +28,9 @@ constexpr size_t ATTR_LOGICAL_Q_HEADS_IDX = 5;
 constexpr size_t ATTR_LOGICAL_V_HEADS_IDX = 6;
 constexpr size_t ATTR_LOGICAL_K_DIM_IDX = 7;
 constexpr size_t ATTR_LOGICAL_V_DIM_IDX = 8;
+constexpr size_t ATTR_USE_GATE_IDX = 9;
+constexpr size_t ATTR_LOWER_BOUND_IDX = 10;
+constexpr size_t ATTR_DEFER_GATE_CUMSUM_IDX = 11;
 constexpr uint64_t KDA_SOLVE_SCRATCH_SLOTS = 5;
 constexpr uint64_t KDA_SOLVE_PIPELINE_DEPTH = 4;
 constexpr uint64_t KDA_SCORE_QUEUE_SLOTS = 4;
@@ -81,10 +88,22 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
     const int64_t vHeads = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_HEADS_IDX));
     const int64_t kDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_K_DIM_IDX));
     const int64_t vDim = *(attrPtr->GetAttrPointer<int64_t>(ATTR_LOGICAL_V_DIM_IDX));
+    const bool useGateInKernel = *(attrPtr->GetAttrPointer<bool>(ATTR_USE_GATE_IDX));
+    const float lowerBound = *(attrPtr->GetAttrPointer<float>(ATTR_LOWER_BOUND_IDX));
+    const bool deferGateCumsum = *(attrPtr->GetAttrPointer<bool>(ATTR_DEFER_GATE_CUMSUM_IDX));
     if (batch <= 0 || seqlen <= 0 || qHeads <= 0 || vHeads <= 0 ||
         kDim <= 0 || vDim <= 0 || vHeads % qHeads != 0) {
         return ge::GRAPH_FAILED;
     }
+    const auto qShapePtr = context->GetInputShape(INPUT_Q_IDX);
+    if (qShapePtr == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    const auto &qShape = qShapePtr->GetStorageShape();
+    const bool inputSequenceMajor =
+        qShape.GetDimNum() == 4 && qShape.GetDim(0) == batch &&
+        qShape.GetDim(1) == seqlen && qShape.GetDim(2) == qHeads &&
+        qShape.GetDim(3) == kDim;
     const bool hasCuSeqlens = context->GetOptionalInputTensor(INPUT_CU_SEQLENS_IDX) != nullptr;
     const auto chunkMetadata = context->GetOptionalInputShape(INPUT_CHUNK_INDICES_IDX);
     const int64_t totalChunks = hasCuSeqlens
@@ -98,6 +117,23 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
 
     const auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     const uint32_t blockDim = platform.GetCoreNumAic() == 0 ? 1 : platform.GetCoreNumAic();
+    const auto rawGDesc = context->GetInputDesc(INPUT_RAW_G_IDX);
+    const auto gkDesc = context->GetInputDesc(INPUT_GK_IDX);
+    const bool hasALog = context->GetOptionalInputDesc(INPUT_A_LOG_IDX) != nullptr;
+    const bool hasDtBias = context->GetOptionalInputDesc(INPUT_DT_BIAS_IDX) != nullptr;
+    const bool computeGateInPrepare =
+        deferGateCumsum &&
+        platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950 &&
+        qDesc->GetDataType() == ge::DT_BF16 && rawGDesc != nullptr && gkDesc != nullptr &&
+        rawGDesc->GetDataType() == ge::DT_FLOAT && useGateInKernel && safeGate &&
+        gkDesc->GetDataType() == ge::DT_FLOAT && hasALog &&
+        !isVarLen && chunkSize == 64 && kDim == 128 && vDim == 128 &&
+        vHeads % 2 == 0 && seqlen % chunkSize == 0;
+    const bool fusePostWu =
+        platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950 &&
+        qDesc->GetDataType() == ge::DT_BF16 && safeGate && !isVarLen &&
+        chunkSize == 64 && kDim == 128 && vDim == 128 && vHeads % 2 == 0 &&
+        seqlen % chunkSize == 0;
     context->SetBlockDim(blockDim);
     const uint64_t dataBytes = qDesc->GetDataType() == ge::DT_FLOAT ? sizeof(float) : sizeof(uint16_t);
     const uint64_t tokenHeadCount = static_cast<uint64_t>(batch) *
@@ -130,7 +166,14 @@ ge::graphStatus Tiling4ChunkKdaFwdPrepare(gert::TilingContext *context)
     tiling.set_hasInitialState(false);
     tiling.set_isVarLen(isVarLen);
     tiling.set_safeGate(safeGate);
+    tiling.set_inputSequenceMajor(inputSequenceMajor);
+    tiling.set_fusePostWu(fusePostWu);
+    tiling.set_computeGateInPrepare(computeGateInPrepare);
+    tiling.set_hasALog(hasALog);
+    tiling.set_hasDtBias(hasDtBias);
+    tiling.set_lowerBound(lowerBound);
     tiling.set_prepareUsedCoreNum(blockDim);
+    tiling.set_postWuUsedCoreNum(blockDim);
     tiling.set_prepareAqkFp32Offset(aqkFp32Offset);
     tiling.set_prepareAkkFp32Offset(akkFp32Offset);
     tiling.set_prepareScratchOffset(scratchOffset);
