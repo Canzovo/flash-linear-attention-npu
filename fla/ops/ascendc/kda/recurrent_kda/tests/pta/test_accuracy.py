@@ -8,6 +8,7 @@ import sys
 import torch
 import torch_npu
 
+from fla_npu.ops.ascendc import recurrent_kda
 from golden import recurrent_kda_golden
 from utils import compare_tensors_by_ratio
 
@@ -73,7 +74,6 @@ def run_case(desc, kwargs, op_kwargs, rtol=0.02, atol=0.01, metadata_dtype=torch
 
     dev = _device()
     torch_npu.npu.set_device(dev)
-    from fla_npu.ops.ascendc import recurrent_kda
 
     call_kwargs = {**op_kwargs, "output_final_state": True, "layout": inp["layout"]}
     call_kwargs["cu_seqlens"] = (

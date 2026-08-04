@@ -24,7 +24,7 @@ namespace RecurrentKda {
 using namespace matmul;
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
-constexpr uint64_t BUFFER_NUM = 1;
+constexpr uint64_t BUFFER_NUM = 2;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 constexpr uint64_t MAX_MTP = 8;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
@@ -228,7 +228,11 @@ public:
             ReleaseEvents();
             return;
         }
-        for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
+        uint64_t vectorCoreNum = GetBlockNum();
+        uint64_t taskNum = B_ * NV_;
+        for (uint64_t taskIdx = blockIdx; taskIdx < taskNum; taskIdx += vectorCoreNum) {
+            uint64_t batch_i = taskIdx / NV_;
+            uint64_t head_i = taskIdx % NV_;
             int64_t seq0 = SequenceStart(batch_i);
             int64_t seq1 = SequenceEnd(batch_i);
             int64_t seqLen64 = seq1 - seq0;
@@ -241,23 +245,13 @@ public:
                 return;
             }
 
-            uint32_t copyFlag = 0;
-            uint64_t stateSlot = batch_i;
-            for (uint64_t head_i = 0; head_i < NV_; head_i++) {
-                if (!IsCurrentTask(batch_i, head_i)) {
-                    continue;
-                }
-                copyFlag++;
-                if (copyFlag == 1) {
-                    stateSlot = ResolveInitialStateSlot(batch_i, seq0, seqLen);
-                    if (stateSlot == INVALID_STATE_SLOT) {
-                        ReleaseEvents();
-                        return;
-                    }
-                    CopyInBeta(seq0, seq1);
-                }
-                ProcessHead(batch_i, seq0, seq1, head_i, stateSlot);
+            uint64_t stateSlot = ResolveInitialStateSlot(batch_i, seq0, seqLen);
+            if (stateSlot == INVALID_STATE_SLOT) {
+                ReleaseEvents();
+                return;
             }
+            CopyInBeta(seq0, seq1);
+            ProcessHead(batch_i, seq0, seq1, head_i, stateSlot);
         }
         ReleaseEvents();
     }
@@ -901,11 +895,6 @@ private:
             }
         }
      }
-
-    __aicore__ inline bool IsCurrentTask(uint64_t batchIdx, uint64_t headIdx) const
-    {
-        return ((batchIdx * NV_ + headIdx) % GetBlockNum()) == blockIdx;
-    }
 
 private:
     GlobalTensor<inType> queryGm_;
