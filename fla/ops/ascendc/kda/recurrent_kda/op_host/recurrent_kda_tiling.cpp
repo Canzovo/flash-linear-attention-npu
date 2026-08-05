@@ -37,6 +37,9 @@ const size_t A_LOG_INDEX = 8;
 const size_t DT_BIAS_INDEX = 9;
 const size_t ACC_TOKEN_INDEX = 10;
 
+const size_t INITIAL_STATE_OUTPUT_INDEX = 1;
+const size_t FINAL_STATE_OUTPUT_INDEX = 2;
+
 const size_t ATTR_LAYOUT_INDEX = 0;
 const size_t ATTR_SCALE_INDEX = 1;
 const size_t ATTR_OUTPUT_FINAL_STATE_INDEX = 2;
@@ -75,6 +78,18 @@ void CopyOptionalOriginShape(gert::TilingContext *context, size_t index, gert::S
         dst = shape->GetOriginShape();
     }
 }
+
+template <typename StrideType>
+void CopyStateStrides(const StrideType *src, std::array<int64_t, RKDA_STATE_DIM_NUM> &dst, bool &hasStrides)
+{
+    if (src == nullptr || src->GetDimNum() != RKDA_STATE_DIM_NUM) {
+        return;
+    }
+    for (size_t i = 0; i < RKDA_STATE_DIM_NUM; ++i) {
+        dst[i] = src->GetStride(i);
+    }
+    hasStrides = true;
+}
 } // namespace
 
 RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
@@ -87,6 +102,14 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     ctx.gateShape = context_->GetInputShape(GATE_INDEX)->GetOriginShape();
     ctx.betaShape = context_->GetInputShape(BETA_INDEX)->GetOriginShape();
     ctx.stateShape = context_->GetInputShape(STATE_INDEX)->GetOriginShape();
+    CopyStateStrides(context_->GetInputStride(STATE_INDEX), ctx.stateInStrides, ctx.hasStateInStrides);
+    const size_t stateOutputIndex = tilingData_.inplaceFinalState == 1 ?
+                                    INITIAL_STATE_OUTPUT_INDEX : FINAL_STATE_OUTPUT_INDEX;
+    CopyStateStrides(context_->GetOutputStride(stateOutputIndex), ctx.stateOutStrides, ctx.hasStateOutStrides);
+    if (!ctx.hasStateOutStrides && tilingData_.inplaceFinalState == 1 && ctx.hasStateInStrides) {
+        ctx.stateOutStrides = ctx.stateInStrides;
+        ctx.hasStateOutStrides = true;
+    }
     CopyOptionalOriginShape(context_, CU_SEQLENS_INDEX, ctx.cuSeqlensShape);
     CopyOptionalOriginShape(context_, SSM_STATE_INDICES_INDEX, ctx.ssmStateShape);
     CopyOptionalOriginShape(context_, A_LOG_INDEX, ctx.aLogShape);

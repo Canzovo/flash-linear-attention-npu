@@ -24,7 +24,7 @@ namespace RecurrentKda {
 using namespace matmul;
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
-constexpr uint64_t BUFFER_NUM = 2;
+constexpr uint64_t BUFFER_NUM = 1;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 constexpr uint64_t MAX_MTP = 8;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
@@ -70,6 +70,14 @@ public:
         realV_ = tilingData->dv;
         stateCapacity_ = tilingData->sBlockNum;
         ssmStateStride_ = tilingData->ssmStateStride;
+        stateInStride0_ = tilingData->stateInStride0;
+        stateInStride1_ = tilingData->stateInStride1;
+        stateInStride2_ = tilingData->stateInStride2;
+        stateInStride3_ = tilingData->stateInStride3;
+        stateOutStride0_ = tilingData->stateOutStride0;
+        stateOutStride1_ = tilingData->stateOutStride1;
+        stateOutStride2_ = tilingData->stateOutStride2;
+        stateOutStride3_ = tilingData->stateOutStride3;
         scale_ = tilingData->scale;
         lowerBound_ = tilingData->lowerBound;
         hasCuSeqlens_ = (tilingData->hasCuSeqlens == 1);
@@ -549,7 +557,8 @@ private:
     {
         LocalTensor<stateType> stateLocal = stateInQueue_.AllocTensor<stateType>();
         if (stateVFirst_) {
-            uint64_t stateOffset = ((stateSlot * NV_ + head) * realV_ + vOffset) * realK_;
+            uint64_t stateOffset =
+                stateInStride0_ * stateSlot + stateInStride1_ * head + stateInStride2_ * vOffset;
             DataCopyExtParams stateInParams{static_cast<uint16_t>(curSingleV),
                                             static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0, 0};
             DataCopyPadExtParams<stateType> padParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
@@ -557,7 +566,9 @@ private:
         } else {
             for (uint32_t v = 0; v < curSingleV; ++v) {
                 for (uint32_t k = 0; k < realK_; ++k) {
-                    uint64_t stateOffset = ((stateSlot * NV_ + head) * realK_ + k) * realV_ + vOffset + v;
+                    uint64_t stateOffset = stateInStride0_ * stateSlot + stateInStride1_ * head +
+                                           stateInStride2_ * k +
+                                           stateInStride3_ * (vOffset + v);
                     stateLocal.SetValue(v * alignK_ + k, initStateGm_.GetValue(stateOffset));
                 }
             }
@@ -759,7 +770,8 @@ private:
     {
         LocalTensor<stateType> stateOutLocal = stateOutQueue_.DeQue<stateType>();
         if (stateVFirst_) {
-            uint64_t stateOffset = ((stateSlot * NV_ + head) * realV_ + vOffset) * realK_;
+            uint64_t stateOffset =
+                stateOutStride0_ * stateSlot + stateOutStride1_ * head + stateOutStride2_ * vOffset;
             DataCopyParams stateOutParams{static_cast<uint16_t>(curSingleV),
                                           static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0};
             DataCopyPad(finalStateGm_[stateOffset], stateOutLocal, stateOutParams);
@@ -767,7 +779,9 @@ private:
             SyncVToS();
             for (uint32_t v = 0; v < curSingleV; ++v) {
                 for (uint32_t k = 0; k < realK_; ++k) {
-                    uint64_t stateOffset = ((stateSlot * NV_ + head) * realK_ + k) * realV_ + vOffset + v;
+                    uint64_t stateOffset = stateOutStride0_ * stateSlot + stateOutStride1_ * head +
+                                           stateOutStride2_ * k +
+                                           stateOutStride3_ * (vOffset + v);
                     finalStateGm_.SetValue(stateOffset, stateOutLocal.GetValue(v * alignK_ + k));
                 }
             }
@@ -954,6 +968,14 @@ private:
     uint32_t realV_;
     uint32_t stateCapacity_;
     uint32_t ssmStateStride_;
+    uint64_t stateInStride0_;
+    uint64_t stateInStride1_;
+    uint64_t stateInStride2_;
+    uint64_t stateInStride3_;
+    uint64_t stateOutStride0_;
+    uint64_t stateOutStride1_;
+    uint64_t stateOutStride2_;
+    uint64_t stateOutStride3_;
     uint32_t vStep_;
     uint32_t stateOutBufferNum_;
     uint32_t attnOutBufferNum_;

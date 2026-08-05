@@ -57,6 +57,14 @@ struct alignas(8) RecurrentKdaTilingData {
     uint32_t cuSeqlensDtype;
     uint32_t ssmStateIndicesDtype;
     uint32_t acceptedTokensDtype;
+    uint64_t stateInStride0;
+    uint64_t stateInStride1;
+    uint64_t stateInStride2;
+    uint64_t stateInStride3;
+    uint64_t stateOutStride0;
+    uint64_t stateOutStride1;
+    uint64_t stateOutStride2;
+    uint64_t stateOutStride3;
 };
 #pragma pack(pop)
 

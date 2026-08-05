@@ -422,16 +422,24 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     CHECK_RET(PreProcess(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
     const aclTensor *initialStateForKernel = params.initialStateRef;
-    bool initialStateNeedViewCopy = !IsContiguous(params.initialStateRef);
-    if (initialStateNeedViewCopy) {
-        CHECK_RET(DataContiguous(initialStateForKernel, executorPtr) == ACLNN_SUCCESS,
-                  ACLNN_ERR_INNER_NULLPTR);
+    if (!IsContiguous(initialStateForKernel)) {
+        initialStateForKernel = executorPtr->CreateView(
+            initialStateForKernel,
+            initialStateForKernel->GetViewShape(),
+            initialStateForKernel->GetStorageShape(),
+            initialStateForKernel->GetViewStrides(),
+            initialStateForKernel->GetViewOffset());
+        CHECK_RET(initialStateForKernel != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
     const aclTensor *finalStateForKernel = params.finalState;
-    bool finalStateNeedViewCopy = !IsContiguous(params.finalState);
-    if (finalStateNeedViewCopy) {
-        CHECK_RET(DataContiguous(finalStateForKernel, executorPtr) == ACLNN_SUCCESS,
-                  ACLNN_ERR_INNER_NULLPTR);
+    if (!IsContiguous(finalStateForKernel)) {
+        finalStateForKernel = executorPtr->CreateView(
+            finalStateForKernel,
+            finalStateForKernel->GetViewShape(),
+            finalStateForKernel->GetStorageShape(),
+            finalStateForKernel->GetViewStrides(),
+            finalStateForKernel->GetViewOffset());
+        CHECK_RET(finalStateForKernel != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
 
     auto result = l0op::RecurrentKda(
@@ -444,17 +452,9 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
         finalStateForKernel, executorPtr);
     CHECK_RET(result[0] != nullptr && result[1] != nullptr && result[2] != nullptr,
               ACLNN_ERR_INNER_NULLPTR);
-    if (params.inplaceFinalState) {
-        if (initialStateNeedViewCopy) {
-            CHECK_RET(l0op::ViewCopy(result[1], params.initialStateRef, executorPtr) != nullptr,
-                      ACLNN_ERR_INNER_NULLPTR);
-        }
-        if (params.outputFinalState) {
-            CHECK_RET(l0op::ViewCopy(result[1], params.finalState, executorPtr) != nullptr,
-                      ACLNN_ERR_INNER_NULLPTR);
-        }
-    } else if (finalStateNeedViewCopy) {
-        CHECK_RET(l0op::ViewCopy(result[2], params.finalState, executorPtr) != nullptr,
+    if (params.inplaceFinalState && params.outputFinalState &&
+        params.finalState != params.initialStateRef) {
+        CHECK_RET(l0op::ViewCopy(result[1], params.finalState, executorPtr) != nullptr,
                   ACLNN_ERR_INNER_NULLPTR);
     }
 

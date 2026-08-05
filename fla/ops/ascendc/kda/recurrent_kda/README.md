@@ -2,7 +2,8 @@
 
 `RecurrentKda` 是 KDA 的 fused recurrent 前向算子。算子在一个 AICore kernel 内完成 recurrent state decay、delta 更新和输出计算；`raw gate -> log gate` 和 `beta sigmoid` 可以在 kernel 内完成，不依赖 `KdaGateCumsum` 或 GDN recurrent 的接口。
 
-完整接口和调用示例见 [API 文档](docs/api.md)，实现方案见 [设计文档](docs/design.md)。Shape 符号统一引用
+完整接口和调用示例见 [API 文档](docs/api.md)，实现方案见 [设计文档](docs/design.md)，非连续 state
+的 stride 约束与数据流见 [专项设计](docs/non_contiguous_state_design.md)。Shape 符号统一引用
 [KDA 模型符号表](../README.md#model-shape-symbols)。
 
 ## Python 接口
@@ -40,7 +41,10 @@ out, final_state = recurrent_kda(
 
 - `layout="BSND"`：`q/k=[B,T,H,K]`，`v=[B,T,HV,V]`，`g=[B,T,HV,K]`，`beta=[B,T,HV]`。
 - `layout="TND"`：`q/k=[T,H,K]`，`v=[T,HV,V]`，`g=[T,HV,K]`，`beta=[T,HV]`。
-- `initial_state=None` 时，Python wrapper 会创建全零初始状态；显式传入时是原位更新的 state pool，shape 为 `[state_capacity,HV,V,K]`。当前仅支持 `state_v_first=True`。
+- `initial_state=None` 时，Python wrapper 会创建全零初始状态；显式传入时是 state pool。
+  `state_v_first=True` 对应 `[state_capacity,HV,V,K]`，`state_v_first=False` 对应
+  `[state_capacity,HV,K,V]`。支持 slot/head 维带间隔的非连续 view，但内部二维 state
+  矩阵必须稠密。
 - `scale=None` 时，Python wrapper 使用 `K ** -0.5`。
 - `use_qk_l2norm_in_kernel=True` 时，kernel 内对每个 token 的 `q/k` 做 L2 normalize，然后对 `q` 乘 `scale`。
 - `use_gate_in_kernel=False` 时，`g` 被视为已经预计算好的 step log gate，kernel 使用 `exp(g)` 做 state decay。
@@ -74,5 +78,7 @@ o_t = S @ (q_t * scale)
   token capacity，各相邻差值必须不超过 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
   更新有定义，padding tail 输出不作保证。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
-- 仅支持 `state_v_first=True`，state layout 为 `[state_capacity, HV, V, K]`；底层 aclnn 接口要求显式传入可变 state。
+- 支持 V-first `[state_capacity,HV,V,K]` 和 K-first `[state_capacity,HV,K,V]`，state dtype 为
+  FP32/BF16。非连续 state 仅允许 slot/head 外层维存在间隔；最后两维必须为行主序稠密矩阵且各
+  slot/head 的地址区间不得重叠。底层 aclnn 接口要求显式传入 state。
 - `HV` 必须能被 `H` 整除；`H/HV <= 256`；`K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
