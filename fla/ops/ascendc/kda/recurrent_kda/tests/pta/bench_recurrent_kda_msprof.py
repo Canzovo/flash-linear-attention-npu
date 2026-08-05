@@ -65,10 +65,10 @@ def run_bench():
     inputs = make_inputs()
     kwargs = {
         "layout": "BSND",
-        "output_final_state": True,
-        "use_qk_l2norm_in_kernel": True,
+        "output_final_state": False,
+        "use_qk_l2norm_in_kernel": False,
         "use_gate_in_kernel": True,
-        "use_beta_sigmoid_in_kernel": True,
+        "use_beta_sigmoid_in_kernel": False,
         "allow_neg_eigval": False,
         "safe_gate": False,
         "lower_bound": -5.0,
@@ -106,7 +106,7 @@ def run_bench():
         )
         torch_npu.npu.synchronize()
 
-    print(f"[Bench] done, output={output.shape}, final_state={final_state.shape}")
+    print(f"[Bench] done, output={output.shape}")
 
 
 if __name__ == "__main__":

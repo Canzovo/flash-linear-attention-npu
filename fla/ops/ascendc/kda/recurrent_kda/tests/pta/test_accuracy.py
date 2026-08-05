@@ -167,6 +167,93 @@ def run_case(desc, kwargs, op_kwargs, rtol=0.02, atol=0.01, metadata_dtype=torch
     return out_ok and state_ok and layout_ok
 
 
+def run_model_case():
+    print("\n=== BSND model case with 470-slot state pool and accepted tokens ===")
+    torch.manual_seed(41)
+    batch, total_tokens = 1, 8
+    key_heads = value_heads = 12
+    key_dim = value_dim = 128
+    state_capacity = 470
+
+    q = torch.randn(
+        (batch, total_tokens, key_heads, key_dim), dtype=torch.bfloat16
+    )
+    k = torch.randn(
+        (batch, total_tokens, key_heads, key_dim), dtype=torch.bfloat16
+    )
+    v = torch.randn(
+        (batch, total_tokens, value_heads, value_dim), dtype=torch.bfloat16
+    )
+    g = torch.randn(
+        (batch, total_tokens, value_heads, key_dim), dtype=torch.float32
+    ) * 0.5
+    beta = torch.randn(
+        (batch, total_tokens, value_heads), dtype=torch.float32
+    )
+    initial_state = torch.randn(
+        (state_capacity, value_heads, value_dim, key_dim), dtype=torch.float32
+    ) * 0.02
+    cu_seqlens = list(range(total_tokens + 1))
+    ssm_state_indices = torch.arange(total_tokens, dtype=torch.int64)
+    num_accepted_tokens = torch.ones(total_tokens, dtype=torch.int64)
+    a_log = torch.randn((value_heads,), dtype=torch.float32) * 0.1
+    dt_bias = torch.randn((value_heads * key_dim,), dtype=torch.float32) * 0.1
+    op_kwargs = {
+        "layout": "BSND",
+        "output_final_state": False,
+        "use_qk_l2norm_in_kernel": False,
+        "use_gate_in_kernel": True,
+        "use_beta_sigmoid_in_kernel": False,
+        "allow_neg_eigval": False,
+        "safe_gate": False,
+        "lower_bound": -5.0,
+        "state_v_first": True,
+    }
+
+    golden = recurrent_kda_golden(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        A_log=a_log,
+        dt_bias=dt_bias,
+        **op_kwargs,
+    )
+
+    dev = _device()
+    torch_npu.npu.set_device(dev)
+    initial_state_npu = initial_state.to(dev)
+    out, final_state = recurrent_kda(
+        q.to(dev),
+        k.to(dev),
+        v.to(dev),
+        g.to(dev),
+        beta.to(dev),
+        initial_state_npu,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int64, device=dev),
+        ssm_state_indices=ssm_state_indices.to(dev),
+        num_accepted_tokens=num_accepted_tokens.to(dev),
+        A_log=a_log.to(dev),
+        dt_bias=dt_bias.to(dev),
+        **op_kwargs,
+    )
+    torch_npu.npu.synchronize()
+
+    out_ok = compare_tensors_by_ratio(golden[0], out.cpu(), "out", rtol=0.02, atol=0.01)
+    state_ok = compare_tensors_by_ratio(
+        golden[1], initial_state_npu.cpu(), "inplace_state", rtol=0.02, atol=0.01
+    )
+    if final_state is not None:
+        print("  [final_state] expected None when output_final_state=False")
+        return False
+    return out_ok and state_ok
+
+
 def run_invalid_state_stride_case(desc, stride_kind):
     print(f"\n=== {desc} ===")
     inp = make_inputs(layout="BSND", batch=2, seq_len=2, seed=31)
@@ -311,6 +398,7 @@ def main():
             },
             non_contiguous_state=True,
         ),
+        run_model_case(),
         run_invalid_state_stride_case(
             "reject non-dense inner state matrix",
             "inner",
