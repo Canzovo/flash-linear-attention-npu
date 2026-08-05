@@ -54,7 +54,8 @@ FLA_NPU_SOC=ascend910b FLA_NPU_INCREMENTAL_BUILD=1 python -m pip wheel --no-buil
 ```
 
 增量构建仅建议用于本地反复调试。构建完成后，wheel 会输出到 `dist/` 目录，按 Step 3 安装即可。
-同一输出目录可能同时残留不同版本或不同构建标签的 wheel；重复构建和安装时应给每轮构建使用独立输出目录，或先确认安装命令只匹配一个确定的 wheel，避免通配符选中旧产物。
+重复构建仍统一输出到 `dist/`。该目录可能同时存在不同版本或构建标签的 wheel，
+因此安装和流程看护时应传入本轮构建生成的准确文件名，避免通配符选中旧产物。
 
 方式 A 编译可用环境变量：
 
@@ -145,9 +146,9 @@ run 包和 updated wheel 会分别安装两次，每次都在新 Python 进程�
 
 ```sh
 python scripts/check_install_workflows.py \
-  --wheel artifacts/before/flash_linear_attention_npu-*.whl \
-  --run-package artifacts/scoped/fla-npu-*.run \
-  --updated-wheel artifacts/after/flash_linear_attention_npu-*.whl \
+  --wheel dist/<exact-base-wheel>.whl \
+  --run-package build_out/<exact-scoped-run-package>.run \
+  --updated-wheel dist/<exact-updated-wheel>.whl \
   --wheel-op chunk_gated_delta_rule_fwd_h \
   --run-op chunk_gated_delta_rule_fwd_h \
   --updated-wheel-op chunk_gated_delta_rule_fwd_h \
