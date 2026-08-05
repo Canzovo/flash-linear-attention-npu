@@ -129,17 +129,17 @@ const aclTensor *TransposeLastTwo(const aclTensor *input, aclOpExecutor *executo
     return Transpose(input, perm, executor);
 }
 
-int64_t Dim(const aclTensor *tensor, size_t idx)
+static int64_t Dim(const aclTensor *tensor, size_t idx)
 {
     return tensor->GetViewShape().GetDim(idx);
 }
 
-size_t Rank(const aclTensor *tensor)
+static size_t Rank(const aclTensor *tensor)
 {
     return tensor->GetViewShape().GetDimNum();
 }
 
-bool SameShape(const aclTensor *lhs, const aclTensor *rhs)
+static bool SameShape(const aclTensor *lhs, const aclTensor *rhs)
 {
     if (lhs == nullptr || rhs == nullptr || Rank(lhs) != Rank(rhs)) {
         return false;
@@ -176,7 +176,7 @@ aclnnStatus MakeContiguous(const aclTensor *&tensor, aclOpExecutor *executor)
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus ParseLayout(const char *layout, KdaFwdLayout &parsed)
+static aclnnStatus ParseLayout(const char *layout, KdaFwdLayout &parsed)
 {
     CHECK_COND(layout != nullptr, ACLNN_ERR_PARAM_INVALID,
                "layout must be uppercase and one of BSND, BNSD, TND or NTD.");
