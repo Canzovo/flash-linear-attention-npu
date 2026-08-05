@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib
 import os
 import runpy
@@ -49,6 +50,19 @@ def _load_setup() -> tuple[dict[str, object], dict[str, object]]:
     with mock.patch.object(setuptools, "setup", side_effect=capture_setup):
         setup_globals = runpy.run_path(str(REPO_ROOT / "setup.py"))
     return setup_globals, setup_kwargs
+
+
+def _load_run_package_finalizer() -> dict[str, object]:
+    return runpy.run_path(
+        str(
+            REPO_ROOT
+            / "scripts"
+            / "package"
+            / "ops_transformer"
+            / "scripts"
+            / "finalize_wheel_opp.py"
+        )
+    )
 
 
 def _create_minimal_vendor(vendor_dir: Path, *, include_alias: bool = False) -> None:
@@ -176,7 +190,100 @@ source {set_env!s}
                 (installed_vendor / "op_api" / "lib" / "libopapi.so").exists()
             )
 
-    def test_runtime_rejects_conflicting_libopapi_alias(self) -> None:
+    def test_run_package_overlay_finalization_is_idempotent(self) -> None:
+        finalize_wheel_opp = _load_run_package_finalizer()["finalize_wheel_opp"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            site_root = Path(temp_dir) / "site-packages"
+            package_dir = site_root / "fla_npu"
+            vendor_dir = (
+                package_dir / "opp" / "vendors" / "fla_npu_transformer"
+            )
+            _create_minimal_vendor(vendor_dir, include_alias=True)
+            config = package_dir / "opp" / "vendors" / "config.ini"
+            config.write_text("load_priority=fla_npu_transformer\n", encoding="utf-8")
+
+            dist_info = site_root / "flash_linear_attention_npu-1.0.dist-info"
+            dist_info.mkdir(parents=True)
+            record = dist_info / "RECORD"
+            with record.open("w", encoding="utf-8", newline="") as handle:
+                csv.writer(handle, lineterminator="\n").writerows(
+                    [
+                        ["fla_npu/__init__.py", "", ""],
+                        ["fla_npu/opp/stale-from-older-overlay.json", "", ""],
+                        [f"{dist_info.name}/RECORD", "", ""],
+                    ]
+                )
+
+            finalize_wheel_opp(package_dir)
+            first_record = record.read_bytes()
+            first_set_env = (vendor_dir / "bin" / "set_env.bash").read_bytes()
+            finalize_wheel_opp(package_dir)
+
+            self.assertEqual(record.read_bytes(), first_record)
+            self.assertEqual(
+                (vendor_dir / "bin" / "set_env.bash").read_bytes(),
+                first_set_env,
+            )
+            self.assertTrue(
+                (vendor_dir / "op_api" / "lib" / "libcust_opapi.so").is_file()
+            )
+            self.assertFalse(
+                (vendor_dir / "op_api" / "lib" / "libopapi.so").exists()
+            )
+
+            with record.open("r", encoding="utf-8", newline="") as handle:
+                recorded_paths = {row[0] for row in csv.reader(handle) if row}
+            current_opp_paths = {
+                path.relative_to(site_root).as_posix()
+                for path in (package_dir / "opp").rglob("*")
+                if path.is_file() or path.is_symlink()
+            }
+            self.assertTrue(current_opp_paths.issubset(recorded_paths))
+            self.assertNotIn(
+                "fla_npu/opp/stale-from-older-overlay.json",
+                recorded_paths,
+            )
+            self.assertIn("fla_npu/__init__.py", recorded_paths)
+
+            set_env = vendor_dir / "bin" / "set_env.bash"
+            script = f"""
+set -euo pipefail
+unset ASCEND_CUSTOM_OPP_PATH LD_LIBRARY_PATH FLA_NPU_OPP_PATH FLA_NPU_OP_API_LIB
+source {set_env!s}
+source {set_env!s}
+[[ "${{ASCEND_CUSTOM_OPP_PATH}}" == "{vendor_dir.parent.parent}:{vendor_dir}" ]]
+[[ "${{LD_LIBRARY_PATH}}" == "{vendor_dir}/op_api/lib" ]]
+[[ "${{FLA_NPU_OPP_PATH}}" == "{vendor_dir.parent.parent}" ]]
+[[ "${{FLA_NPU_OP_API_LIB}}" == "{vendor_dir}/op_api/lib/libcust_opapi.so" ]]
+"""
+            subprocess.run(["bash", "-c", script], check=True)
+
+    def test_both_run_package_installers_finalize_wheel_overlay(self) -> None:
+        installers = (
+            REPO_ROOT / "cmake" / "scripts" / "custom" / "install.sh",
+            REPO_ROOT
+            / "scripts"
+            / "package"
+            / "ops_transformer"
+            / "scripts"
+            / "install.sh",
+        )
+        for installer in installers:
+            with self.subTest(installer=installer):
+                source = installer.read_text(encoding="utf-8")
+                self.assertIn('finalize_wheel_opp "${wheel_opp_root}"', source)
+                self.assertNotIn(
+                    '"${dst_vendor}/op_api/lib/libopapi.so"',
+                    source,
+                )
+
+        custom_build = (REPO_ROOT / "cmake" / "custom_build.cmake").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("finalize_wheel_opp.py", custom_build)
+
+    def test_runtime_removes_stale_libopapi_alias(self) -> None:
         runtime_globals = runpy.run_path(
             str(
                 REPO_ROOT
@@ -203,11 +310,11 @@ source {set_env!s}
                 {"ASCEND_HOME_PATH": "/fake/cann"},
                 clear=False,
             ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "contains libopapi.so",
-                ):
-                    prepare_opp()
+                with self.assertWarnsRegex(RuntimeWarning, "Removed a stale"):
+                    self.assertEqual(prepare_opp(), vendor_dir)
+            self.assertFalse(
+                (vendor_dir / "op_api" / "lib" / "libopapi.so").exists()
+            )
 
 if __name__ == "__main__":
     unittest.main()

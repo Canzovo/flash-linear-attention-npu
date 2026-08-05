@@ -155,6 +155,9 @@ bash build.sh --pkg --soc=ascend910b --vendor_name=fla_npu --ops=chunk_fwd_o
 ```
 
 安装器会列出 scoped run 包覆盖后的算子状态。`WARNING` 表示安装后不可用，`NOTICE` 表示需要人工关注，`OK` 表示 ABI 一致并继续可用。
+覆盖完成后只保留 `libcust_opapi.so`，并同步刷新已安装 wheel 的 `RECORD`；重复安装
+同一个 run 包不会重复追加 OPP 路径。安装后必须启动新的 Python 进程，不能在已
+加载旧 `libcust_opapi.so` 的进程中热替换。
 
 ## legacy torch_npu / torch.ops.npu 路径
 

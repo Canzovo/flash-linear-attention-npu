@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import pathlib
+import warnings
 from typing import Optional
 
 
@@ -85,10 +86,20 @@ def _prepare_embedded_opp() -> pathlib.Path:
         raise FileNotFoundError(f"Embedded custom op_api library not found: {op_api_lib}")
     op_api_alias = op_api_lib.with_name("libopapi.so")
     if op_api_alias.exists() or op_api_alias.is_symlink():
-        raise RuntimeError(
-            "The FLA NPU custom OPP contains libopapi.so, which can shadow the "
-            "CANN runtime library. Reinstall a wheel that only contains "
-            f"libcust_opapi.so, or remove the stale alias: {op_api_alias}"
+        try:
+            op_api_alias.unlink()
+        except OSError as exc:
+            raise RuntimeError(
+                "The FLA NPU custom OPP contains a stale libopapi.so that can "
+                "shadow the CANN runtime library, and automatic cleanup failed. "
+                f"Remove the stale alias and retry: {op_api_alias}"
+            ) from exc
+        warnings.warn(
+            "Removed a stale FLA NPU libopapi.so alias left by an older package. "
+            "CANN must provide libopapi.so; the custom package only provides "
+            "libcust_opapi.so.",
+            RuntimeWarning,
+            stacklevel=2,
         )
 
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_dir)

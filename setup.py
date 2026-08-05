@@ -530,6 +530,9 @@ class FlaNpuBuildPy(_build_py):
             _build_torch_extension_inplace()
             _EXTERNAL_BUILD_DONE = True
 
+        built_package_dir = Path(self.build_lib) / "fla_npu"
+        if built_package_dir.exists():
+            shutil.rmtree(built_package_dir)
         super().run()
         run_package = _RUN_PACKAGE or _find_single_run_package()
         _stage_run_package(run_package, Path(self.build_lib) / "fla_npu" / "opp")
