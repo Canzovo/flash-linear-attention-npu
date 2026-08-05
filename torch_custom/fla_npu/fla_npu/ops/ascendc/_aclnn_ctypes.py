@@ -1163,7 +1163,7 @@ def npu_recurrent_kda(
 
     out = _empty_like(v)
     final_state_work = initial_state_work if inplace else _empty(state_shape, initial_state_work)
-    final_state_arg = _empty(state_shape, initial_state_work) if inplace else final_state_work
+    final_state_arg = final_state_work
     output_final = _optional_bool(output_final_state, False)
     scale_value = _optional_float(scale, key_dim ** -0.5)
     layout_buffer = ctypes.create_string_buffer(layout.encode("utf-8"))

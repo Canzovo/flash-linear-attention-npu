@@ -78,17 +78,17 @@ static const std::initializer_list<op::DataType> F32_TYPE_SUPPORT_LIST = {op::Da
 static const std::initializer_list<op::DataType> INT_TYPE_SUPPORT_LIST = {op::DataType::DT_INT32,
                                                                           op::DataType::DT_INT64};
 
-size_t Rank(const aclTensor *tensor)
+static size_t Rank(const aclTensor *tensor)
 {
     return tensor->GetViewShape().GetDimNum();
 }
 
-int64_t Dim(const aclTensor *tensor, size_t idx)
+static int64_t Dim(const aclTensor *tensor, size_t idx)
 {
     return tensor->GetViewShape().GetDim(idx);
 }
 
-bool SameShape(const aclTensor *lhs, const aclTensor *rhs)
+static bool SameShape(const aclTensor *lhs, const aclTensor *rhs)
 {
     if (Rank(lhs) != Rank(rhs)) {
         return false;
@@ -101,7 +101,7 @@ bool SameShape(const aclTensor *lhs, const aclTensor *rhs)
     return true;
 }
 
-bool ParseLayout(const char *layout, RecurrentKdaLayout &parsed)
+static bool ParseLayout(const char *layout, RecurrentKdaLayout &parsed)
 {
     if (layout == nullptr || std::strcmp(layout, "BSND") == 0) {
         parsed = RecurrentKdaLayout::BSND;
@@ -331,6 +331,17 @@ void SetTensorOriginalShape(const aclTensor *tensor)
     }
 }
 
+void SetTensorNdFormat(const aclTensor *tensor)
+{
+    if (tensor == nullptr) {
+        return;
+    }
+    auto *mutableTensor = const_cast<aclTensor *>(tensor);
+    mutableTensor->SetStorageFormat(Format::FORMAT_ND);
+    mutableTensor->SetViewFormat(Format::FORMAT_ND);
+    mutableTensor->SetOriginalFormat(Format::FORMAT_ND);
+}
+
 void SetInputOriginalShape(RecurrentKdaParams &params)
 {
     SetTensorOriginalShape(params.query);
@@ -442,6 +453,9 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
         CHECK_RET(finalStateForKernel != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
 
+    SetTensorNdFormat(initialStateForKernel);
+    SetTensorNdFormat(finalStateForKernel);
+
     auto result = l0op::RecurrentKda(
         params.query, params.key, params.value, params.gate, params.beta, initialStateForKernel,
         params.cuSeqlensOptional, params.ssmStateIndicesOptional, params.aLogOptional,
@@ -454,7 +468,7 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
               ACLNN_ERR_INNER_NULLPTR);
     if (params.inplaceFinalState && params.outputFinalState &&
         params.finalState != params.initialStateRef) {
-        CHECK_RET(l0op::ViewCopy(result[1], params.finalState, executorPtr) != nullptr,
+        CHECK_RET(l0op::ViewCopy(result[1], finalStateForKernel, executorPtr) != nullptr,
                   ACLNN_ERR_INNER_NULLPTR);
     }
 
