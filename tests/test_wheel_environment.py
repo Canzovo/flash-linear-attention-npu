@@ -132,6 +132,17 @@ class WheelEnvironmentTest(unittest.TestCase):
             self.assertTrue((lib_dir / "libcust_opapi.so").is_file())
             self.assertFalse((lib_dir / "libopapi.so").exists())
 
+    def test_package_build_always_starts_from_clean_outputs(self) -> None:
+        setup_source = (REPO_ROOT / "setup.py").read_text(encoding="utf-8")
+        build_source = (REPO_ROOT / "build.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("FLA_NPU_INCREMENTAL_BUILD", setup_source)
+        self.assertNotIn("FLA_NPU_OPS", setup_source)
+        self.assertNotIn("FLA_NPU_SKIP_RUN_BUILD", setup_source)
+        self.assertNotIn("FLA_NPU_SKIP_RUN_INSTALL", setup_source)
+        self.assertNotIn("--incremental", build_source)
+        self.assertIn("set_env\n\nclean\nclean_build_out", build_source)
+
     def test_generated_set_env_is_idempotent(self) -> None:
         rewrite_set_env = self.setup_globals["_rewrite_set_env"]
 
@@ -259,6 +270,40 @@ source {set_env!s}
 """
             subprocess.run(["bash", "-c", script], check=True)
 
+            dynamic_dir = (
+                vendor_dir
+                / "op_impl"
+                / "ai_core"
+                / "tbe"
+                / "fla_npu_transformer_impl"
+                / "dynamic"
+            )
+            dynamic_dir.mkdir(parents=True)
+            source = dynamic_dir / "sample.py"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            bytecode = dynamic_dir / "__pycache__" / "sample.cpython-311.pyc"
+            bytecode.parent.mkdir()
+            bytecode.write_bytes(b"generated-by-pip")
+            finalize_wheel_opp(package_dir)
+
+            bytecode_relative = bytecode.relative_to(site_root).as_posix()
+            with record.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.reader(handle))
+            for row in rows:
+                if row and row[0] == bytecode_relative:
+                    row[1:] = ["", ""]
+            with record.open("w", encoding="utf-8", newline="") as handle:
+                csv.writer(handle, lineterminator="\n").writerows(rows)
+
+            checker = runpy.run_path(
+                str(REPO_ROOT / "scripts" / "check_install_workflows.py")
+            )
+            checker["_assert_record_covers_opp"](package_dir)
+            self.assertNotIn(
+                bytecode_relative,
+                checker["_manifest_from_directory"](package_dir),
+            )
+
     def test_both_run_package_installers_finalize_wheel_overlay(self) -> None:
         installers = (
             REPO_ROOT / "cmake" / "scripts" / "custom" / "install.sh",
@@ -283,17 +328,26 @@ source {set_env!s}
         )
         self.assertIn("finalize_wheel_opp.py", custom_build)
 
-    def test_runtime_removes_stale_libopapi_alias(self) -> None:
-        runtime_globals = runpy.run_path(
-            str(
-                REPO_ROOT
-                / "torch_custom"
-                / "fla_npu"
-                / "fla_npu"
-                / "__init__.py"
-            )
+    def test_import_requires_cann_environment(self) -> None:
+        runtime_path = (
+            REPO_ROOT
+            / "torch_custom"
+            / "fla_npu"
+            / "fla_npu"
+            / "__init__.py"
         )
-        prepare_opp = runtime_globals["_prepare_embedded_opp"]
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "CANN environment is not initialized"):
+                runpy.run_path(str(runtime_path))
+
+    def test_import_loads_runtime_and_removes_stale_libopapi_alias(self) -> None:
+        runtime_path = (
+            REPO_ROOT
+            / "torch_custom"
+            / "fla_npu"
+            / "fla_npu"
+            / "__init__.py"
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             vendor_dir = (
@@ -303,15 +357,22 @@ source {set_env!s}
                 / "fla_npu_transformer"
             )
             _create_minimal_vendor(vendor_dir, include_alias=True)
-            prepare_opp.__globals__["_resolve_vendor_dir"] = lambda: vendor_dir
 
             with mock.patch.dict(
                 os.environ,
-                {"ASCEND_HOME_PATH": "/fake/cann"},
-                clear=False,
+                {
+                    "ASCEND_HOME_PATH": "/fake/cann",
+                    "FLA_NPU_OPP_PATH": str(vendor_dir),
+                },
+                clear=True,
             ):
-                with self.assertWarnsRegex(RuntimeWarning, "Removed a stale"):
-                    self.assertEqual(prepare_opp(), vendor_dir)
+                with mock.patch("ctypes.CDLL", return_value=mock.sentinel.custom_opapi):
+                    with self.assertWarnsRegex(RuntimeWarning, "Removed a stale"):
+                        runtime_globals = runpy.run_path(str(runtime_path))
+                    first = runtime_globals["load_ascendc_opapi_libraries"]()
+                    second = runtime_globals["load_ascendc_opapi_libraries"]()
+                    self.assertIs(first, second)
+                    self.assertEqual(first, [mock.sentinel.custom_opapi])
             self.assertFalse(
                 (vendor_dir / "op_api" / "lib" / "libopapi.so").exists()
             )

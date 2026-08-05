@@ -30,6 +30,7 @@ from typing import Iterable, Optional
 
 
 DIST_INFO_GLOB = "flash_linear_attention_npu-*.dist-info"
+DIST_NAME = "flash-linear-attention-npu"
 VENDOR_DIR = "fla_npu_transformer"
 
 
@@ -53,13 +54,26 @@ def _manifest_from_wheel(wheel: Path) -> dict[str, str]:
     return result
 
 
+def _is_generated_bytecode(path: Path) -> bool:
+    return path.suffix == ".pyc" and "__pycache__" in path.parts
+
+
+def _opp_files(package_dir: Path) -> list[Path]:
+    return [
+        path
+        for path in sorted((package_dir / "opp").rglob("*"))
+        if path.is_file() or path.is_symlink()
+    ]
+
+
 def _manifest_from_directory(package_dir: Path) -> dict[str, str]:
     site_root = package_dir.parent
     result = {}
-    for path in sorted((package_dir / "opp").rglob("*")):
-        if path.is_file() or path.is_symlink():
-            relative = path.relative_to(site_root).as_posix()
-            result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in _opp_files(package_dir):
+        if _is_generated_bytecode(path):
+            continue
+        relative = path.relative_to(site_root).as_posix()
+        result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 
 
@@ -108,15 +122,19 @@ def _assert_record_covers_opp(package_dir: Path) -> None:
     record = dist_infos[0] / "RECORD"
     with record.open("r", encoding="utf-8", newline="") as handle:
         recorded = {row[0]: row[1:] for row in csv.reader(handle) if row}
-    current = _manifest_from_directory(package_dir)
-    missing = sorted(current.keys() - recorded.keys())
+    site_root = package_dir.parent
+    opp_files = {
+        path.relative_to(site_root).as_posix(): path
+        for path in _opp_files(package_dir)
+    }
+    missing = sorted(opp_files.keys() - recorded.keys())
     if missing:
         raise AssertionError(f"Wheel RECORD does not cover installed OPP files: {missing}")
 
-    site_root = package_dir.parent
     invalid = []
-    for relative in sorted(current):
-        path = site_root / relative
+    for relative, path in sorted(opp_files.items()):
+        if _is_generated_bytecode(path) and recorded[relative] == ["", ""]:
+            continue
         content = path.read_bytes()
         digest = base64.urlsafe_b64encode(
             hashlib.sha256(content).digest()
@@ -172,12 +190,9 @@ def _assert_runtime(
     env: dict[str, str],
     cwd: Path,
     expected_ops: Iterable[str],
-    *,
-    load_runtime: bool,
 ) -> None:
     child_env = env.copy()
     child_env["FLA_NPU_EXPECT_OPS"] = ",".join(expected_ops)
-    child_env["FLA_NPU_LOAD_RUNTIME"] = "1" if load_runtime else "0"
     code = r'''
 import os
 from pathlib import Path
@@ -189,29 +204,28 @@ for name in filter(None, os.environ.get("FLA_NPU_EXPECT_OPS", "").split(",")):
     if not hasattr(ascendc, name) or not hasattr(ascendc, f"npu_{name}"):
         raise AssertionError(f"missing installed Ascend C API: {name}")
 
-if os.environ["FLA_NPU_LOAD_RUNTIME"] == "1":
-    first = fla_npu.load_ascendc_opapi_libraries()
-    second = fla_npu.load_ascendc_opapi_libraries()
-    if first is not second or not first:
-        raise AssertionError("Ascend C op_api loading is not idempotent")
+first = fla_npu.load_ascendc_opapi_libraries()
+second = fla_npu.load_ascendc_opapi_libraries()
+if first is not second or not first:
+    raise AssertionError("Ascend C op_api loading is not idempotent")
 
-    package_dir = Path(fla_npu.__file__).resolve().parent
-    expected = (
-        package_dir
-        / "opp"
-        / "vendors"
-        / "fla_npu_transformer"
-        / "op_api"
-        / "lib"
-        / "libcust_opapi.so"
-    ).resolve()
-    configured = Path(os.environ["FLA_NPU_OP_API_LIB"]).resolve()
-    if configured != expected:
-        raise AssertionError(f"runtime selected {configured}, expected {expected}")
+package_dir = Path(fla_npu.__file__).resolve().parent
+expected = (
+    package_dir
+    / "opp"
+    / "vendors"
+    / "fla_npu_transformer"
+    / "op_api"
+    / "lib"
+    / "libcust_opapi.so"
+).resolve()
+configured = Path(os.environ["FLA_NPU_OP_API_LIB"]).resolve()
+if configured != expected:
+    raise AssertionError(f"runtime selected {configured}, expected {expected}")
 
-    maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
-    if str(expected) not in maps:
-        raise AssertionError("packaged libcust_opapi.so is not mapped into the process")
+maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
+if str(expected) not in maps:
+    raise AssertionError("packaged libcust_opapi.so is not mapped into the process")
 '''
     _run([str(python), "-c", code], env=child_env, cwd=cwd)
 
@@ -242,7 +256,6 @@ def _check_stale_alias_recovery(
         env,
         cwd,
         expected_ops,
-        load_runtime=True,
     )
     _assert_opp_layout(package_dir, require_runtime=True)
     _assert_manifest_matches_wheel(package_dir, expected_wheel)
@@ -267,13 +280,12 @@ def _check_stage(
     _assert_opp_layout(package_dir, require_runtime=require_runtime)
     if require_runtime:
         _assert_set_env_idempotent(package_dir, env, cwd)
-    _assert_runtime(
-        python,
-        env,
-        cwd,
-        expected_ops,
-        load_runtime=load_runtime and require_runtime,
-    )
+    if load_runtime and require_runtime:
+        _assert_runtime(python, env, cwd, expected_ops)
+    elif expected_ops:
+        raise AssertionError(
+            f"Cannot validate APIs without loading the runtime: {list(expected_ops)}"
+        )
     print(f"[install-workflows] PASS {name}", flush=True)
     return _manifest_from_directory(package_dir)
 
@@ -293,6 +305,76 @@ def _install_wheel(python: Path, wheel: Path, env: dict[str, str], cwd: Path) ->
         env=env,
         cwd=cwd,
     )
+
+
+def _uninstall_and_assert_clean(
+    name: str,
+    *,
+    python: Path,
+    env: dict[str, str],
+    cwd: Path,
+) -> None:
+    package_dir = _find_package_dir(python, env, cwd)
+    site_root = package_dir.parent
+    dist_infos = sorted(site_root.glob(DIST_INFO_GLOB))
+    if len(dist_infos) != 1:
+        raise AssertionError(
+            f"Expected exactly one {DIST_INFO_GLOB} before uninstall, found {len(dist_infos)}"
+        )
+
+    record = dist_infos[0] / "RECORD"
+    with record.open("r", encoding="utf-8", newline="") as handle:
+        recorded_paths = [site_root / row[0] for row in csv.reader(handle) if row]
+
+    _run(
+        [str(python), "-m", "pip", "uninstall", "-y", DIST_NAME],
+        env=env,
+        cwd=cwd,
+    )
+
+    residual_record_paths = [
+        str(path) for path in recorded_paths if path.exists() or path.is_symlink()
+    ]
+    residual_dist_infos = [str(path) for path in site_root.glob(DIST_INFO_GLOB)]
+    residual_package_entries = (
+        [str(path) for path in package_dir.rglob("*")] if package_dir.exists() else []
+    )
+    if package_dir.exists():
+        residual_package_entries.insert(0, str(package_dir))
+    if residual_record_paths or residual_dist_infos or residual_package_entries:
+        raise AssertionError(
+            "pip uninstall left flash-linear-attention-npu files behind: "
+            f"record={residual_record_paths}, dist_info={residual_dist_infos}, "
+            f"package={residual_package_entries}"
+        )
+
+    child_env = env.copy()
+    child_env["FLA_NPU_UNINSTALL_SITE_ROOT"] = str(site_root)
+    code = r'''
+import importlib.metadata
+import importlib.util
+import os
+from pathlib import Path
+
+site_root = Path(os.environ["FLA_NPU_UNINSTALL_SITE_ROOT"]).resolve()
+spec = importlib.util.find_spec("fla_npu")
+if spec is not None and spec.origin is not None:
+    origin = Path(spec.origin).resolve()
+    if origin == site_root or site_root in origin.parents:
+        raise AssertionError(f"fla_npu remains importable from the test venv: {origin}")
+try:
+    distribution = importlib.metadata.distribution("flash-linear-attention-npu")
+except importlib.metadata.PackageNotFoundError:
+    pass
+else:
+    metadata_path = Path(distribution._path).resolve()
+    if metadata_path == site_root or site_root in metadata_path.parents:
+        raise AssertionError(
+            f"distribution metadata remains in the test venv: {metadata_path}"
+        )
+'''
+    _run([str(python), "-c", code], env=child_env, cwd=cwd)
+    print(f"[install-workflows] PASS {name}", flush=True)
 
 
 def _apply_run_package(run_package: Path, env: dict[str, str], cwd: Path) -> None:
@@ -385,6 +467,12 @@ def _run_workflows(args: argparse.Namespace, work_dir: Path) -> None:
         )
         if first_run_manifest != second_run_manifest:
             raise AssertionError("Applying the same run package twice changed the installed OPP")
+        _uninstall_and_assert_clean(
+            "run-package-uninstall",
+            python=python,
+            env=env,
+            cwd=work_cwd,
+        )
 
     if updated_wheel is not None or run_package is not None:
         final_wheel = updated_wheel or wheel
@@ -415,6 +503,13 @@ def _run_workflows(args: argparse.Namespace, work_dir: Path) -> None:
             expected_ops=final_ops,
         )
 
+    _uninstall_and_assert_clean(
+        "final-wheel-uninstall",
+        python=python,
+        env=env,
+        cwd=work_cwd,
+    )
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -432,7 +527,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Ascend C API expected in the updated wheel",
     )
     parser.add_argument("--work-cwd", default=Path.cwd(), help="Working directory for checks")
-    parser.add_argument("--skip-runtime-load", action="store_true", help="Skip dlopen checks for source-only hosts")
+    parser.add_argument(
+        "--skip-runtime-load",
+        action="store_true",
+        help="Skip import and dlopen checks for source-only hosts",
+    )
     parser.add_argument("--keep-work-dir", action="store_true")
     return parser
 

@@ -76,7 +76,7 @@ def _prepare_embedded_opp() -> pathlib.Path:
     if not (os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_OPP_PATH")):
         raise RuntimeError(
             "CANN environment is not initialized. Please source the CANN set_env.sh "
-            "before calling fla_npu Ascend C operators."
+            "before importing fla_npu."
         )
 
     vendor_dir = _resolve_vendor_dir()
@@ -188,10 +188,11 @@ def load_ascendc_extension():
 def load_legacy_torch_ops() -> pathlib.Path:
     """Load the legacy PyTorch dispatcher custom ops.
 
-    ``import fla_npu`` is intentionally lightweight and does not import torch,
-    torch_npu, or register ``torch.ops.npu`` kernels.  Call this function only
-    when old call sites such as ``torch.ops.npu.npu_chunk_fwd_o(...)`` must keep
-    working during the migration to the decoupled ``fla_npu.ops.ascendc`` API.
+    ``import fla_npu`` initializes the decoupled Ascend C runtime, but does not
+    import torch, torch_npu, or register ``torch.ops.npu`` kernels. Call this
+    function only when old call sites such as
+    ``torch.ops.npu.npu_chunk_fwd_o(...)`` must keep working during the
+    migration to the decoupled ``fla_npu.ops.ascendc`` API.
     """
 
     global _LEGACY_TORCH_OPS_LOADED, _LEGACY_TORCH_OPS_LIBRARY
@@ -224,3 +225,6 @@ __all__ = [
     "load_ascendc_opapi_libraries",
     "load_legacy_torch_ops",
 ]
+
+
+load_ascendc_opapi_libraries()

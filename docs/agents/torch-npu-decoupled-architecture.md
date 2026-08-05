@@ -163,6 +163,9 @@ site-packages/
 3. `ASCEND_CUSTOM_OPP_PATH` 或 `ASCEND_OPP_PATH` 中唯一匹配的 vendor。
 
 选中后，包会把 vendor root 前置到 `ASCEND_CUSTOM_OPP_PATH`，把 `op_api/lib` 前置到 `LD_LIBRARY_PATH`，并用 `FLA_NPU_OP_API_LIB` 记录实际加载的 `libcust_opapi.so`。
+`import fla_npu` 会立即完成上述选择并加载 `libcust_opapi.so`。调用方必须先 source
+CANN `set_env.sh`；CANN 环境、OPP 或动态库不满足要求时，import 直接失败。root
+import 不会因此导入 `torch`、`torch_npu` 或注册 legacy dispatcher。
 自定义 OPP 不得提供 `libopapi.so`，该名字属于 CANN runtime。runtime 会删除旧版本
 安装器遗留且与 `libcust_opapi.so` 相邻的别名；如果目录不可写，则停止加载并提示
 手工清理，避免动态链接器命中错误的自定义库。

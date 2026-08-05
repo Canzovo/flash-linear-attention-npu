@@ -277,7 +277,6 @@ check_standalone_torch_custom_wheel_layout() {
     local check_dir="$TMPDIR/fla-npu-standalone-wheel-check"
     local dist_dir="$check_dir/dist"
     local target_dir="$check_dir/site"
-    local external_opp_root="$check_dir/external_opp"
     local run_file
 
     echo "[CI] Checking standalone torch_custom wheel plus run package OPP layout"
@@ -296,11 +295,13 @@ check_standalone_torch_custom_wheel_layout() {
 
     python3 -m pip install --force-reinstall --no-deps --target "$target_dir" "${wheels[0]}"
     PYTHONPATH="$target_dir" python3 - <<'PY'
+import importlib.util
 from pathlib import Path
 
-import fla_npu
-
-package_dir = Path(fla_npu.__file__).resolve().parent
+spec = importlib.util.find_spec("fla_npu")
+if spec is None or spec.origin is None:
+    raise SystemExit("Standalone fla_npu wheel is not discoverable")
+package_dir = Path(spec.origin).resolve().parent
 required = [
     package_dir / "opp" / "vendors" / "config.ini",
     package_dir / "opp" / "vendors" / "fla_npu_transformer" / "README.txt",
@@ -309,21 +310,6 @@ missing = [str(path.relative_to(package_dir)) for path in required if not path.e
 if missing:
     raise SystemExit("Standalone fla_npu wheel is missing OPP skeleton files: " + ", ".join(missing))
 print("[CI] Standalone torch_custom wheel OPP skeleton check passed.")
-PY
-
-    mkdir -p "$external_opp_root/vendors/fla_npu_transformer/op_api/lib"
-    touch "$external_opp_root/vendors/fla_npu_transformer/op_api/lib/libcust_opapi.so"
-    PYTHONPATH="$target_dir" ASCEND_OPP_PATH="$external_opp_root" ASCEND_CUSTOM_OPP_PATH= FLA_NPU_OPP_PATH= python3 - <<'PY'
-import os
-from pathlib import Path
-
-import fla_npu
-
-expected = (Path(os.environ["ASCEND_OPP_PATH"]) / "vendors" / "fla_npu_transformer").resolve()
-actual = fla_npu._resolve_vendor_dir()
-if actual != expected:
-    raise SystemExit(f"Standalone OPP skeleton shadows external OPP: actual={actual}, expected={expected}")
-print("[CI] Standalone torch_custom wheel does not shadow external OPP check passed.")
 PY
 
     run_file="$(find_single_run_package)"
