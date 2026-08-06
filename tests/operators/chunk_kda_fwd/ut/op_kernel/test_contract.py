@@ -241,6 +241,11 @@ def test_prepare_post_wu_fusion_stays_inside_chunk_kda_fwd():
     assert "if (!tiling.fusePostWu && !tiling.fusePostWuIntoFwdH)" in common
     assert "const bool canFusePreparePostWu =" in arch35
     assert "denseAligned && qIsBf16 && safeGate && vHeads % 2 == 0;" in arch35
+    assert "options.useDenseFwdH = denseAligned && qIsBf16;" in arch35
+    fuse_into_selection = arch35.split(
+        "options.fusePostWuIntoFwdH =", 1
+    )[1].split(";", 1)[0]
+    assert "canFusePreparePostWu" in fuse_into_selection
     fuse_selection = arch35.split("options.fusePostWu =", 1)[1].split(";", 1)[0]
     assert "canFusePreparePostWu" in fuse_selection
     assert "denseAligned" not in fuse_selection
@@ -786,7 +791,12 @@ def test_a5_fwd_h_tail_stages_w_coefficients_in_ub_before_scalar_read():
     tail_v_workspace = kernel.split("ComputeTailVWorkspace", 1)[1].split(
         "ComputeTailHWorkspace", 1
     )[0]
+    tail_h_workspace = kernel.split("ComputeTailHWorkspace", 1)[1].split(
+        "__aicore__ inline void Process()", 1
+    )[0]
     assert "LoadScalarAsFloat" not in tail_v_workspace
+    assert "weightFloatUb.GetValue(kRow)" in tail_h_workspace
+    assert "LoadScalarAsFloat" not in tail_h_workspace
     assert "HardEvent::V_S" in kernel
     assert "HardEvent::S_V" in kernel
 

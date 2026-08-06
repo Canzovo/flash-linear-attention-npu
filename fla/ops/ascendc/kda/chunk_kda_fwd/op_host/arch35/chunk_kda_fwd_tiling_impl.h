@@ -28,11 +28,12 @@ inline ChunkKdaFwdArch35Options ConfigureChunkKdaFwdArch35(
         qIsBf16 && rawGIsFp32 && hasALog &&
         useGateInKernel && safeGate;
     const bool denseAligned = !isVarLen && seqlen % chunkSize == 0;
-    options.useDenseFwdH = denseAligned && qIsBf16 && vHeads % 2 == 0;
+    options.useDenseFwdH = denseAligned && qIsBf16;
     const bool canFusePreparePostWu =
         denseAligned && qIsBf16 && safeGate && vHeads % 2 == 0;
     options.fusePostWuIntoFwdH =
-        options.useDenseFwdH && options.computeGateInPrepare &&
+        options.useDenseFwdH && canFusePreparePostWu &&
+        options.computeGateInPrepare &&
         !storeQG && !storeVNew && !storeH;
     options.fusePostWu =
         canFusePreparePostWu && !options.fusePostWuIntoFwdH;

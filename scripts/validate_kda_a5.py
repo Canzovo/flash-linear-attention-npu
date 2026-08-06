@@ -295,17 +295,26 @@ def write_summary(args, results):
                 lines.append(f"  changed_outputs={changed_outputs}")
             differences = record.get("binary_differences") or []
             if differences:
-                first = differences[0]
-                actual = first.get("actual") or {}
-                baseline = first.get("baseline") or {}
-                repeats = sorted({item.get("repeat") for item in differences})
-                lines.append(
-                    f"  first_diff={first.get('output')}"
-                    f"{first.get('first_index')} count="
-                    f"{first.get('mismatched_elements')} repeats={repeats} "
-                    f"baseline={baseline.get('value')}/{baseline.get('bits')} "
-                    f"actual={actual.get('value')}/{actual.get('bits')}"
-                )
+                first_by_output = {}
+                for difference in differences:
+                    first_by_output.setdefault(
+                        difference.get("output"), difference
+                    )
+                for output, first in first_by_output.items():
+                    actual = first.get("actual") or {}
+                    baseline = first.get("baseline") or {}
+                    repeats = sorted({
+                        item.get("repeat")
+                        for item in differences
+                        if item.get("output") == output
+                    })
+                    lines.append(
+                        f"  first_diff={output}"
+                        f"{first.get('first_index')} count="
+                        f"{first.get('mismatched_elements')} repeats={repeats} "
+                        f"baseline={baseline.get('value')}/{baseline.get('bits')} "
+                        f"actual={actual.get('value')}/{actual.get('bits')}"
+                    )
         if result["note"]:
             lines.append(f"  note={result['note']}")
     (args.output_dir / "summary.txt").write_text(

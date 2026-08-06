@@ -344,17 +344,6 @@ public:
         }
     }
 
-    template <typename Element>
-    __aicore__ inline float LoadScalarAsFloat(
-        AscendC::GlobalTensor<Element> tensor, uint32_t offset) const
-    {
-        Element value = tensor.GetValue(offset);
-        if constexpr (std::is_same<Element, bfloat16_t>::value) {
-            return AscendC::ToFloat(value);
-        }
-        return static_cast<float>(value);
-    }
-
     __aicore__ inline void ComputeTailVWorkspace(const GDNFwdHOffsets& offsets)
     {
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
@@ -439,17 +428,35 @@ public:
         constexpr uint32_t TAIL_INPUT_OFFSET = 166 * 1024;
         constexpr uint32_t TAIL_FLOAT_OFFSET = 167 * 1024;
         constexpr uint32_t TAIL_ACCUM_OFFSET = 168 * 1024;
+        constexpr uint32_t TAIL_WEIGHT_INPUT_OFFSET = 169 * 1024;
+        constexpr uint32_t TAIL_WEIGHT_FLOAT_OFFSET = 170 * 1024;
         AscendC::LocalTensor<ElementV> inputUb =
             resource.ubBuf.template GetBufferByByte<ElementV>(TAIL_INPUT_OFFSET);
         AscendC::LocalTensor<float> floatUb =
             resource.ubBuf.template GetBufferByByte<float>(TAIL_FLOAT_OFFSET);
         AscendC::LocalTensor<float> accumUb =
             resource.ubBuf.template GetBufferByByte<float>(TAIL_ACCUM_OFFSET);
+        AscendC::LocalTensor<ElementK> weightInputUb =
+            resource.ubBuf.template GetBufferByByte<ElementK>(TAIL_WEIGHT_INPUT_OFFSET);
+        AscendC::LocalTensor<float> weightFloatUb =
+            resource.ubBuf.template GetBufferByByte<float>(TAIL_WEIGHT_FLOAT_OFFSET);
 
         for (uint32_t kRow = rowBegin; kRow < rowEnd; ++kRow) {
             AscendC::Duplicate(accumUb, 0.0f, offsets.vBlockDim);
             AscendC::PipeBarrier<PIPE_V>();
             for (uint32_t tokenRow = 0; tokenRow < offsets.blockTokens; ++tokenRow) {
+                AscendC::DataCopy(
+                    weightInputUb,
+                    gmKDecayWorkspace[offsets.kDecayWorkOffset + tokenRow * kHeadDim],
+                    kHeadDim);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID7);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID7);
+                AscendC::Cast(
+                    weightFloatUb, weightInputUb, AscendC::RoundMode::CAST_NONE,
+                    kHeadDim);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID7);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID7);
                 AscendC::DataCopy(
                     inputUb,
                     gmVUpdateWorkspace[offsets.vWorkOffset + tokenRow * offsets.vBlockDim],
@@ -460,13 +467,15 @@ public:
                     floatUb, inputUb, AscendC::RoundMode::CAST_NONE,
                     offsets.vBlockDim);
                 AscendC::PipeBarrier<PIPE_V>();
-                float weight = LoadScalarAsFloat(
-                    gmKDecayWorkspace,
-                    offsets.kDecayWorkOffset + tokenRow * kHeadDim + kRow);
+                float weight = weightFloatUb.GetValue(kRow);
+                AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID7);
+                AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID7);
                 AscendC::Muls(floatUb, floatUb, weight, offsets.vBlockDim);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Add(accumUb, accumUb, floatUb, offsets.vBlockDim);
                 AscendC::PipeBarrier<PIPE_V>();
+                AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID7);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID7);
             }
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
