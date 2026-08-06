@@ -729,6 +729,30 @@ def test_a5_fwd_h_routes_sub_16_token_tail_away_from_cube_mmad():
     assert "else if (!cube2AlreadyWaited)" in update
 
 
+def test_a5_direct_ub_fwd_h_requires_enough_dense_tasks_for_started_cores():
+    kernel = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h"
+        / "op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+    ).read_text(encoding="utf-8")
+
+    assert kernel.count(
+        "denseTaskCount >= AscendC::GetBlockNum()"
+    ) == 2
+
+
+def test_a5_finalize_uses_fp32_vector_accumulation_for_sub_16_reduction():
+    finalize = (
+        OP_ROOT / "op_kernel/arch35/chunk_kda_fwd_finalize.h"
+    ).read_text(encoding="utf-8")
+
+    assert "constexpr uint32_t KDA_CUBE_MIN_REDUCTION = 16;" in finalize
+    assert "ComputeTailLocalRows" in finalize
+    assert "LoadScalarAsFloat" in finalize
+    assert "AscendC::ToFloat(value)" in finalize
+    assert finalize.count("curT < KDA_CUBE_MIN_REDUCTION") >= 2
+
+
 def test_kda_keeps_fp32_state_update_when_final_state_is_not_returned():
     aclnn = (OP_ROOT / "op_host/op_api/aclnn_chunk_kda_fwd.cpp").read_text(
         encoding="utf-8"

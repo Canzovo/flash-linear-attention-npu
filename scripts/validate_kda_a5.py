@@ -23,8 +23,8 @@ class Case:
 
 CASES = (
     Case("tail_sync", "probe"),
-    Case("bf16_gate_params", "probe"),
     Case("h96_t8k_t16k", "probe"),
+    Case("bf16_gate_params", "probe"),
     Case("profile_h96_t8k", "profile"),
     Case("profile_h96_t16k", "profile"),
 )
@@ -184,10 +184,16 @@ def compact_mismatch_note(records: list[dict], default: str) -> str:
         actual = first.get("actual") or {}
         baseline = first.get("baseline") or {}
         repeats = sorted({item.get("repeat") for item in differences})
+        changed_outputs = sorted(
+            name
+            for name, is_equal in (record.get("deterministic_by_output") or {}).items()
+            if is_equal is False
+        )
         return (
             f"{record['subcase']}: {first.get('output')}"
             f"{first.get('first_index')} differs in repeats {repeats}; "
             f"bits {baseline.get('bits')} -> {actual.get('bits')}; "
+            f"changed_outputs={changed_outputs}; "
             f"input_integrity={record.get('input_integrity')}"
         )
     return default
@@ -221,6 +227,15 @@ def write_summary(args, results):
                     f"device:{runtime.get('device_name')} "
                     f"cann:{runtime.get('ascend_home_path')}"
                 )
+            changed_outputs = sorted(
+                name
+                for name, is_equal in (
+                    record.get("deterministic_by_output") or {}
+                ).items()
+                if is_equal is False
+            )
+            if changed_outputs:
+                lines.append(f"  changed_outputs={changed_outputs}")
             differences = record.get("binary_differences") or []
             if differences:
                 first = differences[0]

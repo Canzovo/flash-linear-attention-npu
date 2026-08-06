@@ -241,9 +241,11 @@ public:
         numSeqWorkspaceOffset = gdnFwdHTilingData->numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = gdnFwdHTilingData->numChunksWorkspaceOffset;
         kDecayWorkspaceOffset = gdnFwdHTilingData->kDecayWorkspaceOffset;
+        uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
         useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
                           !isVariedLen && chunkSize <= 64 &&
-                          kHeadDim == 128 && vHeadDim == 128;
+                          kHeadDim == 128 && vHeadDim == 128 &&
+                          denseTaskCount >= AscendC::GetBlockNum();
 
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmW.SetGlobalBuffer((__gm__ ElementW *)w);
@@ -303,9 +305,11 @@ public:
         numSeqWorkspaceOffset = tilingData.numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = tilingData.numChunksWorkspaceOffset;
         kDecayWorkspaceOffset = tilingData.kDecayWorkspaceOffset;
+        uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
         useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
                           !isVariedLen && chunkSize <= 64 &&
-                          kHeadDim == 128 && vHeadDim == 128;
+                          kHeadDim == 128 && vHeadDim == 128 &&
+                          denseTaskCount >= AscendC::GetBlockNum();
 
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmW.SetGlobalBuffer((__gm__ ElementW *)w);

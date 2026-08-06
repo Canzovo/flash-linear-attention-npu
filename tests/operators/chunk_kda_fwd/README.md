@@ -63,7 +63,8 @@ bash scripts/validate_kda_a5.sh \
   --work-root "$PWD/outputs/kda-a5"
 ```
 
-默认 `--cases smoke` 依次验证尾块同步、BF16 `A_log/dt_bias` 适配和 H96/T8K/T16K；
+默认 `--cases smoke` 依次验证尾块同步、H96/T8K/T16K 模型 shape 和 BF16
+`A_log/dt_bias` 适配；H96 放在可能触发设备超时的低占用单头诊断之前，确保模型结果能够归档。
 `--cases all` 继续执行两组 msopprof。脚本默认拉取 `refs/pull/264/head`，也可通过
 `--ref` 验证指定提交或分支。源码仓、Python venv、pip 下载、同提交 wheel 和 Torch 扩展均复用
 `work-root/cache/`；每次运行仍使用独立结果目录。同一提交复测不会重复下载和构建。

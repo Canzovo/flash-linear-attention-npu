@@ -79,6 +79,7 @@ constexpr uint32_t KDA_SCORE_SCRATCH_W = 1;
 constexpr uint32_t KDA_SCORE_SCRATCH_KG = 2;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_GATE_TILE_ROWS = 32;
+constexpr uint32_t KDA_CUBE_MIN_REDUCTION = 16;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 using KdaArchTag = Catlass::Arch::Ascend950;
@@ -488,6 +489,40 @@ private:
             WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
         }
         PipeBarrier<PIPE_V>();
+    }
+
+    template <typename CopyT>
+    __aicore__ inline float LoadScalarAsFloat(GlobalTensor<CopyT> &src, uint64_t offset)
+    {
+        CopyT value = src.GetValue(offset);
+        if constexpr (IsSameType<CopyT, bfloat16_t>::value) {
+            return AscendC::ToFloat(value);
+        }
+        return static_cast<float>(value);
+    }
+
+    __aicore__ inline void ComputeTailLocalRows(LocalTensor<float> &dst, uint64_t b, uint64_t hv,
+                                                uint64_t start, uint64_t curT, uint64_t rowBegin,
+                                                uint64_t rows)
+    {
+        LocalTensor<float> vRow = exp2Buf_.Get<float>();
+        for (uint64_t localRow = 0; localRow < rows; ++localRow) {
+            LocalTensor<float> dstRow = dst[localRow * V_];
+            Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
+            PipeBarrier<PIPE_V>();
+            for (uint64_t j = 0; j < curT; ++j) {
+                float weight = LoadScalarAsFloat(
+                    preparedAqk_, AOffset(b, hv, start + rowBegin + localRow, j));
+                LoadAsFloatRow(
+                    propagatedVNew_, KVOffset(b, hv, start + j, 0, V_), vRow, V_);
+                Muls(vRow, vRow, weight, static_cast<uint32_t>(V_));
+                PipeBarrier<PIPE_V>();
+                Add(dstRow, dstRow, vRow, static_cast<uint32_t>(V_));
+                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
+                WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
+            }
+        }
     }
 
     template <typename CopyT>
@@ -1052,6 +1087,10 @@ private:
             }
         }
 
+        if (curT < KDA_CUBE_MIN_REDUCTION) {
+            return;
+        }
+
         auto layoutAqk = tla::MakeLayout<ElementA, LayoutTagA>(BT_, BT_);
         auto layoutV = tla::MakeLayout<ElementB, LayoutTagB>(BT_, V_);
         for (uint64_t nOffset = 0; nOffset < V_; nOffset += 128) {
@@ -1109,9 +1148,15 @@ private:
             LocalTensor<T> outTyped = gateWritebackBuf_.Get<T>();
 
             CopyVectorIn(stateLocal, o_, KVOffset(b, hv, ti, 0, V_), elems);
-            CopyVectorIn(localLocal, u_, KVOffset(b, hv, ti, 0, V_), elems);
             SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            if (curT < KDA_CUBE_MIN_REDUCTION) {
+                ComputeTailLocalRows(localLocal, b, hv, start, curT, tileRow, tileRows);
+            } else {
+                CopyVectorIn(localLocal, u_, KVOffset(b, hv, ti, 0, V_), elems);
+                SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            }
             Add(outLocal, stateLocal, localLocal, static_cast<uint32_t>(elems));
             PipeBarrier<PIPE_V>();
             ClampFp32ToOutputType(outLocal, static_cast<uint32_t>(elems));

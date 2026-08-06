@@ -29,6 +29,10 @@ OUTPUT_NAMES = (
 )
 
 
+def _stage(name, **details):
+    print(json.dumps({"stage": name, **details}), flush=True)
+
+
 def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=int, default=0)
@@ -156,6 +160,11 @@ def _compare_snapshots(torch, current, baseline, names, repeat):
 
 
 def _run_child(args):
+    _stage(
+        "child_start", tokens=args.tokens, heads=args.heads,
+        layout=args.layout, adapter=args.adapter,
+        final_state=args.final_state, saved=args.saved,
+    )
     try:
         from importlib import metadata
     except ImportError:
@@ -166,6 +175,8 @@ def _run_child(args):
     import fla_npu
 
     from fla_npu.ops.ascendc import chunk_kda_fwd
+
+    _stage("imports_ready")
 
     device = torch.device(f"npu:{args.device}")
     torch.npu.set_device(device)
@@ -192,6 +203,10 @@ def _run_child(args):
     if args.gate_params_bf16:
         a_log = a_log.to(torch.bfloat16)
         dt_bias = dt_bias.to(torch.bfloat16)
+    _stage(
+        "inputs_ready", gate_dtype=str(g.dtype),
+        a_log_dtype=str(a_log.dtype), dt_bias_dtype=str(dt_bias.dtype),
+    )
 
     input_names = ("q", "k", "v", "beta", "g", "A_log", "dt_bias")
     input_values = (q, k, v, beta, g, a_log, dt_bias)
@@ -204,6 +219,7 @@ def _run_child(args):
     repeat_summaries = []
     started = time.perf_counter()
     for repeat in range(1, args.repeats + 1):
+        _stage("launch_begin", repeat=repeat)
         common = {
             "cu_seqlens": None if args.layout == "BSND" else (0, t),
             "output_final_state": args.final_state,
@@ -234,12 +250,15 @@ def _run_child(args):
                 layout=args.layout,
                 **common,
             )
+        _stage("launch_returned", repeat=repeat, output_count=len(outputs))
         torch.npu.synchronize()
+        _stage("synchronize_done", repeat=repeat)
         fingerprints = {
             name: _fingerprint(torch, value)
             for name, value in zip(OUTPUT_NAMES, outputs)
         }
         snapshot = _cpu_snapshot(outputs)
+        _stage("snapshot_done", repeat=repeat)
         repeat_summaries.append({
             "repeat": repeat,
             "attn_out_data_ptr": outputs[0].data_ptr(),
@@ -358,7 +377,10 @@ def _run_parent(args):
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
-            print(error.stdout or "", end="")
+            captured = error.stdout or ""
+            if isinstance(captured, bytes):
+                captured = captured.decode("utf-8", errors="replace")
+            print(captured, end="")
             print(f"[TIMEOUT] {name} after {timeout}s; stop and reset the device")
             return 124
         print(result.stdout, end="")
