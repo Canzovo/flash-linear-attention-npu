@@ -29,8 +29,12 @@
 #include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
 #include "catlass/layout/layout.hpp"
 #include "kernel_operator.h"
+#include "../chunk_kda_fwd_varlen.h"
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#ifndef FLA_NPU_REGBASE_HPP_INCLUDED
+#define FLA_NPU_REGBASE_HPP_INCLUDED
 #include "kernel_utils/vector/regbase.hpp"
+#endif
 #endif
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
@@ -286,7 +290,7 @@ public:
         if (initialState != nullptr) {
             initialState_.SetGlobalBuffer((__gm__ float *)initialState);
         }
-        (void)cuSeqlens;
+        cuSeqlensAddr_ = reinterpret_cast<__gm__ int64_t *>(cuSeqlens);
         if (preparedQG != nullptr) {
             preparedQG_.SetGlobalBuffer((__gm__ T *)preparedQG);
         }
@@ -300,7 +304,6 @@ public:
             propagatedH_.SetGlobalBuffer((__gm__ T *)propagatedH);
         }
         chunkIndicesAddr_ = reinterpret_cast<__gm__ int64_t *>(chunkIndices);
-        hasChunkIndices_ = chunkIndicesAddr_ != nullptr;
         o_.SetGlobalBuffer((__gm__ OUT_T *)o);
         finalState_.SetGlobalBuffer((__gm__ float *)finalState);
         aqk_.SetGlobalBuffer((__gm__ float *)aqk);
@@ -356,7 +359,7 @@ public:
     }
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    __aicore__ inline void ProcessPreparedHeadPairBatchA5(
+    __aicore__ inline void ProcessPreparedFullHeadPairBatchArch35(
         const uint64_t *batchB, const uint64_t *batchHvBase,
         const uint64_t *batchStart, uint16_t taskCount)
     {
@@ -374,8 +377,8 @@ public:
         uint64_t hv = batchHvBase[taskIdx] + lane;
         uint64_t start = batchStart[taskIdx];
         InitializePostWuPipelineEvents();
-        PrefetchPostWuPipelineA5(resource, slot, b, hv, start, false);
-        PrefetchPostWuPipelineU(resource, slot, b, hv, start, false);
+        PrefetchPostWuPipelineArch35(resource, slot, b, hv, start, BT_, false);
+        PrefetchPostWuPipelineU(resource, slot, b, hv, start, BT_, false);
 
         for (uint16_t item = 0; item < itemCount; ++item) {
             const uint16_t nextItem = item + 1;
@@ -384,18 +387,18 @@ public:
                 const uint16_t nextLane = nextItem % KDA_POST_HEAD_PAIR_LANES;
                 const uint16_t nextSlot = slot ^ 1;
                 const bool reuseSlot = nextItem >= KDA_POST_PIPELINE_STAGE_COUNT;
-                PrefetchPostWuPipelineA5(
+                PrefetchPostWuPipelineArch35(
                     resource, nextSlot, batchB[nextTaskIdx],
-                    batchHvBase[nextTaskIdx] + nextLane, batchStart[nextTaskIdx], reuseSlot);
+                    batchHvBase[nextTaskIdx] + nextLane, batchStart[nextTaskIdx], BT_, reuseSlot);
                 PrefetchPostWuPipelineU(
                     resource, nextSlot, batchB[nextTaskIdx],
-                    batchHvBase[nextTaskIdx] + nextLane, batchStart[nextTaskIdx], reuseSlot);
+                    batchHvBase[nextTaskIdx] + nextLane, batchStart[nextTaskIdx], BT_, reuseSlot);
                 if (!reuseSlot) {
                     ++usedSlotCount;
                 }
             }
 
-            ComputePrefetchedPostWuPipelineA5(resource, slot, b, hv, start);
+            ComputePrefetchedPostWuPipelineArch35(resource, slot, b, hv, start, BT_);
             if (nextItem < itemCount) {
                 taskIdx = nextItem / KDA_POST_HEAD_PAIR_LANES;
                 lane = nextItem % KDA_POST_HEAD_PAIR_LANES;
@@ -406,6 +409,63 @@ public:
             }
         }
         FinalizePostWuPipelineEvents(usedSlotCount);
+    }
+
+    __aicore__ inline void ProcessPreparedTailHeadPairArch35(
+        uint64_t b, uint64_t hvBase, uint64_t start, uint64_t curT)
+    {
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
+        Catlass::Arch::Resource<KdaArchTag> resource;
+        InitializePostWuPipelineEvents();
+        for (uint16_t lane = 0; lane < KDA_POST_HEAD_PAIR_LANES; ++lane) {
+            PrefetchPostWuPipelineArch35(
+                resource, lane, b, hvBase + lane, start, curT, false);
+            PrefetchPostWuPipelineU(
+                resource, lane, b, hvBase + lane, start, curT, false);
+        }
+        for (uint16_t lane = 0; lane < KDA_POST_HEAD_PAIR_LANES; ++lane) {
+            ComputePrefetchedPostWuPipelineArch35(
+                resource, lane, b, hvBase + lane, start, curT);
+        }
+        FinalizePostWuPipelineEvents(KDA_POST_HEAD_PAIR_LANES);
+    }
+
+    __aicore__ inline void ProcessPreparedTailSingleArch35(
+        uint64_t b, uint64_t hv, uint64_t start, uint64_t curT)
+    {
+        SetLoadDataPaddingValue<T>(static_cast<T>(0));
+        Catlass::Arch::Resource<KdaArchTag> resource;
+        InitializePostWuPipelineSlot(0);
+        PrefetchPostWuPipelineArch35(resource, 0, b, hv, start, curT, false);
+        PrefetchPostWuPipelineU(resource, 0, b, hv, start, curT, false);
+        ComputePrefetchedPostWuPipelineArch35(resource, 0, b, hv, start, curT);
+        FinalizePostWuPipelineEvents(1);
+    }
+
+    __aicore__ inline void ProcessPreparedHeadPairBatchArch35(
+        const uint64_t *batchB, const uint64_t *batchHvBase,
+        const uint64_t *batchStart, const uint64_t *batchEnd, uint16_t taskCount)
+    {
+        uint16_t fullRunBegin = 0;
+        for (uint16_t task = 0; task < taskCount; ++task) {
+            if (batchEnd[task] - batchStart[task] == BT_) {
+                continue;
+            }
+            if (task > fullRunBegin) {
+                ProcessPreparedFullHeadPairBatchArch35(
+                    batchB + fullRunBegin, batchHvBase + fullRunBegin,
+                    batchStart + fullRunBegin, task - fullRunBegin);
+            }
+            ProcessPreparedTailHeadPairArch35(
+                batchB[task], batchHvBase[task], batchStart[task],
+                batchEnd[task] - batchStart[task]);
+            fullRunBegin = task + 1;
+        }
+        if (fullRunBegin < taskCount) {
+            ProcessPreparedFullHeadPairBatchArch35(
+                batchB + fullRunBegin, batchHvBase + fullRunBegin,
+                batchStart + fullRunBegin, taskCount - fullRunBegin);
+        }
     }
 #endif
 
@@ -706,12 +766,18 @@ private:
     }
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    __aicore__ inline bool UseFusedPostWuCubeA5(uint64_t curT) const
+    __aicore__ inline bool UsePostWuCubeArch35(uint64_t curT) const
     {
         return curT == 64 && BT_ == 64 && K_ == 128 && V_ == 128;
     }
 
-    __aicore__ inline void ComputePostWuCubeFusedA5(uint64_t b, uint64_t hv, uint64_t start)
+    __aicore__ inline bool UseFullPostWuPipelineArch35(uint64_t curT) const
+    {
+        return curT == 64 && BT_ == 64 && K_ == 128 && V_ == 128;
+    }
+
+    __aicore__ inline void ComputePostWuCubeFusedArch35(
+        uint64_t b, uint64_t hv, uint64_t start, uint64_t curT)
     {
         using ElementA = T;
         using ElementB = T;
@@ -722,14 +788,16 @@ private:
         using TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<
             KdaArchTag, ElementA, LayoutTagA, ElementB, LayoutTagB, ElementC, LayoutTagC>;
 
-        constexpr uint32_t m = 64;
+        constexpr uint32_t capacityM = 64;
         constexpr uint32_t n = 128;
-        constexpr uint32_t k = 64;
+        constexpr uint32_t capacityK = 64;
+        const uint32_t m = static_cast<uint32_t>(curT);
+        const uint32_t k = static_cast<uint32_t>(curT);
         SetLoadDataPaddingValue<T>(static_cast<T>(0));
 
-        auto layoutA = tla::MakeLayout<ElementA, LayoutTagA>(m, k);
-        auto layoutB = tla::MakeLayout<ElementB, LayoutTagB>(k, n);
-        auto layoutC = tla::MakeLayout<ElementC, LayoutTagC>(m, n);
+        auto layoutA = tla::MakeLayout<ElementA, LayoutTagA>(capacityM, capacityK);
+        auto layoutB = tla::MakeLayout<ElementB, LayoutTagB>(capacityK, n);
+        auto layoutC = tla::MakeLayout<ElementC, LayoutTagC>(capacityM, n);
         auto tensorA = tla::MakeTensor(
             preparedAqk_[AOffset(b, hv, start, 0)], layoutA, Catlass::Arch::PositionGM{});
         auto tensorW = tla::MakeTensor(
@@ -747,8 +815,8 @@ private:
         auto blockUOut = GetTile(tensorUOut, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
 
         Catlass::Arch::Resource<KdaArchTag> resource;
-        constexpr uint32_t aBytes = m * k * sizeof(ElementA);
-        constexpr uint32_t bBytes = k * n * sizeof(ElementB);
+        constexpr uint32_t aBytes = capacityM * capacityK * sizeof(ElementA);
+        constexpr uint32_t bBytes = capacityK * n * sizeof(ElementB);
         LocalTensor<ElementA> l1A = resource.l1Buf.template GetBufferByByte<ElementA>(0);
         LocalTensor<ElementB> l1B0 = resource.l1Buf.template GetBufferByByte<ElementB>(aBytes);
         LocalTensor<ElementB> l1B1 = resource.l1Buf.template GetBufferByByte<ElementB>(aBytes + bBytes);
@@ -768,11 +836,11 @@ private:
         using TileMmad =
             Catlass::Gemm::Tile::TileMmadTla<KdaArchTag, ElementA, LayoutTagL1A>;
 
-        auto layoutL1A = tla::MakeLayout<ElementA, LayoutTagL1A>(m, k);
-        auto layoutL1B = tla::MakeLayout<ElementB, LayoutTagL1B>(k, n);
-        auto layoutL0A = tla::MakeLayout<ElementA, LayoutTagL0A>(m, k);
-        auto layoutL0B = tla::MakeLayout<ElementB, LayoutTagL0B>(k, n);
-        auto layoutL0C = tla::MakeLayoutL0C(m, n);
+        auto layoutL1A = tla::MakeLayout<ElementA, LayoutTagL1A>(capacityM, capacityK);
+        auto layoutL1B = tla::MakeLayout<ElementB, LayoutTagL1B>(capacityK, n);
+        auto layoutL0A = tla::MakeLayout<ElementA, LayoutTagL0A>(capacityM, capacityK);
+        auto layoutL0B = tla::MakeLayout<ElementB, LayoutTagL0B>(capacityK, n);
+        auto layoutL0C = tla::MakeLayoutL0C(capacityM, n);
         auto tensorL1A = tla::MakeTensor(l1A, layoutL1A, Catlass::Arch::PositionL1{});
         auto tensorL1B0 = tla::MakeTensor(l1B0, layoutL1B, Catlass::Arch::PositionL1{});
         auto tensorL1B1 = tla::MakeTensor(l1B1, layoutL1B, Catlass::Arch::PositionL1{});
@@ -809,7 +877,7 @@ private:
         WaitFlag<HardEvent::MTE2_MTE1>(KDA_POST_EVENT_NEXT);
         WaitFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
         WaitFlag<HardEvent::M_MTE1>(KDA_POST_EVENT);
-        copyL0CToDst(blockWOut, tensorL0C);
+        copyL0CToDst(blockWOut, tileL0C);
         SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
 
         copyL1ToL0B(tileL0B, tileL1B1);
@@ -819,7 +887,7 @@ private:
         tileMmad(tileL0C, tileL0A, tileL0B, m, n, k, true, 0);
         SetFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
         WaitFlag<HardEvent::M_FIX>(KDA_POST_EVENT);
-        copyL0CToDst(blockUOut, tensorL0C);
+        copyL0CToDst(blockUOut, tileL0C);
         SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
         WaitFlag<HardEvent::FIX_M>(KDA_POST_EVENT_FIX);
     }
@@ -837,14 +905,19 @@ private:
     __aicore__ inline void InitializePostWuPipelineEvents()
     {
         for (uint16_t slot = 0; slot < KDA_POST_PIPELINE_STAGE_COUNT; ++slot) {
-            SetFlag<HardEvent::M_MTE1>(KDA_POST_EVENT + slot);
-            SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT + slot);
+            InitializePostWuPipelineSlot(slot);
         }
     }
 
-    __aicore__ inline void PrefetchPostWuPipelineA5(
+    __aicore__ inline void InitializePostWuPipelineSlot(uint16_t slot)
+    {
+        SetFlag<HardEvent::M_MTE1>(KDA_POST_EVENT + slot);
+        SetFlag<HardEvent::FIX_M>(KDA_POST_EVENT + slot);
+    }
+
+    __aicore__ inline void PrefetchPostWuPipelineArch35(
         Catlass::Arch::Resource<KdaArchTag> &resource, uint16_t slot,
-        uint64_t b, uint64_t hv, uint64_t start, bool reuseSlot)
+        uint64_t b, uint64_t hv, uint64_t start, uint64_t curT, bool reuseSlot)
     {
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
@@ -854,11 +927,13 @@ private:
         using LayoutTagL1A = typename TileCopy::LayoutTagL1A;
         using LayoutTagL1B = typename TileCopy::LayoutTagL1B;
 
-        constexpr uint32_t m = 64;
+        constexpr uint32_t capacityM = 64;
         constexpr uint32_t n = 128;
-        constexpr uint32_t k = 64;
-        auto layoutA = tla::MakeLayout<T, LayoutTagA>(m, k);
-        auto layoutB = tla::MakeLayout<T, LayoutTagB>(k, n);
+        constexpr uint32_t capacityK = 64;
+        const uint32_t m = static_cast<uint32_t>(curT);
+        const uint32_t k = static_cast<uint32_t>(curT);
+        auto layoutA = tla::MakeLayout<T, LayoutTagA>(capacityM, capacityK);
+        auto layoutB = tla::MakeLayout<T, LayoutTagB>(capacityK, n);
         auto tensorA = tla::MakeTensor(
             preparedAqk_[AOffset(b, hv, start, 0)], layoutA, Catlass::Arch::PositionGM{});
         auto tensorW = tla::MakeTensor(
@@ -874,8 +949,8 @@ private:
         LocalTensor<T> l1A = resource.l1Buf.template GetBufferByByte<T>(slotBase);
         LocalTensor<T> l1W = resource.l1Buf.template GetBufferByByte<T>(
             slotBase + KDA_POST_PIPELINE_L1_A_BYTES);
-        auto layoutL1A = tla::MakeLayout<T, LayoutTagL1A>(m, k);
-        auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(k, n);
+        auto layoutL1A = tla::MakeLayout<T, LayoutTagL1A>(capacityM, capacityK);
+        auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(capacityK, n);
         auto tensorL1A = tla::MakeTensor(l1A, layoutL1A, Catlass::Arch::PositionL1{});
         auto tensorL1W = tla::MakeTensor(l1W, layoutL1B, Catlass::Arch::PositionL1{});
 
@@ -890,7 +965,7 @@ private:
 
     __aicore__ inline void PrefetchPostWuPipelineU(
         Catlass::Arch::Resource<KdaArchTag> &resource, uint16_t slot,
-        uint64_t b, uint64_t hv, uint64_t start, bool reuseStage)
+        uint64_t b, uint64_t hv, uint64_t start, uint64_t curT, bool reuseStage)
     {
         using LayoutTagB = Catlass::layout::RowMajor;
         using TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<
@@ -898,9 +973,10 @@ private:
             T, Catlass::layout::RowMajor>;
         using LayoutTagL1B = typename TileCopy::LayoutTagL1B;
 
-        constexpr uint32_t k = 64;
+        constexpr uint32_t capacityK = 64;
         constexpr uint32_t n = 128;
-        auto layoutB = tla::MakeLayout<T, LayoutTagB>(k, n);
+        const uint32_t k = static_cast<uint32_t>(curT);
+        auto layoutB = tla::MakeLayout<T, LayoutTagB>(capacityK, n);
         auto tensorU = tla::MakeTensor(
             propagatedVNew_[KVOffset(b, hv, start, 0, V_)],
             layoutB, Catlass::Arch::PositionGM{});
@@ -911,7 +987,7 @@ private:
         uint32_t uOffset = KDA_POST_PIPELINE_STAGE_COUNT * KDA_POST_PIPELINE_L1_SLOT_BYTES +
                            static_cast<uint32_t>(slot) * KDA_POST_PIPELINE_L1_U_SLOT_BYTES;
         LocalTensor<T> l1U = resource.l1Buf.template GetBufferByByte<T>(uOffset);
-        auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(k, n);
+        auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(capacityK, n);
         auto tensorL1U = tla::MakeTensor(l1U, layoutL1B, Catlass::Arch::PositionL1{});
 
         uint16_t pipelineEvent = KDA_POST_PIPELINE_U_EVENT + slot;
@@ -922,9 +998,9 @@ private:
         SetFlag<HardEvent::MTE2_MTE1>(pipelineEvent);
     }
 
-    __aicore__ inline void ComputePrefetchedPostWuPipelineA5(
+    __aicore__ inline void ComputePrefetchedPostWuPipelineArch35(
         Catlass::Arch::Resource<KdaArchTag> &resource, uint16_t slot,
-        uint64_t b, uint64_t hv, uint64_t start)
+        uint64_t b, uint64_t hv, uint64_t start, uint64_t curT)
     {
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
@@ -939,11 +1015,13 @@ private:
         using CopyL1ToL0B = typename TileCopy::CopyL1ToL0B;
         using TileMmad = Catlass::Gemm::Tile::TileMmadTla<KdaArchTag, T, LayoutTagL1A>;
 
-        constexpr uint32_t m = 64;
+        constexpr uint32_t capacityM = 64;
         constexpr uint32_t n = 128;
         constexpr uint32_t packedN = 256;
-        constexpr uint32_t k = 64;
-        auto layoutC = tla::MakeLayout<T, LayoutTagC>(m, n);
+        constexpr uint32_t capacityK = 64;
+        const uint32_t m = static_cast<uint32_t>(curT);
+        const uint32_t k = static_cast<uint32_t>(curT);
+        auto layoutC = tla::MakeLayout<T, LayoutTagC>(capacityM, n);
         auto tensorWOut = tla::MakeTensor(
             w_[KVOffset(b, hv, start, 0, K_)], layoutC, Catlass::Arch::PositionGM{});
         auto tensorUOut = tla::MakeTensor(
@@ -966,11 +1044,11 @@ private:
         LocalTensor<float> l0C = resource.l0CBuf.template GetBufferByByte<float>(
             static_cast<uint32_t>(slot) * KDA_POST_PIPELINE_L0_C_SLOT_BYTES);
 
-        auto layoutL1A = tla::MakeLayout<T, LayoutTagL1A>(m, k);
-        auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(k, n);
-        auto layoutL0A = tla::MakeLayout<T, LayoutTagL0A>(m, k);
-        auto layoutL0B = tla::MakeLayout<T, LayoutTagL0B>(k, packedN);
-        auto layoutL0C = tla::MakeLayoutL0C(m, packedN);
+        auto layoutL1A = tla::MakeLayout<T, LayoutTagL1A>(capacityM, capacityK);
+        auto layoutL1B = tla::MakeLayout<T, LayoutTagL1B>(capacityK, n);
+        auto layoutL0A = tla::MakeLayout<T, LayoutTagL0A>(capacityM, capacityK);
+        auto layoutL0B = tla::MakeLayout<T, LayoutTagL0B>(capacityK, packedN);
+        auto layoutL0C = tla::MakeLayoutL0C(capacityM, packedN);
         auto tensorL1A = tla::MakeTensor(l1A, layoutL1A, Catlass::Arch::PositionL1{});
         auto tensorL1W = tla::MakeTensor(l1W, layoutL1B, Catlass::Arch::PositionL1{});
         auto tensorL1U = tla::MakeTensor(l1U, layoutL1B, Catlass::Arch::PositionL1{});
@@ -1020,8 +1098,8 @@ private:
                                              uint64_t curT)
     {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        if (UseFusedPostWuCubeA5(curT)) {
-            ComputePostWuCubeFusedA5(b, hv, start);
+        if (UsePostWuCubeArch35(curT)) {
+            ComputePostWuCubeFusedArch35(b, hv, start, curT);
             return;
         }
 #endif
@@ -1397,6 +1475,14 @@ private:
             SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
             WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
         }
+        if (rowEnd == curT) {
+            CopyVectorIn(typedLocal, k_, QOffset(b, h, last, 0), K_);
+            SetFlag<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
+            WaitFlag<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
+            CopyVectorOut(kg_, KVOffset(b, hv, last, 0, K_), typedLocal, K_);
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        }
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
@@ -1471,20 +1557,13 @@ private:
                 end = T_;
             }
         } else {
-            if (hasChunkIndices_) {
-                const uint64_t metadataOffset = flatChunk * 4;
-                seq = static_cast<uint64_t>(chunkIndicesAddr_[metadataOffset]);
-                start = static_cast<uint64_t>(chunkIndicesAddr_[metadataOffset + 1]);
-                end = static_cast<uint64_t>(chunkIndicesAddr_[metadataOffset + 2]);
-                b = 0;
-                chunkIdx = flatChunk;
-                if (seq >= N_ || start >= end || end > T_) {
-                    return false;
-                }
-                h = hv / (HV_ / H_);
-                return start < end;
+            if (!KdaVarlen::ResolveChunkRange(
+                    cuSeqlensAddr_, chunkIndicesAddr_, N_, T_, BT_, flatChunk,
+                    seq, start, end)) {
+                return false;
             }
-            return false;
+            b = 0;
+            chunkIdx = flatChunk;
         }
         h = hv / (HV_ / H_);
         return start < end;
@@ -1526,7 +1605,7 @@ private:
         }
     }
 
-    __aicore__ inline void ProcessPostAivPipelineA5(
+    __aicore__ inline void ProcessPostAivPipelineArch35(
         uint64_t taskBegin, uint64_t taskEnd, uint64_t subBlockIdx, uint64_t subBlockNum)
     {
         uint64_t task = taskBegin;
@@ -1628,6 +1707,12 @@ private:
             return;
         }
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if (curT < BT_) {
+            ComputeTailWuVector(b, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
+            CopyScratchWAndFinalizeKg(
+                b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
+            return;
+        }
         if (UseTypicalPostWuGate(curT)) {
             ComputeTypicalKg(b, h, hv, start, curT, subBlockIdx, subBlockNum);
             return;
@@ -1679,7 +1764,7 @@ private:
             uint64_t taskBegin = 0;
             uint64_t taskEnd = 0;
             GetHeadMajorTaskRange(coreIdx, coreNum, taskNum, taskBegin, taskEnd);
-            ProcessPostAivPipelineA5(taskBegin, taskEnd, subBlockIdx, subBlockNum);
+            ProcessPostAivPipelineArch35(taskBegin, taskEnd, subBlockIdx, subBlockNum);
             return;
         }
 #endif
@@ -1705,7 +1790,7 @@ private:
         }
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if (KDA_ENABLE_POST_AIC_PIPELINE && BT_ == 64 && K_ == 128 && V_ == 128) {
-            ProcessPostAicPipelineA5();
+            ProcessPostAicPipelineArch35();
             return;
         }
 #endif
@@ -1728,10 +1813,10 @@ private:
     }
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    __aicore__ inline void ProcessPostAicPipelineA5()
+    __aicore__ inline void ProcessPostAicPipelineArch35()
     {
         static_assert(sizeof(T) == sizeof(uint16_t),
-                      "A5 PostWU pipeline is specialized for fp16/bf16 inputs");
+                      "arch35 PostWU pipeline is specialized for fp16/bf16 inputs");
         SetLoadDataPaddingValue<T>(static_cast<T>(0));
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
@@ -1751,7 +1836,9 @@ private:
                 if (ResolveHeadMajorChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
                     (void)seq;
                     (void)h;
-                    ProcessChunkPostAic(b, hv, chunkIdx, start, end);
+                    if (end - start == BT_) {
+                        ProcessPreparedTailSingleArch35(b, hv, start, BT_);
+                    }
                 }
             }
             return;
@@ -1769,12 +1856,9 @@ private:
             uint64_t end = 0;
             bool resolved = ResolveHeadMajorChunk(task, seq, b, h, hv, chunkIdx, start, end);
             uint64_t curT = resolved ? end - start : 0;
-            if (!resolved || !UseFusedPostWuCubeA5(curT)) {
-                if (resolved) {
-                    (void)seq;
-                    (void)h;
-                    ProcessChunkPostAic(b, hv, chunkIdx, start, end);
-                }
+            if (!resolved || !UseFullPostWuPipelineArch35(curT)) {
+                (void)seq;
+                (void)h;
                 ++task;
                 continue;
             }
@@ -1782,8 +1866,8 @@ private:
             uint16_t slot = 0;
             uint16_t usedSlotCount = 1;
             InitializePostWuPipelineEvents();
-            PrefetchPostWuPipelineA5(resource, slot, b, hv, start, false);
-            PrefetchPostWuPipelineU(resource, slot, b, hv, start, false);
+            PrefetchPostWuPipelineArch35(resource, slot, b, hv, start, curT, false);
+            PrefetchPostWuPipelineU(resource, slot, b, hv, start, curT, false);
             while (true) {
                 uint64_t nextTask = task + 1;
                 uint64_t nextSeq = 0;
@@ -1796,20 +1880,20 @@ private:
                 bool nextResolved = nextTask < taskEnd && ResolveHeadMajorChunk(
                     nextTask, nextSeq, nextB, nextH, nextHv, nextChunkIdx, nextStart, nextEnd);
                 uint64_t nextCurT = nextResolved ? nextEnd - nextStart : 0;
-                bool nextIsTypical = nextResolved && UseFusedPostWuCubeA5(nextCurT);
+                bool nextIsTypical = nextResolved && UseFullPostWuPipelineArch35(nextCurT);
                 if (nextIsTypical) {
                     uint16_t nextSlot = slot ^ 1;
                     bool reuseSlot = usedSlotCount == KDA_POST_PIPELINE_STAGE_COUNT;
-                    PrefetchPostWuPipelineA5(
-                        resource, nextSlot, nextB, nextHv, nextStart, reuseSlot);
+                    PrefetchPostWuPipelineArch35(
+                        resource, nextSlot, nextB, nextHv, nextStart, nextCurT, reuseSlot);
                     PrefetchPostWuPipelineU(
-                        resource, nextSlot, nextB, nextHv, nextStart, reuseSlot);
+                        resource, nextSlot, nextB, nextHv, nextStart, nextCurT, reuseSlot);
                     if (!reuseSlot) {
                         ++usedSlotCount;
                     }
                 }
 
-                ComputePrefetchedPostWuPipelineA5(resource, slot, b, hv, start);
+                ComputePrefetchedPostWuPipelineArch35(resource, slot, b, hv, start, curT);
                 if (!nextIsTypical) {
                     FinalizePostWuPipelineEvents(usedSlotCount);
                     task = nextTask;
@@ -1875,7 +1959,7 @@ private:
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SCORE_QUEUE_DEPTH> scoreDoneFlag_{KDA_SCORE_DONE_FLAG0,
                                                                                  KDA_SCORE_DONE_FLAG1};
     // Score production is fully drained before solve starts, so the solve handshake can safely reuse
-    // the A2/A5-proven score flags without consuming additional hardware flag IDs.
+    // the existing score flags without consuming additional hardware flag IDs.
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> syncReadyFlag_{KDA_SCORE_READY_FLAG0,
                                                                                   KDA_SCORE_READY_FLAG1};
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SYNC_REVERSE_DEPTH> syncDoneFlag_{KDA_SCORE_DONE_FLAG0,
@@ -1892,12 +1976,12 @@ private:
     float scale_ = 1.0f;
     bool hasInitial_ = false;
     bool isVarLen_ = false;
-    bool hasChunkIndices_ = false;
     bool isAivOnly_ = false;
     bool inputSequenceMajor_ = false;
     uint64_t usedCoreNum_ = 1;
     uint64_t solveCoreIdx_ = 0;
     __gm__ int64_t *chunkIndicesAddr_ = nullptr;
+    __gm__ int64_t *cuSeqlensAddr_ = nullptr;
 };
 } // namespace
 

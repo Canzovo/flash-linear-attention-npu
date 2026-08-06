@@ -6,7 +6,6 @@
 
 #include "aclnn_chunk_kda_fwd.h"
 #include "chunk_kda_fwd.h"
-#include "../../../kda_gate_cumsum/op_host/op_api/kda_gate_cumsum.h"
 
 #include <algorithm>
 #include <cstring>
@@ -34,11 +33,6 @@ namespace {
 constexpr int64_t MAX_KDA_K_DIM = 256;
 constexpr int64_t MAX_KDA_HEAD_NUM = 128;
 
-bool IsAscend950Soc()
-{
-    const char *socName = aclrtGetSocName();
-    return socName != nullptr && std::strstr(socName, "Ascend950") != nullptr;
-}
 constexpr int64_t MAX_KDA_VARLEN_SEQUENCES = 1024;
 
 enum class KdaFwdLayout {
@@ -618,29 +612,16 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
             : MakeShape({info.batch, info.totalChunks, info.hvNum, info.kDim, info.vDim});
     const op::Shape stateShape4 =
         MakeShape({info.seqNum, info.hvNum, info.kDim, info.vDim});
+    const op::Shape placeholderShape = MakeShape({1});
 
     const aclTensor *gkCompute = params.gkOut;
     if (gkCompute != nullptr && info.isRank3) {
         gkCompute = AsRank4(gkCompute, gkShape4, executorPtr);
     }
     if (gkCompute == nullptr) {
-        gkCompute = AllocTensor(executorPtr, gkShape4, DataType::DT_FLOAT);
+        gkCompute = AllocTensor(executorPtr, placeholderShape, DataType::DT_FLOAT);
     }
     CHECK_RET(gkCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    const bool enablePrivateA5Path = IsAscend950Soc();
-    const bool deferGateCumsum =
-        enablePrivateA5Path && params.cuSeqlensOptional == nullptr && params.aLogOptional != nullptr &&
-        params.q->GetDataType() == DataType::DT_BF16 &&
-        params.g->GetDataType() == DataType::DT_FLOAT &&
-        params.beta->GetDataType() == DataType::DT_BF16 &&
-        params.useGateInKernel && params.safeGate && params.chunkSize == 64 &&
-        info.kDim == 128 && info.vDim == 128 && info.hvNum % 2 == 0 &&
-        info.seqlen % params.chunkSize == 0;
-    auto gateResult = l0op::KdaGateCumsum(
-        gHead, params.aLogOptional, params.dtBiasOptional, params.cuSeqlensOptional,
-        params.chunkSize, params.useGateInKernel, params.safeGate, params.lowerBound,
-        deferGateCumsum, gkCompute, executorPtr);
-    CHECK_RET(gateResult[0] != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     const aclTensor *aqkCompute = params.aqkOut;
     const aclTensor *akkCompute = params.akkOut;
@@ -675,28 +656,23 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
     if (akkCompute == nullptr) {
         akkCompute = AllocTensor(executorPtr, matrixShape4, params.q->GetDataType());
     }
-    const bool usePrivateBoundedStorage =
-        enablePrivateA5Path && params.chunkSize == 64 && info.kDim == 128 && info.vDim == 128 &&
-        params.cuSeqlensOptional == nullptr && info.seqlen % params.chunkSize == 0;
-    const op::Shape vNewScratchShape4 =
-        MakeShape({info.batch, info.hvNum, params.chunkSize, info.vDim});
-    const op::Shape hScratchShape4 =
-        MakeShape({info.batch, info.hvNum, info.kDim, info.vDim});
     const aclTensor *wCompute = wExport == nullptr
-        ? AllocTensor(executorPtr, kShape4, params.q->GetDataType()) : wExport;
+        ? AllocTensor(executorPtr, placeholderShape, params.q->GetDataType())
+        : wExport;
     const aclTensor *uCompute = uExport == nullptr
-        ? AllocTensor(executorPtr, vShape4, params.q->GetDataType()) : uExport;
+        ? AllocTensor(executorPtr, placeholderShape, params.q->GetDataType())
+        : uExport;
     const aclTensor *qgCompute = qgExport == nullptr
-        ? AllocTensor(executorPtr, kShape4, params.q->GetDataType()) : qgExport;
+        ? AllocTensor(executorPtr, placeholderShape, params.q->GetDataType())
+        : qgExport;
     const aclTensor *kgCompute = kgExport == nullptr
-        ? AllocTensor(executorPtr, kShape4, params.q->GetDataType()) : kgExport;
+        ? AllocTensor(executorPtr, placeholderShape, params.q->GetDataType())
+        : kgExport;
     const aclTensor *vNewCompute = vNewExport == nullptr
-        ? AllocTensor(executorPtr, usePrivateBoundedStorage ? vNewScratchShape4 : vShape4,
-                      params.q->GetDataType())
+        ? AllocTensor(executorPtr, placeholderShape, params.q->GetDataType())
         : vNewExport;
     const aclTensor *hCompute = AllocTensor(
-        executorPtr,
-        usePrivateBoundedStorage && hExport == nullptr ? hScratchShape4 : hShape5,
+        executorPtr, hExport == nullptr ? placeholderShape : hShape5,
         params.q->GetDataType());
     CHECK_RET(aqkCompute != nullptr && akkCompute != nullptr && wCompute != nullptr &&
                   uCompute != nullptr && qgCompute != nullptr && kgCompute != nullptr &&
@@ -709,7 +685,9 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
         CHECK_RET(initialStateCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
     const bool outputFinalState = params.finalStateOut != nullptr;
-    const aclTensor *finalStateCompute = AllocTensor(executorPtr, stateShape4, DataType::DT_FLOAT);
+    const aclTensor *finalStateCompute = AllocTensor(
+        executorPtr, outputFinalState ? stateShape4 : placeholderShape,
+        DataType::DT_FLOAT);
     CHECK_RET(finalStateCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     const aclTensor *attnCompute = params.attnOut;
@@ -720,14 +698,12 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
     }
 
     auto result = l0op::KdaChunkForward(
-        qHead, kHead, vHead, gkCompute, betaHead, gHead,
-        params.aLogOptional, params.dtBiasOptional, initialStateCompute,
-        params.cuSeqlensOptional, params.chunkIndicesOptional, params.scale, params.chunkSize,
-        outputFinalState, info.totalChunks, params.safeGate,
+        qHead, kHead, vHead, gHead, betaHead, params.aLogOptional,
+        params.dtBiasOptional, initialStateCompute, params.cuSeqlensOptional,
+        params.chunkIndicesOptional, params.scale, params.chunkSize, params.safeGate,
         parsedLayout == KdaFwdLayout::BSND, params.useGateInKernel,
-        params.lowerBound, deferGateCumsum, enablePrivateA5Path,
-        qgExport != nullptr, vNewExport != nullptr, hExport != nullptr, attnCompute,
-        finalStateCompute, aqkCompute, akkCompute, wCompute, uCompute, qgCompute,
+        params.lowerBound, attnCompute, finalStateCompute, gkCompute,
+        aqkCompute, akkCompute, wCompute, uCompute, qgCompute,
         kgCompute, vNewCompute, hCompute, executorPtr);
     for (const aclTensor *tensor : result) {
         CHECK_RET(tensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
@@ -746,7 +722,7 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
         const std::vector<int64_t> hPerm =
             params.stateVFirst ? std::vector<int64_t>{0, 2, 1, 4, 3}
                                : std::vector<int64_t>{0, 2, 1, 3, 4};
-        const aclTensor *hResult = Transpose(result[9], hPerm, executorPtr);
+        const aclTensor *hResult = Transpose(result[10], hPerm, executorPtr);
         CHECK_RET(hResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
         CHECK_RET(l0op::ViewCopy(hResult, hExport, executorPtr) != nullptr,
                   ACLNN_ERR_INNER_NULLPTR);

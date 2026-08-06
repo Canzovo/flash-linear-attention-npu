@@ -29,9 +29,9 @@
 #include "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #endif
 
-#include "fla/ops/ascendc/kda/chunk_kda_fwd_post_wu/op_kernel/chunk_kda_fwd_post_wu_kernel.hpp"
-#include "fla/ops/ascendc/kda/chunk_kda_fwd_prepare/op_kernel/chunk_kda_fwd_prepare_kernel.hpp"
-#include "fla/ops/ascendc/kda/chunk_kda_fwd_finalize/op_kernel/chunk_kda_fwd_finalize_kernel.hpp"
+#include "fla/ops/ascendc/kda/chunk_kda_fwd/op_kernel/chunk_kda_fwd_post_wu.h"
+#include "fla/ops/ascendc/kda/chunk_kda_fwd/op_kernel/chunk_kda_fwd_prepare.h"
+#include "fla/ops/ascendc/kda/chunk_kda_fwd/op_kernel/chunk_kda_fwd_finalize.h"
 
 namespace ascend_ops::ChunkKdaFwdDirect {
 namespace {

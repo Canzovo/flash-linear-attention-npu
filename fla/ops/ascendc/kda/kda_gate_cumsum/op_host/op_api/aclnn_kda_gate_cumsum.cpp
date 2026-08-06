@@ -162,7 +162,7 @@ aclnnStatus aclnnKdaGateCumsumGetWorkspaceSize(
     CHECK_RET(KdaGateDataContiguous(dtBiasOptional, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
     auto result = l0op::KdaGateCumsum(g, aLogOptional, dtBiasOptional, cuSeqlensOptional, chunkSize,
-                                      useGateInKernel, safeGate, lowerBound, false, gkOut, executorPtr);
+                                      useGateInKernel, safeGate, lowerBound, gkOut, executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
