@@ -158,7 +158,7 @@ def extract_probe_records(log_text: str) -> list[dict]:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if "output_count" not in payload:
+        if "output_count" not in payload or not isinstance(payload.get("outputs"), dict):
             continue
         attn_out = payload.get("outputs", {}).get("attn_out") or {}
         records.append({

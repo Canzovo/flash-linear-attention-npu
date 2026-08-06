@@ -491,30 +491,34 @@ private:
         PipeBarrier<PIPE_V>();
     }
 
-    template <typename CopyT>
-    __aicore__ inline float LoadScalarAsFloat(GlobalTensor<CopyT> &src, uint64_t offset)
-    {
-        CopyT value = src.GetValue(offset);
-        if constexpr (IsSameType<CopyT, bfloat16_t>::value) {
-            return AscendC::ToFloat(value);
-        }
-        return static_cast<float>(value);
-    }
-
     __aicore__ inline void ComputeTailLocalRows(LocalTensor<float> &dst, uint64_t b, uint64_t hv,
                                                 uint64_t start, uint64_t curT, uint64_t rowBegin,
                                                 uint64_t rows)
     {
         LocalTensor<float> vRow = exp2Buf_.Get<float>();
+        LocalTensor<T> coefficientTyped = gateWritebackBuf_.Get<T>();
+        LocalTensor<float> coefficients = gateWritebackBuf_.Get<float>()[BT_];
         for (uint64_t localRow = 0; localRow < rows; ++localRow) {
             LocalTensor<float> dstRow = dst[localRow * V_];
+            CopyVectorIn(
+                coefficientTyped, preparedAqk_,
+                AOffset(b, hv, start + rowBegin + localRow, 0), curT);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            Cast(
+                coefficients, coefficientTyped, RoundMode::CAST_NONE,
+                static_cast<uint32_t>(curT));
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(mte2ToVEvent_);
+            WaitFlag<HardEvent::V_S>(mte2ToVEvent_);
             Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
             PipeBarrier<PIPE_V>();
             for (uint64_t j = 0; j < curT; ++j) {
-                float weight = LoadScalarAsFloat(
-                    preparedAqk_, AOffset(b, hv, start + rowBegin + localRow, j));
                 LoadAsFloatRow(
                     propagatedVNew_, KVOffset(b, hv, start + j, 0, V_), vRow, V_);
+                float weight = coefficients.GetValue(j);
+                SetFlag<HardEvent::S_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::S_V>(mte2ToVEvent_);
                 Muls(vRow, vRow, weight, static_cast<uint32_t>(V_));
                 PipeBarrier<PIPE_V>();
                 Add(dstRow, dstRow, vRow, static_cast<uint32_t>(V_));
@@ -522,6 +526,8 @@ private:
                 SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
                 WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
             }
+            SetFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
+            WaitFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
         }
     }
 

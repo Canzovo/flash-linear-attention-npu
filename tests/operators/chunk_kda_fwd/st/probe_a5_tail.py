@@ -368,9 +368,12 @@ def _run_parent(args):
             command.append("--saved")
         print(f"[RUN] {name}", flush=True)
         try:
+            child_env = {**os.environ, "ASCEND_LAUNCH_BLOCKING": "1"}
+            if adapter:
+                child_env["FLA_NPU_KDA_ADAPTER_DEBUG_SYNC"] = "1"
             result = subprocess.run(
                 command,
-                env={**os.environ, "ASCEND_LAUNCH_BLOCKING": "1"},
+                env=child_env,
                 text=True,
                 capture_output=True,
                 timeout=timeout,

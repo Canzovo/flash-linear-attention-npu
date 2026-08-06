@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
+import os
 import sys
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
@@ -45,6 +47,18 @@ _EXPECTED_PARAMETERS = {
 
 _ORIGINALS: Dict[str, Callable[..., Any]] = {}
 _L2NORM_ORIGINALS: Dict[str, Callable[..., Any]] = {}
+
+
+def _debug_synchronize(stage: str) -> None:
+    """Synchronize adapter boundaries only for the A5 acceptance probe."""
+
+    if os.environ.get("FLA_NPU_KDA_ADAPTER_DEBUG_SYNC") != "1":
+        return
+    import torch
+
+    print(json.dumps({"stage": f"{stage}_sync_begin"}), flush=True)
+    torch.npu.synchronize()
+    print(json.dumps({"stage": f"{stage}_sync_done"}), flush=True)
 
 
 def _install_triton_extra_ascend_compat() -> bool:
@@ -195,6 +209,7 @@ def triton_ascend_chunk_kda_fwd(
             state_v_first=bool(transpose_state_layout),
         )
     )
+    _debug_synchronize("adapter_core")
     if len(outputs) != 12:
         raise RuntimeError(
             f"fla_npu chunk_kda_fwd returned {len(outputs)} values; expected 12."
@@ -204,6 +219,7 @@ def triton_ascend_chunk_kda_fwd(
     # Triton-Ascend autograd contract.
     for index in range(2, 10):
         outputs[index] = _head_major_to_sequence_major(outputs[index])
+    _debug_synchronize("adapter_layout_exports")
 
     if disable_recompute:
         required = {

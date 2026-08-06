@@ -748,9 +748,30 @@ def test_a5_finalize_uses_fp32_vector_accumulation_for_sub_16_reduction():
 
     assert "constexpr uint32_t KDA_CUBE_MIN_REDUCTION = 16;" in finalize
     assert "ComputeTailLocalRows" in finalize
-    assert "LoadScalarAsFloat" in finalize
-    assert "AscendC::ToFloat(value)" in finalize
+    assert "coefficientTyped" in finalize
+    assert "coefficients.GetValue(j)" in finalize
+    assert "LoadScalarAsFloat" not in finalize
+    assert "HardEvent::V_S" in finalize
+    assert "HardEvent::S_V" in finalize
     assert finalize.count("curT < KDA_CUBE_MIN_REDUCTION") >= 2
+
+
+def test_a5_fwd_h_tail_stages_w_coefficients_in_ub_before_scalar_read():
+    kernel = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h"
+        / "op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+    ).read_text(encoding="utf-8")
+
+    assert "TAIL_WEIGHT_INPUT_OFFSET" in kernel
+    assert "TAIL_WEIGHT_FLOAT_OFFSET" in kernel
+    assert "weightFloatUb.GetValue(kIdx)" in kernel
+    tail_v_workspace = kernel.split("ComputeTailVWorkspace", 1)[1].split(
+        "ComputeTailHWorkspace", 1
+    )[0]
+    assert "LoadScalarAsFloat" not in tail_v_workspace
+    assert "HardEvent::V_S" in kernel
+    assert "HardEvent::S_V" in kernel
 
 
 def test_kda_keeps_fp32_state_update_when_final_state_is_not_returned():

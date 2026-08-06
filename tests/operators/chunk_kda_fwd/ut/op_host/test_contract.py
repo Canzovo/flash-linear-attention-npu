@@ -88,3 +88,12 @@ def test_a5_one_click_entry_builds_and_runs_the_acceptance_matrix():
     assert '"launch_begin"' in probe
     assert '"launch_returned"' in probe
     assert '"synchronize_done"' in probe
+    assert "FLA_NPU_KDA_ADAPTER_DEBUG_SYNC" in probe
+
+    adapter = (
+        ROOT
+        / "torch_custom/fla_npu/fla_npu/adapters/triton_ascend_kda.py"
+    ).read_text(encoding="utf-8")
+    assert "def _debug_synchronize" in adapter
+    assert '_debug_synchronize("adapter_core")' in adapter
+    assert '_debug_synchronize("adapter_layout_exports")' in adapter
