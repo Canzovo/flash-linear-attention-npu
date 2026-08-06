@@ -126,16 +126,17 @@ FLA_NPU_SOC=ascend910b python -m pip wheel --no-build-isolation --no-deps . -w d
 - A3：`ascend910_93`
 - A5：`ascend950`
 
-本地增量调试可以使用：
+源码或适配修改后仍执行完整 wheel 构建；构建流程会清理上一轮中间产物：
 
 ```sh
-FLA_NPU_SOC=ascend910b FLA_NPU_INCREMENTAL_BUILD=1 python -m pip wheel --no-build-isolation --no-deps . -w dist
+FLA_NPU_SOC=ascend910b python -m pip wheel --no-build-isolation --no-deps . -w dist
 ```
 
-只构建部分算子用于定位时使用 `FLA_NPU_OPS`，不要和 `FLA_NPU_INCREMENTAL_BUILD` 同时使用：
+只构建部分算子用于定位时，显式构建单算子 run 包；该产物不能替代完整 wheel
+的全量重编：
 
 ```sh
-FLA_NPU_SOC=ascend910b FLA_NPU_OPS=chunk_fwd_o python -m pip wheel --no-build-isolation --no-deps . -w dist
+bash build.sh --soc=ascend910b --pkg --vendor_name=fla_npu --ops=chunk_fwd_o
 ```
 
 分开编 OPP run 包和 `torch_custom` 适配时：

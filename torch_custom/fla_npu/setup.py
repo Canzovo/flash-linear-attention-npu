@@ -9,12 +9,14 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
 from pathlib import Path
 
 from setuptools import find_packages, setup
+from setuptools.command.build_py import build_py as _build_py
 
 
 SETUP_DIR = Path(__file__).resolve().parent
@@ -28,6 +30,14 @@ OPP_PACKAGE_DATA = [
     "opp/vendors/config.ini",
     "opp/vendors/fla_npu_transformer/README.txt",
 ]
+
+
+class CleanBuildPy(_build_py):
+    def run(self):
+        built_package_dir = Path(self.build_lib) / "fla_npu"
+        if built_package_dir.exists():
+            shutil.rmtree(built_package_dir)
+        super().run()
 
 
 def _env_flag(name):
@@ -78,6 +88,7 @@ def _setup_pure_python():
         package_data={"fla_npu": OPP_PACKAGE_DATA},
         include_package_data=True,
         zip_safe=False,
+        cmdclass={"build_py": CleanBuildPy},
     )
 
 
@@ -194,7 +205,7 @@ def _setup_legacy_extension():
                 extra_link_args=get_link_args(),
             )
         ],
-        cmdclass={"build_ext": BuildExtension},
+        cmdclass={"build_ext": BuildExtension, "build_py": CleanBuildPy},
         zip_safe=False,
         packages=_packages(),
         package_dir=_package_dir(),
