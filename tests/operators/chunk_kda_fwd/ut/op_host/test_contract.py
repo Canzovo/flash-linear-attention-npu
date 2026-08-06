@@ -72,11 +72,14 @@ def test_a5_one_click_entry_builds_and_runs_the_acceptance_matrix():
     assert "profile_h96_t16k" in runner
     assert "returncode == 124" in runner
     assert "extract_probe_records" in runner
+    assert "extract_probe_progress" in runner
+    assert "format_probe_progress" in runner
     assert "summary.txt" in runner
     assert runner.index('Case("h96_t8k_t16k"') < runner.index(
         'Case("bf16_gate_params"'
     )
     assert "changed_outputs=" in runner
+    assert "last_progress=" in runner
     assert '"--bf16-gate-params"' in probe
     assert "value.detach().cpu().contiguous()" in probe
     assert '"deterministic_by_output"' in probe

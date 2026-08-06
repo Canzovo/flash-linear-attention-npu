@@ -175,6 +175,60 @@ def extract_probe_records(log_text: str) -> list[dict]:
     return records
 
 
+def extract_probe_progress(log_text: str) -> dict | None:
+    """Return the last flushed child stage, retaining its case context."""
+    subcase = "unknown"
+    context = {}
+    last_progress = None
+    for raw_line in log_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[RUN] "):
+            subcase = line[len("[RUN] "):]
+            context = {}
+            continue
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        stage = payload.get("stage")
+        if not stage:
+            continue
+        if stage == "child_start":
+            context = {
+                key: payload.get(key)
+                for key in (
+                    "tokens", "heads", "layout", "adapter",
+                    "final_state", "saved",
+                )
+            }
+        last_progress = {
+            "subcase": subcase,
+            **context,
+            "stage": stage,
+        }
+        if "repeat" in payload:
+            last_progress["repeat"] = payload["repeat"]
+        for key in ("gate_dtype", "a_log_dtype", "dt_bias_dtype"):
+            if key in payload:
+                last_progress[key] = payload[key]
+    return last_progress
+
+
+def format_probe_progress(progress: dict) -> str:
+    ordered_keys = (
+        "subcase", "stage", "repeat", "tokens", "heads", "layout",
+        "adapter", "final_state", "saved", "gate_dtype", "a_log_dtype",
+        "dt_bias_dtype",
+    )
+    return ",".join(
+        f"{key}={progress[key]}"
+        for key in ordered_keys
+        if progress.get(key) is not None
+    )
+
+
 def compact_mismatch_note(records: list[dict], default: str) -> str:
     for record in records:
         differences = record.get("binary_differences") or []
@@ -211,6 +265,9 @@ def write_summary(args, results):
             f"returncode={result['returncode']}"
         )
         records = result.get("probe_records") or []
+        progress = result.get("probe_progress")
+        if progress:
+            lines.append(f"  last_progress={format_probe_progress(progress)}")
         for record in records:
             runtime = record.get("runtime") or {}
             lines.append(
@@ -325,8 +382,11 @@ def main():
                 log_text, returncode
             )
         probe_records = extract_probe_records(log_text)
+        probe_progress = extract_probe_progress(log_text)
         if status == "MISMATCH":
             note = compact_mismatch_note(probe_records, note)
+        elif status == "TIMEOUT" and probe_progress:
+            note = f"{note}; last_progress={format_probe_progress(probe_progress)}"
         result = {
             **asdict(case),
             "status": status,
@@ -335,6 +395,7 @@ def main():
             "log": str(log_path),
             "note": note,
             "probe_records": probe_records,
+            "probe_progress": probe_progress,
         }
         results.append(result)
         write_reports(args, results)
