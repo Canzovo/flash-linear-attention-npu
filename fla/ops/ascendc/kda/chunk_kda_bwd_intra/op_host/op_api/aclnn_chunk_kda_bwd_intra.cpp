@@ -83,7 +83,7 @@ const aclTensor *TransposeSwap12ToOutput(
     return l0op::ViewCopy(transposed, output, executor);
 }
 
-bool SameShape(const aclTensor *a, const aclTensor *b)
+static bool SameShape(const aclTensor *a, const aclTensor *b)
 {
     const auto lhs = a->GetViewShape();
     const auto rhs = b->GetViewShape();
@@ -98,7 +98,7 @@ bool SameShape(const aclTensor *a, const aclTensor *b)
     return true;
 }
 
-aclnnStatus ParseLayout(const char *text, Layout &layout)
+static aclnnStatus ParseLayout(const char *text, Layout &layout)
 {
     CHECK_COND(text != nullptr, ACLNN_ERR_PARAM_INVALID,
                "layout must not be nullptr and must be BSND, BNSD or TND.");
