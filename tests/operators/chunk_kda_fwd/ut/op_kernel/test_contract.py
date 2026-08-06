@@ -723,8 +723,10 @@ def test_a5_fwd_h_routes_sub_16_token_tail_away_from_cube_mmad():
     ).read_text(encoding="utf-8")
 
     assert kernel.count("blockTokens < 16") >= 6
-    assert "ComputeTailVWorkspace(vec1Offsets);" in kernel
-    assert "ComputeTailHWorkspace(vec2Offsets);" in kernel
+    assert "ComputeTailVWorkspace(" in kernel
+    assert "ComputeTailHWorkspace(" in kernel
+    assert "vec1Offsets, EVENT_ID3 + (i == 0 ? 0 : pongBaseEvent)" in kernel
+    assert "vec2Offsets, EVENT_ID3 + (i == 0 ? 0 : pongBaseEvent)" in kernel
     assert "cubeBlockScheduler.cube1Done[streamId]" in kernel
     assert "cubeBlockScheduler.cube2Done[streamId]" in kernel
     assert "bool useDirectForTask = useDirectFp32Ub && !tailVectorPath;" in kernel
@@ -801,6 +803,15 @@ def test_a5_fwd_h_tail_stages_w_coefficients_in_ub_before_scalar_read():
     assert "LoadScalarAsFloat" not in tail_h_workspace
     assert "HardEvent::V_S" in kernel
     assert "HardEvent::S_V" in kernel
+    assert "HardEvent::V_MTE2" in tail_v_workspace
+    assert "HardEvent::V_MTE2" in tail_h_workspace
+    assert "WaitFlag<AscendC::HardEvent::V_MTE2>(tailEventId)" in tail_v_workspace
+    assert "SetFlag<AscendC::HardEvent::V_MTE2>(tailEventId)" in tail_v_workspace
+    assert "WaitFlag<AscendC::HardEvent::V_MTE2>(tailEventId)" in tail_h_workspace
+    assert "SetFlag<AscendC::HardEvent::V_MTE2>(tailEventId)" in tail_h_workspace
+    assert "HardEvent::MTE3_MTE2>(tailEventId)" in tail_v_workspace
+    assert "HardEvent::MTE3_MTE2>(tailEventId)" in tail_h_workspace
+    assert "EVENT_ID3 + (i == 0 ? 0 : pongBaseEvent)" in kernel
 
 
 def test_kda_keeps_fp32_state_update_when_final_state_is_not_returned():
