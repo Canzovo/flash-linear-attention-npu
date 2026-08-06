@@ -231,6 +231,66 @@ def test_adapter_does_not_patch_reverse_cumsum_or_backward_modules():
     assert adapter._L2NORM_TARGET_MODULE == adapter._TARGET_MODULES[1]
 
 
+def test_adapter_promotes_bf16_gate_parameters_only_for_ascendc_forward():
+    adapter = _load_adapter()
+    bf16 = object()
+    fp32 = object()
+    promoted_a_log = object()
+    promoted_dt_bias = object()
+    calls = {}
+
+    class FakeTensor:
+        def __init__(self, dtype, promoted=None):
+            self.dtype = dtype
+            self.promoted = promoted
+            self.shape = (1, 1, 1, 1)
+
+        def dim(self):
+            return 4
+
+        def float(self):
+            return self.promoted
+
+    def fake_chunk_kda_fwd(*args, **kwargs):
+        calls.update(kwargs)
+        return (None,) * 12
+
+    q = FakeTensor(fp32)
+    a_log = FakeTensor(bf16, promoted_a_log)
+    a_log_fp32 = FakeTensor(fp32)
+    dt_bias_bf16 = FakeTensor(bf16, promoted_dt_bias)
+    dt_bias = FakeTensor(fp32)
+    observed = []
+    previous_torch = sys.modules.get("torch")
+    sys.modules["torch"] = types.SimpleNamespace(bfloat16=bf16)
+    adapter._load_ascendc_ops = lambda: fake_chunk_kda_fwd
+    try:
+        for a_log_input, dt_bias_input in (
+            (a_log, dt_bias),
+            (a_log_fp32, dt_bias_bf16),
+            (a_log, dt_bias_bf16),
+        ):
+            calls.clear()
+            adapter.triton_ascend_chunk_kda_fwd(
+                q, q, q, q, q, 1.0, None, False,
+                use_gate_in_kernel=True,
+                A_log=a_log_input,
+                dt_bias=dt_bias_input,
+            )
+            observed.append((calls["A_log"], calls["dt_bias"]))
+    finally:
+        if previous_torch is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = previous_torch
+
+    assert observed == [
+        (promoted_a_log, dt_bias),
+        (a_log_fp32, promoted_dt_bias),
+        (promoted_a_log, promoted_dt_bias),
+    ]
+
+
 def test_model_backward_h96_case_is_pinned_in_manifest():
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     assert manifest["coverage_requirements"]["model_adapter_case_ids"] == [

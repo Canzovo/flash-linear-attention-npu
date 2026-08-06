@@ -81,6 +81,8 @@ A2/A3/A5 通过 `FLA_NPU_SOC` 选择。精度逐项比较全部公开输出并�
 - 反向仍使用模型现有 Triton-Ascend KDA 实现；
 - L2Norm 反向不替换，继续使用模型现有实现；
 - 输入保持 BSND，不修改模型张量准备；
+- 模型侧 `A_log` / `dt_bias` 可为 FP32 或 BF16；BF16 仅在 AscendC 正向边界
+  升为 FP32，原张量继续由现有 Triton 反向使用；
 - AscendC 的 BNSD 中间量在适配边界转回 BSND，供现有 Triton 反向直接消费；
 - 优先使用 `cu_seqlens_cpu` 一次性构造 L2 metadata，避免逐元素 NPU 到 Host 同步；
 - `disable_recompute=True` 时按 fla-org 低层接口保留 Triton 反向需要的
