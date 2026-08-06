@@ -46,9 +46,19 @@ FLA_NPU_RUN_OPERATOR_TESTS=1 pytest -q tests/operators/chunk_kda_fwd/accuracy/te
 FLA_NPU_CASE_TAGS=generalization FLA_NPU_RUN_OPERATOR_TESTS=1 pytest -q tests/operators/chunk_kda_fwd/accuracy/test_chunk_kda_fwd.py
 pytest -q --import-mode=importlib tests/operators/chunk_kda_fwd/ut
 python tests/operators/chunk_kda_fwd/performance/profile.py --dry-run
+python tests/operators/chunk_kda_fwd/performance/profile.py --case-id chunk_kda_fwd_h96_t8k_model_performance
+python tests/operators/chunk_kda_fwd/performance/profile.py --case-id chunk_kda_fwd_h96_t16k_model_performance
+python tests/operators/chunk_kda_fwd/st/probe_a5_tail.py --device 0
+python tests/operators/chunk_kda_fwd/st/probe_a5_tail.py --device 0 --long-seq
 FLA_NPU_RUN_OPERATOR_TESTS=1 pytest -q tests/operators/chunk_kda_fwd/st/test_example.py
 cd examples/fast_kernel_launch_example && FAST_KERNEL_OP_NAME=chunk_kda_fwd pytest -q tests/chunk_kda_fwd
 ```
+
+`probe_a5_tail.py` 默认验证 `T=64/65` 尾块与 final-state 同步；`--long-seq` 使用
+BF16、BSND、`H=96`、`K=V=128`、`chunk_size=64`，依次单跑 `T=8192/16384`，
+只保留必要正向输出并报告 finite、采样 fingerprint、耗时和 NPU allocator 占用。长序列探针
+直接构造已完成 Q/K L2Norm 和 beta sigmoid 的输入；包含实际前处理 launch 的全链路性能使用上面的
+两个 `profile.py --case-id` 命令测量。
 
 A2/A3/A5 通过 `FLA_NPU_SOC` 选择。精度逐项比较全部公开输出并检查 NaN/Inf；性能只使用 msopprof
 设备侧结果，按 JSON 的 `expect.requirement` 对比 Triton 或当前主线基线。报告记录平台、case 总数、通过数和

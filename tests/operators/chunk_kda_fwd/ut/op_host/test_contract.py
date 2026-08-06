@@ -21,29 +21,27 @@ def test_route_case_uses_one_shape_definition():
     assert any({"ascendc", "aclnn", "direct_launch"} <= set(case["run_on"]) for case in route_cases)
 
 
-def test_a5_h96_model_performance_case_keeps_full_preprocess_contract():
+def test_a5_h96_model_performance_cases_keep_full_preprocess_contract():
     data = manifest()
-    case = next(
-        case
-        for case in data["cases"]
-        if case["id"] == "chunk_kda_fwd_h96_t16k_model_performance"
-    )
-    assert case["soc"] == ["ascend950"]
-    assert case["layout"] == "BSND"
-    assert case["shape"] == {
-        "B": 1,
-        "H_k": 96,
-        "H_v": 96,
-        "T": 16384,
-        "K": 128,
-        "V": 128,
-        "chunk_size": 64,
-        "N_c": 256,
-    }
-    assert case["dtype"]["q_k_v"] == "bfloat16"
-    assert case["dtype"]["beta"] == "bfloat16"
-    assert case["attrs"]["use_gate_in_kernel"] is True
-    assert case["attrs"]["use_qk_l2norm_in_kernel"] is True
-    assert case["attrs"]["use_beta_sigmoid_in_kernel"] is True
-    assert case["attrs"]["safe_gate"] is True
-    assert case["attrs"]["lower_bound"] == -5.0
+    cases = {case["id"]: case for case in data["cases"]}
+    for suffix, tokens, chunks in (("t8k", 8192, 128), ("t16k", 16384, 256)):
+        case = cases[f"chunk_kda_fwd_h96_{suffix}_model_performance"]
+        assert case["soc"] == ["ascend950"]
+        assert case["layout"] == "BSND"
+        assert case["shape"] == {
+            "B": 1,
+            "H_k": 96,
+            "H_v": 96,
+            "T": tokens,
+            "K": 128,
+            "V": 128,
+            "chunk_size": 64,
+            "N_c": chunks,
+        }
+        assert case["dtype"]["q_k_v"] == "bfloat16"
+        assert case["dtype"]["beta"] == "bfloat16"
+        assert case["attrs"]["use_gate_in_kernel"] is True
+        assert case["attrs"]["use_qk_l2norm_in_kernel"] is True
+        assert case["attrs"]["use_beta_sigmoid_in_kernel"] is True
+        assert case["attrs"]["safe_gate"] is True
+        assert case["attrs"]["lower_bound"] == -5.0
