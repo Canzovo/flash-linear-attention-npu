@@ -354,6 +354,7 @@ public:
         if (rowBegin >= rowEnd) {
             return;
         }
+        AscendC::ResetMask();
 
         constexpr uint32_t TAIL_INPUT_OFFSET = 166 * 1024;
         constexpr uint32_t TAIL_FLOAT_OFFSET = 167 * 1024;
@@ -424,6 +425,7 @@ public:
         uint32_t rowsPerSubBlock = CeilDiv(kHeadDim, subBlockNum);
         uint32_t rowBegin = subBlockIdx * rowsPerSubBlock;
         uint32_t rowEnd = Min(rowBegin + rowsPerSubBlock, kHeadDim);
+        AscendC::ResetMask();
 
         constexpr uint32_t TAIL_INPUT_OFFSET = 166 * 1024;
         constexpr uint32_t TAIL_FLOAT_OFFSET = 167 * 1024;

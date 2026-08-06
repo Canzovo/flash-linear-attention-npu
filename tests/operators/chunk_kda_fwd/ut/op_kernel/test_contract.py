@@ -794,6 +794,8 @@ def test_a5_fwd_h_tail_stages_w_coefficients_in_ub_before_scalar_read():
     tail_h_workspace = kernel.split("ComputeTailHWorkspace", 1)[1].split(
         "__aicore__ inline void Process()", 1
     )[0]
+    assert "AscendC::ResetMask();" in tail_v_workspace
+    assert "AscendC::ResetMask();" in tail_h_workspace
     assert "LoadScalarAsFloat" not in tail_v_workspace
     assert "weightFloatUb.GetValue(kRow)" in tail_h_workspace
     assert "LoadScalarAsFloat" not in tail_h_workspace
