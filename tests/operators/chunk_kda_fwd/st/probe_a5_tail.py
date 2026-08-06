@@ -64,6 +64,47 @@ def _fingerprint(torch, tensor):
     }
 
 
+def _cpu_snapshot(outputs):
+    return tuple(
+        None if value is None else value.detach().cpu().contiguous()
+        for value in outputs
+    )
+
+
+def _compare_snapshots(current, baseline):
+    equal_by_output = {}
+    differences = []
+    for name, value, expected in zip(OUTPUT_NAMES, current, baseline):
+        if value is None or expected is None:
+            is_equal = value is expected
+        else:
+            is_equal = value.shape == expected.shape and value.equal(expected)
+        equal_by_output[name] = is_equal
+        if is_equal:
+            continue
+        detail = {"output": name}
+        if value is None or expected is None:
+            detail["optional_output_mismatch"] = True
+        elif value.shape != expected.shape:
+            detail["shape"] = list(value.shape)
+            detail["baseline_shape"] = list(expected.shape)
+        else:
+            unequal = value != expected
+            first = unequal.nonzero(as_tuple=False)[0]
+            index = tuple(int(item) for item in first.tolist())
+            detail.update({
+                "mismatched_elements": int(unequal.sum().item()),
+                "max_abs": float(
+                    (value.float() - expected.float()).abs().max().item()
+                ),
+                "first_index": list(index),
+                "actual": float(value[index].float().item()),
+                "baseline": float(expected[index].float().item()),
+            })
+        differences.append(detail)
+    return all(equal_by_output.values()), equal_by_output, differences
+
+
 def _run_child(args):
     import torch
     import torch_npu  # noqa: F401
@@ -98,6 +139,8 @@ def _run_child(args):
 
     baseline = None
     deterministic = None
+    deterministic_by_output = None
+    binary_differences = []
     fingerprints = None
     started = time.perf_counter()
     for _ in range(args.repeats):
@@ -136,15 +179,19 @@ def _run_child(args):
             name: _fingerprint(torch, value)
             for name, value in zip(OUTPUT_NAMES, outputs)
         }
+        snapshot = _cpu_snapshot(outputs)
         if baseline is not None:
-            deterministic = all(
-                left is right or (
-                    left is not None and right is not None and torch.equal(left, right)
-                )
-                for left, right in zip(outputs, baseline)
+            repeat_equal, equal_by_output, differences = _compare_snapshots(
+                snapshot, baseline
             )
+            deterministic = (
+                repeat_equal if deterministic is None
+                else deterministic and repeat_equal
+            )
+            deterministic_by_output = equal_by_output
+            binary_differences.extend(differences)
         elif args.repeats > 1:
-            baseline = outputs
+            baseline = snapshot
 
     memory_scale = 1024**3
     print(json.dumps({
@@ -153,6 +200,8 @@ def _run_child(args):
         "memory_allocated_gib": torch.npu.memory_allocated(device) / memory_scale,
         "memory_reserved_gib": torch.npu.memory_reserved(device) / memory_scale,
         "deterministic": deterministic,
+        "deterministic_by_output": deterministic_by_output,
+        "binary_differences": binary_differences,
         "outputs": fingerprints,
     }))
     return 0 if deterministic is not False and all(

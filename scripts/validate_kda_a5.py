@@ -95,7 +95,9 @@ def classify_failure(log_text: str, returncode: int) -> tuple[str, str]:
     lowered = log_text.lower()
     if "out of memory" in lowered or "acl_error_rt_memory" in lowered:
         return "OOM", "device memory allocation failed"
-    if "timeout" in lowered:
+    if returncode == 124 or any(
+        line.lstrip().startswith("[TIMEOUT]") for line in log_text.splitlines()
+    ):
         return "TIMEOUT", "case reported a timeout"
     lines = [line.strip() for line in log_text.splitlines() if line.strip()]
     return "ERROR", lines[-1] if lines else f"exited with status {returncode}"
