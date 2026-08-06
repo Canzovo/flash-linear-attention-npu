@@ -99,6 +99,17 @@ def classify_failure(log_text: str, returncode: int) -> tuple[str, str]:
         line.lstrip().startswith("[TIMEOUT]") for line in log_text.splitlines()
     ):
         return "TIMEOUT", "case reported a timeout"
+    if any(
+        marker in lowered
+        for marker in (
+            "acl_error_rt_device_task_abort",
+            "device task abort",
+            "stream synchronize failed",
+        )
+    ):
+        return "DEVICE_ERROR", "device task failed; stop before running more cases"
+    if '"deterministic": false' in lowered:
+        return "MISMATCH", "binary nondeterminism reported; see per-output details"
     lines = [line.strip() for line in log_text.splitlines() if line.strip()]
     return "ERROR", lines[-1] if lines else f"exited with status {returncode}"
 
@@ -133,6 +144,103 @@ def run_logged(command, *, cwd: Path, env: dict, log_path: Path, timeout: int):
             return process.returncode, True
 
 
+def extract_probe_records(log_text: str) -> list[dict]:
+    records = []
+    subcase = "unknown"
+    for raw_line in log_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[RUN] "):
+            subcase = line[len("[RUN] "):]
+            continue
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "output_count" not in payload:
+            continue
+        attn_out = payload.get("outputs", {}).get("attn_out") or {}
+        records.append({
+            "subcase": subcase,
+            "deterministic": payload.get("deterministic"),
+            "deterministic_by_output": payload.get("deterministic_by_output"),
+            "input_integrity": payload.get("input_integrity"),
+            "attn_out_shape": attn_out.get("shape"),
+            "attn_out_dtype": attn_out.get("dtype"),
+            "runtime": payload.get("runtime"),
+            "binary_differences": payload.get("binary_differences", [])[:16],
+            "repeat_summaries": payload.get("repeat_summaries", []),
+        })
+    return records
+
+
+def compact_mismatch_note(records: list[dict], default: str) -> str:
+    for record in records:
+        differences = record.get("binary_differences") or []
+        if not differences:
+            continue
+        first = differences[0]
+        actual = first.get("actual") or {}
+        baseline = first.get("baseline") or {}
+        repeats = sorted({item.get("repeat") for item in differences})
+        return (
+            f"{record['subcase']}: {first.get('output')}"
+            f"{first.get('first_index')} differs in repeats {repeats}; "
+            f"bits {baseline.get('bits')} -> {actual.get('bits')}; "
+            f"input_integrity={record.get('input_integrity')}"
+        )
+    return default
+
+
+def write_summary(args, results):
+    lines = [
+        "KDA A5 acceptance summary",
+        f"commit={args.repo_commit}",
+        f"soc={args.soc}",
+    ]
+    for result in results:
+        lines.append(
+            f"case={result['case_id']} status={result['status']} "
+            f"returncode={result['returncode']}"
+        )
+        records = result.get("probe_records") or []
+        for record in records:
+            runtime = record.get("runtime") or {}
+            lines.append(
+                f"  subcase={record['subcase']} shape={record['attn_out_shape']} "
+                f"dtype={record['attn_out_dtype']} "
+                f"deterministic={record['deterministic']} "
+                f"input_integrity={record['input_integrity']}"
+            )
+            if runtime:
+                lines.append(
+                    f"  runtime=torch:{runtime.get('torch')} "
+                    f"torch_npu:{runtime.get('torch_npu')} "
+                    f"triton_ascend:{runtime.get('triton_ascend')} "
+                    f"device:{runtime.get('device_name')} "
+                    f"cann:{runtime.get('ascend_home_path')}"
+                )
+            differences = record.get("binary_differences") or []
+            if differences:
+                first = differences[0]
+                actual = first.get("actual") or {}
+                baseline = first.get("baseline") or {}
+                repeats = sorted({item.get("repeat") for item in differences})
+                lines.append(
+                    f"  first_diff={first.get('output')}"
+                    f"{first.get('first_index')} count="
+                    f"{first.get('mismatched_elements')} repeats={repeats} "
+                    f"baseline={baseline.get('value')}/{baseline.get('bits')} "
+                    f"actual={actual.get('value')}/{actual.get('bits')}"
+                )
+        if result["note"]:
+            lines.append(f"  note={result['note']}")
+    (args.output_dir / "summary.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
 def write_reports(args, results):
     payload = {
         "metadata": {
@@ -164,6 +272,7 @@ def write_reports(args, results):
     (args.output_dir / "results.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
+    write_summary(args, results)
 
 
 def main():
@@ -177,6 +286,7 @@ def main():
     env = os.environ.copy()
     env["TEST_DEVICE_ID"] = str(args.device_visible_id)
     results = []
+    failed = False
     for case in selected_cases(args.cases):
         case_dir = args.output_dir / case.case_id
         case_dir.mkdir()
@@ -192,13 +302,16 @@ def main():
         )
         status = "PASS"
         note = ""
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
         if timed_out:
             status, note = "TIMEOUT", f"exceeded {args.case_timeout} seconds"
         elif returncode:
             status, note = classify_failure(
-                log_path.read_text(encoding="utf-8", errors="replace"),
-                returncode,
+                log_text, returncode
             )
+        probe_records = extract_probe_records(log_text)
+        if status == "MISMATCH":
+            note = compact_mismatch_note(probe_records, note)
         result = {
             **asdict(case),
             "status": status,
@@ -206,15 +319,18 @@ def main():
             "command": shlex.join(command),
             "log": str(log_path),
             "note": note,
+            "probe_records": probe_records,
         }
         results.append(result)
         write_reports(args, results)
         print(f"[{status}] {case.case_id}", flush=True)
         if status != "PASS":
-            print(f"Stop after first failure. See {log_path}", flush=True)
-            return 1
-    print((args.output_dir / "results.md").read_text(encoding="utf-8"))
-    return 0
+            failed = True
+            if status in {"TIMEOUT", "OOM", "DEVICE_ERROR"}:
+                print(f"Stop after fatal failure. See {log_path}", flush=True)
+                return 1
+            print(f"Continue after non-fatal failure. See {log_path}", flush=True)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

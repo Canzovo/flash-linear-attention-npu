@@ -62,12 +62,19 @@ def test_a5_one_click_entry_builds_and_runs_the_acceptance_matrix():
     assert 'DEFAULT_REF="refs/pull/264/head"' in shell
     assert 'export FLA_NPU_OPS="$ops"' in shell
     assert "check_packaged_wheel_api.py" in shell
+    assert 'cache_root="$work_root/cache"' in shell
+    assert "Reusing cached wheel" in shell
+    assert "kda_a5_diagnostics.tar.gz" in shell
     assert "tail_sync" in runner
     assert "bf16_gate_params" in runner
     assert "h96_t8k_t16k" in runner
     assert "profile_h96_t8k" in runner
     assert "profile_h96_t16k" in runner
     assert "returncode == 124" in runner
+    assert "extract_probe_records" in runner
+    assert "summary.txt" in runner
     assert '"--bf16-gate-params"' in probe
     assert "value.detach().cpu().contiguous()" in probe
     assert '"deterministic_by_output"' in probe
+    assert '"repeat_summaries"' in probe
+    assert "collect remaining tail diagnostics" in probe

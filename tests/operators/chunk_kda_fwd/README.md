@@ -65,8 +65,12 @@ bash scripts/validate_kda_a5.sh \
 
 默认 `--cases smoke` 依次验证尾块同步、BF16 `A_log/dt_bias` 适配和 H96/T8K/T16K；
 `--cases all` 继续执行两组 msopprof。脚本默认拉取 `refs/pull/264/head`，也可通过
-`--ref` 验证指定提交或分支。每次运行使用独立目录，并输出 `results.json`、`results.md`
-和逐 case 日志；首个失败后停止，避免 device timeout 后继续污染结果。
+`--ref` 验证指定提交或分支。源码仓、Python venv、pip 下载、同提交 wheel 和 Torch 扩展均复用
+`work-root/cache/`；每次运行仍使用独立结果目录。同一提交复测不会重复下载和构建。
+
+每次运行输出 `summary.txt`、`results.json`、`results.md`、逐 case 日志和
+`kda_a5_diagnostics.tar.gz`。终端自动打印短摘要，包含环境版本、模型 shape 状态及首个二进制差异；
+普通精度/确定性失败后继续执行剩余 case，只有 timeout、OOM 或 device task error 才提前停止。
 
 `probe_a5_tail.py` 默认验证 `T=64/65` 尾块与 final-state 同步；`--long-seq` 使用
 BF16、BSND、`H=96`、`K=V=128`、`chunk_size=64`，依次单跑 `T=8192/16384`，

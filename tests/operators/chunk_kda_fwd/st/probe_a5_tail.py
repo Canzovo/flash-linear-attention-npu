@@ -56,7 +56,7 @@ def _fingerprint(torch, tensor):
     value = flat[::stride][:4096].float()
     return {
         "shape": list(tensor.shape),
-        "dtype": str(tensor.dtype).removeprefix("torch."),
+        "dtype": str(tensor.dtype).replace("torch.", "", 1),
         "finite": bool(torch.isfinite(flat).all().item()),
         "sum": float(value.sum().item()),
         "max_abs": float(value.abs().max().item()) if value.numel() else 0.0,
@@ -71,10 +71,54 @@ def _cpu_snapshot(outputs):
     )
 
 
-def _compare_snapshots(current, baseline):
+def _scalar_record(torch, tensor, index):
+    scalar = tensor[index].reshape(1)
+    integer_dtype = {
+        1: torch.int8,
+        2: torch.int16,
+        4: torch.int32,
+        8: torch.int64,
+    }[scalar.element_size()]
+    raw = int(scalar.view(integer_dtype).item())
+    raw &= (1 << (scalar.element_size() * 8)) - 1
+    return {
+        "value": float(scalar.float().item()),
+        "bits": f"0x{raw:0{scalar.element_size() * 2}x}",
+    }
+
+
+def _last_dim_neighborhood(torch, tensor, index, radius=3):
+    if not index:
+        return []
+    center = index[-1]
+    begin = max(0, center - radius)
+    end = min(tensor.shape[-1], center + radius + 1)
+    result = []
+    for position in range(begin, end):
+        item_index = (*index[:-1], position)
+        result.append({
+            "index": list(item_index),
+            **_scalar_record(torch, tensor, item_index),
+        })
+    return result
+
+
+def _tail_sample(torch, tensor):
+    if tensor is None or tensor.numel() == 0:
+        return None
+    rows = tensor.detach().reshape(-1, tensor.shape[-1]).cpu().contiguous()
+    channels = sorted({0, 1, 63, 64, 86, rows.shape[-1] - 1})
+    return {
+        str(channel): _scalar_record(torch, rows, (-1, channel))
+        for channel in channels
+        if 0 <= channel < rows.shape[-1]
+    }
+
+
+def _compare_snapshots(torch, current, baseline, names, repeat):
     equal_by_output = {}
     differences = []
-    for name, value, expected in zip(OUTPUT_NAMES, current, baseline):
+    for name, value, expected in zip(names, current, baseline):
         if value is None or expected is None:
             is_equal = value is expected
         else:
@@ -82,7 +126,7 @@ def _compare_snapshots(current, baseline):
         equal_by_output[name] = is_equal
         if is_equal:
             continue
-        detail = {"output": name}
+        detail = {"output": name, "repeat": repeat}
         if value is None or expected is None:
             detail["optional_output_mismatch"] = True
         elif value.shape != expected.shape:
@@ -98,16 +142,28 @@ def _compare_snapshots(current, baseline):
                     (value.float() - expected.float()).abs().max().item()
                 ),
                 "first_index": list(index),
-                "actual": float(value[index].float().item()),
-                "baseline": float(expected[index].float().item()),
+                "actual": _scalar_record(torch, value, index),
+                "baseline": _scalar_record(torch, expected, index),
+                "actual_neighborhood": _last_dim_neighborhood(
+                    torch, value, index
+                ),
+                "baseline_neighborhood": _last_dim_neighborhood(
+                    torch, expected, index
+                ),
             })
         differences.append(detail)
     return all(equal_by_output.values()), equal_by_output, differences
 
 
 def _run_child(args):
+    try:
+        from importlib import metadata
+    except ImportError:
+        import importlib_metadata as metadata
+
     import torch
-    import torch_npu  # noqa: F401
+    import torch_npu
+    import fla_npu
 
     from fla_npu.ops.ascendc import chunk_kda_fwd
 
@@ -137,13 +193,17 @@ def _run_child(args):
         a_log = a_log.to(torch.bfloat16)
         dt_bias = dt_bias.to(torch.bfloat16)
 
+    input_names = ("q", "k", "v", "beta", "g", "A_log", "dt_bias")
+    input_values = (q, k, v, beta, g, a_log, dt_bias)
+    input_baseline = _cpu_snapshot(input_values) if args.repeats > 1 else None
     baseline = None
     deterministic = None
     deterministic_by_output = None
     binary_differences = []
     fingerprints = None
+    repeat_summaries = []
     started = time.perf_counter()
-    for _ in range(args.repeats):
+    for repeat in range(1, args.repeats + 1):
         common = {
             "cu_seqlens": None if args.layout == "BSND" else (0, t),
             "output_final_state": args.final_state,
@@ -180,21 +240,58 @@ def _run_child(args):
             for name, value in zip(OUTPUT_NAMES, outputs)
         }
         snapshot = _cpu_snapshot(outputs)
+        repeat_summaries.append({
+            "repeat": repeat,
+            "attn_out_data_ptr": outputs[0].data_ptr(),
+            "attn_out_tail": _tail_sample(torch, outputs[0]),
+        })
         if baseline is not None:
             repeat_equal, equal_by_output, differences = _compare_snapshots(
-                snapshot, baseline
+                torch, snapshot, baseline, OUTPUT_NAMES, repeat
             )
             deterministic = (
                 repeat_equal if deterministic is None
                 else deterministic and repeat_equal
             )
-            deterministic_by_output = equal_by_output
+            if deterministic_by_output is None:
+                deterministic_by_output = equal_by_output
+            else:
+                deterministic_by_output = {
+                    name: deterministic_by_output[name] and is_equal
+                    for name, is_equal in equal_by_output.items()
+                }
             binary_differences.extend(differences)
         elif args.repeats > 1:
             baseline = snapshot
 
+    input_integrity = None
+    input_differences = []
+    if input_baseline is not None:
+        input_integrity, _, input_differences = _compare_snapshots(
+            torch,
+            _cpu_snapshot(input_values),
+            input_baseline,
+            input_names,
+            args.repeats,
+        )
+    try:
+        device_name = torch.npu.get_device_name(args.device)
+    except Exception as error:
+        device_name = f"unavailable: {error!r}"
+    try:
+        triton_ascend_version = metadata.version("triton-ascend")
+    except metadata.PackageNotFoundError:
+        triton_ascend_version = "not-installed"
     memory_scale = 1024**3
     print(json.dumps({
+        "runtime": {
+            "torch": torch.__version__,
+            "torch_npu": torch_npu.__version__,
+            "triton_ascend": triton_ascend_version,
+            "device_name": device_name,
+            "fla_npu_module": fla_npu.__file__,
+            "ascend_home_path": os.environ.get("ASCEND_HOME_PATH"),
+        },
         "output_count": len(outputs),
         "elapsed_ms": (time.perf_counter() - started) * 1e3,
         "memory_allocated_gib": torch.npu.memory_allocated(device) / memory_scale,
@@ -202,6 +299,9 @@ def _run_child(args):
         "deterministic": deterministic,
         "deterministic_by_output": deterministic_by_output,
         "binary_differences": binary_differences,
+        "input_integrity": input_integrity,
+        "input_differences": input_differences,
+        "repeat_summaries": repeat_summaries,
         "outputs": fingerprints,
     }))
     return 0 if deterministic is not False and all(
@@ -217,7 +317,7 @@ def _run_parent(args):
     cases = LONG_CASES if long_seq else ADAPTER_CASES if adapter else SHORT_CASES
     heads = 96 if long_seq else args.heads
     timeout = args.timeout or (180 if long_seq else 30)
-    repeats = 1 if long_seq else 2
+    repeats = 1 if long_seq else 5
     root = Path(__file__).resolve().parents[4]
     try:
         commit = subprocess.check_output(
@@ -230,6 +330,7 @@ def _run_parent(args):
         "long_seq": long_seq, "bf16_gate_params": adapter, "timeout": timeout,
     }))
 
+    mismatch_found = False
     for name, tokens, final_state, saved in cases:
         command = [
             sys.executable, "-u", __file__, "--child",
@@ -264,9 +365,13 @@ def _run_parent(args):
         if result.returncode:
             print(result.stderr, end="", file=sys.stderr)
             print(f"[FAIL] {name}: returncode={result.returncode}")
+            if '"deterministic": false' in result.stdout:
+                mismatch_found = True
+                print(f"[CONTINUE] {name}: collect remaining tail diagnostics")
+                continue
             return result.returncode
         print(f"[PASS] {name}")
-    return 0
+    return 1 if mismatch_found else 0
 
 
 if __name__ == "__main__":
