@@ -1,6 +1,11 @@
 """Static op_host contract for chunk_kda_fwd; device execution lives in accuracy/routes."""
 
+from pathlib import Path
+
 from tests.operators.chunk_kda_fwd.common.case_matrix import manifest
+
+
+ROOT = Path(__file__).resolve().parents[5]
 
 
 def test_host_contract_has_platform_and_negative_matrix():
@@ -45,3 +50,21 @@ def test_a5_h96_model_performance_cases_keep_full_preprocess_contract():
         assert case["attrs"]["use_beta_sigmoid_in_kernel"] is True
         assert case["attrs"]["safe_gate"] is True
         assert case["attrs"]["lower_bound"] == -5.0
+
+
+def test_a5_one_click_entry_builds_and_runs_the_acceptance_matrix():
+    shell = (ROOT / "scripts/validate_kda_a5.sh").read_text(encoding="utf-8")
+    runner = (ROOT / "scripts/validate_kda_a5.py").read_text(encoding="utf-8")
+    probe = (
+        ROOT / "tests/operators/chunk_kda_fwd/st/probe_a5_tail.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'DEFAULT_REF="refs/pull/264/head"' in shell
+    assert 'export FLA_NPU_OPS="$ops"' in shell
+    assert "check_packaged_wheel_api.py" in shell
+    assert "tail_sync" in runner
+    assert "bf16_gate_params" in runner
+    assert "h96_t8k_t16k" in runner
+    assert "profile_h96_t8k" in runner
+    assert "profile_h96_t16k" in runner
+    assert '"--bf16-gate-params"' in probe

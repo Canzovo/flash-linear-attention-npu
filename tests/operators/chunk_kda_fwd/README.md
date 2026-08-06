@@ -54,6 +54,20 @@ FLA_NPU_RUN_OPERATOR_TESTS=1 pytest -q tests/operators/chunk_kda_fwd/st/test_exa
 cd examples/fast_kernel_launch_example && FAST_KERNEL_OP_NAME=chunk_kda_fwd pytest -q tests/chunk_kda_fwd
 ```
 
+A5 PR264 一键构建、隔离安装和基础验收：
+
+```bash
+bash scripts/validate_kda_a5.sh \
+  --cann-env /path/to/Ascend/ascend-toolkit/set_env.sh \
+  --device 0 \
+  --work-root "$PWD/outputs/kda-a5"
+```
+
+默认 `--cases smoke` 依次验证尾块同步、BF16 `A_log/dt_bias` 适配和 H96/T8K/T16K；
+`--cases all` 继续执行两组 msopprof。脚本默认拉取 `refs/pull/264/head`，也可通过
+`--ref` 验证指定提交或分支。每次运行使用独立目录，并输出 `results.json`、`results.md`
+和逐 case 日志；首个失败后停止，避免 device timeout 后继续污染结果。
+
 `probe_a5_tail.py` 默认验证 `T=64/65` 尾块与 final-state 同步；`--long-seq` 使用
 BF16、BSND、`H=96`、`K=V=128`、`chunk_size=64`，依次单跑 `T=8192/16384`，
 只保留必要正向输出并报告 finite、采样 fingerprint、耗时和 NPU allocator 占用。长序列探针
