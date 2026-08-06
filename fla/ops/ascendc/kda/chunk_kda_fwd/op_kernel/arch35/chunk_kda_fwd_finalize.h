@@ -531,6 +531,46 @@ private:
         }
     }
 
+    __aicore__ inline void ComputeTailStateRows(LocalTensor<float> &dst, uint64_t b, uint64_t hv,
+                                                uint64_t chunkIdx, uint64_t start, uint64_t rowBegin,
+                                                uint64_t rows)
+    {
+        LocalTensor<float> hRow = exp2Buf_.Get<float>();
+        LocalTensor<T> coefficientTyped = gateWritebackBuf_.Get<T>();
+        LocalTensor<float> coefficients = gateWritebackBuf_.Get<float>()[BT_];
+        for (uint64_t localRow = 0; localRow < rows; ++localRow) {
+            LocalTensor<float> dstRow = dst[localRow * V_];
+            CopyVectorIn(
+                coefficientTyped, preparedQG_,
+                KVOffset(b, hv, start + rowBegin + localRow, 0, K_), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            Cast(
+                coefficients, coefficientTyped, RoundMode::CAST_NONE,
+                static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(mte2ToVEvent_);
+            WaitFlag<HardEvent::V_S>(mte2ToVEvent_);
+            Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
+            PipeBarrier<PIPE_V>();
+            for (uint64_t d = 0; d < K_; ++d) {
+                LoadAsFloatRow(
+                    propagatedH_, HOffset(b, hv, chunkIdx, d, 0), hRow, V_);
+                float weight = coefficients.GetValue(d);
+                SetFlag<HardEvent::S_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::S_V>(mte2ToVEvent_);
+                Muls(hRow, hRow, weight, static_cast<uint32_t>(V_));
+                PipeBarrier<PIPE_V>();
+                Add(dstRow, dstRow, hRow, static_cast<uint32_t>(V_));
+                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
+                WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
+            }
+            SetFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
+            WaitFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
+        }
+    }
+
     template <typename CopyT>
     __aicore__ inline void LoadAsFloatVector(GlobalTensor<CopyT> &src, uint64_t srcOffset,
                                               LocalTensor<float> &dst, LocalTensor<CopyT> &typedScratch,
@@ -1051,6 +1091,9 @@ private:
                                              uint64_t curT)
     {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        if (curT < KDA_CUBE_MIN_REDUCTION) {
+            return;
+        }
         SetLoadDataPaddingValue<T>(static_cast<T>(0));
         if (BT_ == 64 && curT == BT_) {
             ComputeOutputCubeStagedArch35(b, hv, chunkIdx, start, curT);
@@ -1119,8 +1162,8 @@ private:
         }
     }
 
-    __aicore__ inline void FinalizeOutputRows(uint64_t b, uint64_t hv, uint64_t start, uint64_t curT,
-                                              uint64_t subBlockIdx, uint64_t subBlockNum)
+    __aicore__ inline void FinalizeOutputRows(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+                                              uint64_t curT, uint64_t subBlockIdx, uint64_t subBlockNum)
     {
         if (subBlockNum == 0 || subBlockIdx >= subBlockNum || V_ == 0) {
             return;
@@ -1153,12 +1196,14 @@ private:
             LocalTensor<float> outLocal = arena[2 * elems];
             LocalTensor<T> outTyped = gateWritebackBuf_.Get<T>();
 
-            CopyVectorIn(stateLocal, o_, KVOffset(b, hv, ti, 0, V_), elems);
-            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
-            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             if (curT < KDA_CUBE_MIN_REDUCTION) {
+                ComputeTailStateRows(
+                    stateLocal, b, hv, chunkIdx, start, tileRow, tileRows);
                 ComputeTailLocalRows(localLocal, b, hv, start, curT, tileRow, tileRows);
             } else {
+                CopyVectorIn(stateLocal, o_, KVOffset(b, hv, ti, 0, V_), elems);
+                SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
                 CopyVectorIn(localLocal, u_, KVOffset(b, hv, ti, 0, V_), elems);
                 SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
                 WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
@@ -1216,7 +1261,7 @@ private:
             return;
         }
         Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
-        FinalizeOutputRows(b, hv, start, curT, subBlockIdx, subBlockNum);
+        FinalizeOutputRows(b, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum);
     }
 
     __aicore__ inline void ProcessChunkOutAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,

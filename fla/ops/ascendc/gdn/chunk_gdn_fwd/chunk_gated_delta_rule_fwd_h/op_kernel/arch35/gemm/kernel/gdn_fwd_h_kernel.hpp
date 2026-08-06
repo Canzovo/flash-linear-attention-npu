@@ -479,9 +479,9 @@ public:
     }
 
     __aicore__ inline void Process() {
-        if (isVariedLen) {
-            AscendC::SyncAll<false>();
-        }
+        // FwdH can run after another stage in a megakernel. Start its AIC/AIV
+        // handshake only after every core has retired the preceding stage.
+        AscendC::SyncAll<false>();
 
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();

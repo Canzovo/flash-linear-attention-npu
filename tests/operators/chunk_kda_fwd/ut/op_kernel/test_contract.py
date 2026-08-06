@@ -741,6 +741,20 @@ def test_a5_direct_ub_fwd_h_requires_enough_dense_tasks_for_started_cores():
     ) == 2
 
 
+def test_a5_generic_fwd_h_synchronizes_all_cores_before_stage_handshake():
+    kernel = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h"
+        / "op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+    ).read_text(encoding="utf-8")
+    process_prefix = kernel.split("__aicore__ inline void Process()", 1)[1].split(
+        "if ASCEND_IS_AIC", 1
+    )[0]
+
+    assert "AscendC::SyncAll<false>();" in process_prefix
+    assert "if (isVariedLen)" not in process_prefix
+
+
 def test_a5_finalize_uses_fp32_vector_accumulation_for_sub_16_reduction():
     finalize = (
         OP_ROOT / "op_kernel/arch35/chunk_kda_fwd_finalize.h"
@@ -748,6 +762,9 @@ def test_a5_finalize_uses_fp32_vector_accumulation_for_sub_16_reduction():
 
     assert "constexpr uint32_t KDA_CUBE_MIN_REDUCTION = 16;" in finalize
     assert "ComputeTailLocalRows" in finalize
+    assert "ComputeTailStateRows" in finalize
+    assert "preparedQG_" in finalize
+    assert "propagatedH_" in finalize
     assert "coefficientTyped" in finalize
     assert "coefficients.GetValue(j)" in finalize
     assert "LoadScalarAsFloat" not in finalize
