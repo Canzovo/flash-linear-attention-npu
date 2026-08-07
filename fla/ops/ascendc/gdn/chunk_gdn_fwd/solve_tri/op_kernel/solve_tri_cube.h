@@ -161,6 +161,7 @@ private:
 
     // 预计算的 Nd2NzParams 模板（减少 scalar 开销）
     Nd2NzParams scratchToL1Params_;    // scratch GM → L1 slot（MatmulToSlot 等使用）
+    Nd2NzParams diagLoadParams_;       // 对角块 GM → L1（LoadInputTile 使用）
     Nd2NzParams fullLoadParams_;       // 整矩阵 GM → L1（MCH 最后一轮使用）
     int64_t layoutMode_;
     GlobalTensor<int64_t> cuSeqlensGM_;
@@ -237,7 +238,17 @@ __aicore__ inline void SolveTriCube<MATRIX_SIZE, T>::Init(
     scratchToL1Params_.dstNzC0Stride = MATRIX_SIZE;
     scratchToL1Params_.dstNzMatrixStride = 0;
 
-    // 2. 整矩阵 GM → L1（MCH 最后一轮使用）
+    // 2. 对角块 GM → L1（LoadInputTile 使用）
+    diagLoadParams_.nValue = FRAC;
+    diagLoadParams_.dValue = FRAC;
+    diagLoadParams_.srcDValue = static_cast<uint32_t>(rowStride_);
+    diagLoadParams_.srcNdMatrixStride = FRAC * static_cast<int32_t>(rowStride_) + FRAC;
+    diagLoadParams_.dstNzNStride = 1;
+    diagLoadParams_.dstNzC0Stride = FRAC;
+    diagLoadParams_.dstNzMatrixStride = (NUM_FRACS + 1) * FRAC_LEN;
+    // diagLoadParams_.ndNum 在运行时设置
+
+    // 3. 整矩阵 GM → L1（MCH 最后一轮使用）
     fullLoadParams_.ndNum = 1;
     fullLoadParams_.srcDValue = static_cast<uint32_t>(rowStride_);
     fullLoadParams_.srcNdMatrixStride = 0;
