@@ -256,6 +256,9 @@ private:
         mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
         mte2ToMte3Event_ = pipe_->AllocEventID<HardEvent::MTE2_MTE3>();
         mte3ToMte2Event_ = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+        vToSEvent_ = pipe_->AllocEventID<HardEvent::V_S>();
+        sToVEvent_ = pipe_->AllocEventID<HardEvent::S_V>();
+        sToMte2Event_ = pipe_->AllocEventID<HardEvent::S_MTE2>();
         vectorEventsAllocated_ = true;
     }
 
@@ -270,6 +273,9 @@ private:
         pipe_->ReleaseEventID<HardEvent::MTE3_V>(mte3ToVEvent_);
         pipe_->ReleaseEventID<HardEvent::MTE2_MTE3>(mte2ToMte3Event_);
         pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+        pipe_->ReleaseEventID<HardEvent::V_S>(vToSEvent_);
+        pipe_->ReleaseEventID<HardEvent::S_V>(sToVEvent_);
+        pipe_->ReleaseEventID<HardEvent::S_MTE2>(sToMte2Event_);
         vectorEventsAllocated_ = false;
     }
 
@@ -509,16 +515,16 @@ private:
                 coefficients, coefficientTyped, RoundMode::CAST_NONE,
                 static_cast<uint32_t>(curT));
             PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_S>(mte2ToVEvent_);
-            WaitFlag<HardEvent::V_S>(mte2ToVEvent_);
+            SetFlag<HardEvent::V_S>(vToSEvent_);
+            WaitFlag<HardEvent::V_S>(vToSEvent_);
             Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
             PipeBarrier<PIPE_V>();
             for (uint64_t j = 0; j < curT; ++j) {
                 LoadAsFloatRow(
                     propagatedVNew_, KVOffset(b, hv, start + j, 0, V_), vRow, V_);
                 float weight = coefficients.GetValue(j);
-                SetFlag<HardEvent::S_V>(mte2ToVEvent_);
-                WaitFlag<HardEvent::S_V>(mte2ToVEvent_);
+                SetFlag<HardEvent::S_V>(sToVEvent_);
+                WaitFlag<HardEvent::S_V>(sToVEvent_);
                 Muls(vRow, vRow, weight, static_cast<uint32_t>(V_));
                 PipeBarrier<PIPE_V>();
                 Add(dstRow, dstRow, vRow, static_cast<uint32_t>(V_));
@@ -526,8 +532,8 @@ private:
                 SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
                 WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
             }
-            SetFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
-            WaitFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
+            SetFlag<HardEvent::S_MTE2>(sToMte2Event_);
+            WaitFlag<HardEvent::S_MTE2>(sToMte2Event_);
         }
     }
 
@@ -549,16 +555,16 @@ private:
                 coefficients, coefficientTyped, RoundMode::CAST_NONE,
                 static_cast<uint32_t>(K_));
             PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_S>(mte2ToVEvent_);
-            WaitFlag<HardEvent::V_S>(mte2ToVEvent_);
+            SetFlag<HardEvent::V_S>(vToSEvent_);
+            WaitFlag<HardEvent::V_S>(vToSEvent_);
             Duplicate(dstRow, 0.0f, static_cast<uint32_t>(V_));
             PipeBarrier<PIPE_V>();
             for (uint64_t d = 0; d < K_; ++d) {
                 LoadAsFloatRow(
                     propagatedH_, HOffset(b, hv, chunkIdx, d, 0), hRow, V_);
                 float weight = coefficients.GetValue(d);
-                SetFlag<HardEvent::S_V>(mte2ToVEvent_);
-                WaitFlag<HardEvent::S_V>(mte2ToVEvent_);
+                SetFlag<HardEvent::S_V>(sToVEvent_);
+                WaitFlag<HardEvent::S_V>(sToVEvent_);
                 Muls(hRow, hRow, weight, static_cast<uint32_t>(V_));
                 PipeBarrier<PIPE_V>();
                 Add(dstRow, dstRow, hRow, static_cast<uint32_t>(V_));
@@ -566,8 +572,8 @@ private:
                 SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
                 WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
             }
-            SetFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
-            WaitFlag<HardEvent::S_MTE2>(mte2ToVEvent_);
+            SetFlag<HardEvent::S_MTE2>(sToMte2Event_);
+            WaitFlag<HardEvent::S_MTE2>(sToMte2Event_);
         }
     }
 
@@ -1374,6 +1380,9 @@ private:
     TEventID mte3ToVEvent_ = 0;
     TEventID mte2ToMte3Event_ = 0;
     TEventID mte3ToMte2Event_ = 0;
+    TEventID vToSEvent_ = 0;
+    TEventID sToVEvent_ = 0;
+    TEventID sToMte2Event_ = 0;
     bool vectorEventsAllocated_ = false;
     Catlass::Arch::CrossCoreFlagWithReverse<KDA_SCORE_QUEUE_DEPTH> scoreReadyFlag_{KDA_SCORE_READY_FLAG0,
                                                                                   KDA_SCORE_READY_FLAG1};

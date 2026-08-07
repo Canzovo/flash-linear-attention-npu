@@ -1865,7 +1865,7 @@ private:
 
             uint16_t slot = 0;
             uint16_t usedSlotCount = 1;
-            InitializePostWuPipelineEvents();
+            InitializePostWuPipelineSlot(slot);
             PrefetchPostWuPipelineArch35(resource, slot, b, hv, start, curT, false);
             PrefetchPostWuPipelineU(resource, slot, b, hv, start, curT, false);
             while (true) {
@@ -1884,6 +1884,9 @@ private:
                 if (nextIsTypical) {
                     uint16_t nextSlot = slot ^ 1;
                     bool reuseSlot = usedSlotCount == KDA_POST_PIPELINE_STAGE_COUNT;
+                    if (!reuseSlot) {
+                        InitializePostWuPipelineSlot(nextSlot);
+                    }
                     PrefetchPostWuPipelineArch35(
                         resource, nextSlot, nextB, nextHv, nextStart, nextCurT, reuseSlot);
                     PrefetchPostWuPipelineU(

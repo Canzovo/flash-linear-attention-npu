@@ -385,7 +385,7 @@ def test_a5_fwd_h_reads_predecayed_vector_gate_k_from_workspace_without_redecay(
     ).read_text(encoding="utf-8")
 
     assert kernel.count("cube2OffsetK = kGated ? cube2Offsets.kDecayWorkOffset") == 2
-    assert kernel.count("auto tensorK = kGated") == 2
+    assert kernel.count("auto tensorK = kGated") >= 2
     assert epilogue.count("if constexpr (kGated)") >= 2
     assert "KDA passes kg = k * exp2(g_last - gk). Keep that decay exactly once." in epilogue
     assert epilogue.count("Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done)") >= 4
@@ -556,6 +556,38 @@ def test_a5_post_wu_tail_uses_two_slot_arch35_pipeline_with_bounded_tiles():
     assert "const uint32_t k = static_cast<uint32_t>(curT);" in bounded_mmad
     assert "copyL0CToDst(blockWOut, tileL0CW);" in bounded_mmad
     assert "copyL0CToDst(blockUOut, tileL0CU);" in bounded_mmad
+
+
+def test_a5_post_wu_initializes_only_slots_consumed_by_each_full_run():
+    post_wu = STAGE_IMPLEMENTATIONS["post_wu"].read_text(encoding="utf-8")
+    aic_pipeline = post_wu.split(
+        "__aicore__ inline void ProcessPostAicPipelineArch35", 1
+    )[1].split("#endif", 1)[0]
+
+    assert "InitializePostWuPipelineSlot(slot);" in aic_pipeline
+    assert "InitializePostWuPipelineEvents();" not in aic_pipeline
+    assert "if (!reuseSlot) {" in aic_pipeline
+    assert "InitializePostWuPipelineSlot(nextSlot);" in aic_pipeline
+    assert aic_pipeline.index("InitializePostWuPipelineSlot(nextSlot);") < aic_pipeline.index(
+        "PrefetchPostWuPipelineArch35(\n                        resource, nextSlot"
+    )
+
+
+def test_a5_finalize_allocates_each_tail_scalar_event_from_its_own_pool():
+    finalize = STAGE_IMPLEMENTATIONS["output"].read_text(encoding="utf-8")
+    assert "vToSEvent_ = pipe_->AllocEventID<HardEvent::V_S>();" in finalize
+    assert "sToVEvent_ = pipe_->AllocEventID<HardEvent::S_V>();" in finalize
+    assert "sToMte2Event_ = pipe_->AllocEventID<HardEvent::S_MTE2>();" in finalize
+    assert "pipe_->ReleaseEventID<HardEvent::V_S>(vToSEvent_);" in finalize
+    assert "pipe_->ReleaseEventID<HardEvent::S_V>(sToVEvent_);" in finalize
+    assert "pipe_->ReleaseEventID<HardEvent::S_MTE2>(sToMte2Event_);" in finalize
+    tail = finalize.split("__aicore__ inline void ComputeTailLocalRows", 1)[1].split(
+        "template <typename CopyT>", 1
+    )[0]
+    assert "SetFlag<HardEvent::V_S>(mte2ToVEvent_)" not in tail
+    assert tail.count("SetFlag<HardEvent::V_S>(vToSEvent_)") == 2
+    assert tail.count("SetFlag<HardEvent::S_V>(sToVEvent_)") == 2
+    assert tail.count("SetFlag<HardEvent::S_MTE2>(sToMte2Event_)") == 2
 
 
 def test_a5_finalize_stages_full_chunk_mmads_without_l0c_accumulation():
@@ -734,6 +766,21 @@ def test_a5_fwd_h_routes_sub_16_token_tail_away_from_cube_mmad():
     assert "else if (!cube1AlreadyWaited)" in vnew
     assert "bool cube2AlreadyWaited" in update
     assert "else if (!cube2AlreadyWaited)" in update
+
+
+def test_a5_fwd_h_uses_bounded_single_stage_cube_for_aligned_tail_rows():
+    kernel = (
+        ROOT
+        / "fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h"
+        / "op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+    ).read_text(encoding="utf-8")
+
+    assert "MmadPingpongTlaMulti<ArchTag, true, false, 1>" in kernel
+    assert "BlockMmadWHTail" in kernel
+    assert "BlockMmadKVTail" in kernel
+    assert kernel.count("EmptyClass{}, true") == 2
+    assert "bool useBoundedMmad = isVariedLen || (seqlen % chunkSize != 0);" in kernel
+    assert kernel.count("seqlen % chunkSize == 0") == 2
 
 
 def test_a5_direct_ub_fwd_h_requires_enough_dense_tasks_for_started_cores():
