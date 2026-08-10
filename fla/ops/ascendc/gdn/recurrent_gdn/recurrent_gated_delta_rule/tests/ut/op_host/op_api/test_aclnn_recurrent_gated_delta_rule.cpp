@@ -89,10 +89,13 @@ public:
             numAccTok = TensorDesc({b}, ACL_INT8, ACL_FORMAT_ND).ValueRange(0, 1);
         } else if (validIdx == 10) {
             out = TensorDesc({t, nv, dv}, ACL_INT8, ACL_FORMAT_ND).ValueRange(0, 1);
+        } else if (validIdx == 11) {
+            state = TensorDesc({t, nv, dv, dk}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(0, 1);
         }
         aclnnStatus aclRet = utTest(nullIdx);
         bool pass = false;
-        if ((nullIdx == 0 || nullIdx == 10 || nullIdx == 8) && validIdx == 0) {
+        const bool dtypeValid = validIdx == 0 || validIdx == 11;
+        if ((nullIdx == 0 || nullIdx == 10 || nullIdx == 8) && dtypeValid) {
             pass = (ACLNN_SUCCESS == aclRet);
         } else {
             pass = (ACLNN_ERR_PARAM_INVALID == aclRet);
@@ -263,4 +266,8 @@ TEST_F(aclnnRecurrentGatedDeltaRule_test, ascend910B2_test_opapi_case20)
 TEST_F(aclnnRecurrentGatedDeltaRule_test, ascend910B2_test_opapi_case21)
 {
     test.RGDRTestCase(0, 11);
+}
+TEST_F(aclnnRecurrentGatedDeltaRule_test, ascend910B2_test_opapi_case22)
+{
+    test.RGDRTestCase(11, 0);
 }

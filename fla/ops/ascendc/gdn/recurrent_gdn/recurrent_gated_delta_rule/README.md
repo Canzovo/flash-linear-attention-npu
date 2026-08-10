@@ -83,7 +83,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 | `key` | 输入 | 必选 | 公式中的 $k$；不支持空 Tensor | - | `BFLOAT16` | `ND` | `(T, Nk, Dk)` | 支持 |
 | `value` | 输入 | 必选 | 公式中的 $v$；不支持空 Tensor | - | `BFLOAT16` | `ND` | `(T, Nv, Dv)` | 支持 |
 | `beta` | 输入 | 必选 | 公式中的 $\beta$；不支持空 Tensor | - | `BFLOAT16` | `ND` | `(T, Nv)` | 支持 |
-| `stateRef` | 输入&输出 | 必选 | 状态矩阵 $S$，算子执行后原地更新；不支持空 Tensor | - | `BFLOAT16` | `ND` | `(BlockNum, Nv, Dv, Dk)` | cann版本大于等于9.1.0后支持，其余版本不支持 |
+| `stateRef` | 输入&输出 | 必选 | 状态矩阵 $S$，算子执行后原地更新；不支持空 Tensor | - | `BFLOAT16`、`FLOAT32` | `ND` | `(BlockNum, Nv, Dv, Dk)` | cann版本大于等于9.1.0后支持，其余版本不支持 |
 | `actualSeqLengths` | 输入 | 必选 | 序列长度；不支持空 Tensor，首元素代表无效序列长度（即不参与计算的序列长度），其余 $B$ 个元素代表各 batch 的有效序列长度 | 第 1 至第 $B$ 个元素之和等于 $T$ | `INT32` | `ND` | `(B+1,)` | 支持 |
 | `ssmStateIndices` | 输入 | 必选 | 输入序列到状态矩阵的映射索引，`state[ssmStateIndices[i]]` 表示第 $i$ 个 token 对应的状态块；不支持空 Tensor | 取值范围 `[0, BlockNum)` | `INT32` | `ND` | `(T,)` | 支持 |
 | `g` | 输入 | 可选 | 标量衰减系数 $\alpha_t = e^g$ | 传 `nullptr` 时等价于全 0（$\alpha_t = 1$，即无标量衰减） | `FLOAT32` | `ND` | `(T, Nv)` | 支持 |
@@ -101,7 +101,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 | 参数名 | 输入/输出 | 描述 | 数据类型 | 数据格式 | 维度（Shape） | 非连续 Tensor |
 |---|---|---|---|---|---|---|
 | `out` | 输出 | 公式中的 $o$，当前时间步注意力输出 | `BFLOAT16` | `ND` | `(T, Nv, Dv)` | 支持 |
-| `stateRef` | 输入&输出 | 更新后的隐藏状态矩阵（原地更新） | `BFLOAT16` | `ND` | `(BlockNum, Nv, Dv, Dk)` | cann版本大于等于9.1.0后支持，其余版本不支持 |
+| `stateRef` | 输入&输出 | 更新后的隐藏状态矩阵（原地更新），数据类型与输入 `stateRef` 一致 | `BFLOAT16`、`FLOAT32` | `ND` | `(BlockNum, Nv, Dv, Dk)` | cann版本大于等于9.1.0后支持，其余版本不支持 |
 | `workspaceSize` | 输出 | Device 侧所需 workspace 大小 | `uint64_t` | - | 标量 | - |
 | `executor` | 输出 | 算子执行器，封装了计算流程 | `aclOpExecutor*` | - | - | - |
 
@@ -113,7 +113,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 - `stateRef` 的形状为 `(BlockNum, Nv, Dv, Dk)`，cann版本大于等于9.1.0后支持非连续 Tensor，其余版本不支持。
 - `actualSeqLengths` 为长度 $B+1$ 的一维 INT32 张量，首元素代表无效序列长度（不参与计算），第 1 至第 $B$ 个元素代表各 batch 的有效序列长度，其元素之和等于 $T$。
 - `ssmStateIndices` 为长度 $T$ 的一维 INT32 张量，取值范围 `[0, BlockNum)`。
-- 当前仅支持 `BFLOAT16` 精度（query/key/value/beta/stateRef/out）。
+- `query/key/value/beta/out` 仅支持 `BFLOAT16`；`stateRef` 支持 `BFLOAT16` 和 `FLOAT32`，且原地更新前后数据类型保持一致。
 - 每个序列的有效 token 数 $L_i$（即 `actualSeqLengths[i+1]`，$i \in [0, B)$）须满足 $L_i \le 8$。
 
 ### 3.5 补充说明

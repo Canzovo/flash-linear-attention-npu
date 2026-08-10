@@ -76,8 +76,19 @@ static ge::graphStatus InferShapeRecurrentGatedDeltaRule(InferShapeContext *cont
 
 static ge::graphStatus InferDataTypeRecurrentGatedDeltaRule(gert::InferDataTypeContext *context)
 {
+    if (context == nullptr) {
+        OP_LOGE("RecurrentGatedDeltaRule", "infer data type context is null");
+        return ge::GRAPH_FAILED;
+    }
+
+    auto stateDataType = context->GetInputDataType(STATE_INDEX);
+    if (stateDataType != ge::DT_BF16 && stateDataType != ge::DT_FLOAT) {
+        OP_LOGE("RecurrentGatedDeltaRule", "state dtype should be bfloat16 or float32");
+        return ge::GRAPH_FAILED;
+    }
+
     context->SetOutputDataType(0, ge::DT_BF16);
-    context->SetOutputDataType(1, ge::DT_BF16);
+    context->SetOutputDataType(1, stateDataType);
     return ge::GRAPH_SUCCESS;
 }
 
