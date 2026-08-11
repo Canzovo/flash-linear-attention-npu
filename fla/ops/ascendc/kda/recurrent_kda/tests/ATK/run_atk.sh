@@ -5,12 +5,6 @@ ATK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${ATK_DIR}/../../../../../../.." && pwd)"
 TASK="${1:-all}"
 
-source /home/npu_user6/ziqiyang/CANN0713/ascend-toolkit/set_env.sh
-source /home/npu_user6/miniforge3/etc/profile.d/conda.sh
-conda activate yzq
-export PYTHONPATH="/home/npu_user6/miniforge3/pkgs/requests-2.34.2-pyhcf101f3_0/site-packages:/home/npu_user6/miniforge3/pkgs/urllib3-2.7.0-pyhd8ed1ab_0/site-packages:/home/npu_user6/miniforge3/pkgs/certifi-2026.5.20-pyhd8ed1ab_0/site-packages:/home/npu_user6/miniforge3/pkgs/charset-normalizer-3.4.7-pyhd8ed1ab_0/site-packages:${PYTHONPATH:-}"
-
-export PYTHONPATH="${REPO_ROOT}/tests/reference:/home/npu_user6/ziqiyang/ATK-dev:${PYTHONPATH:-}"
 export RECURRENT_KDA_METRICS_FILE="${ATK_DIR}/results/accuracy_metrics.jsonl"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 
