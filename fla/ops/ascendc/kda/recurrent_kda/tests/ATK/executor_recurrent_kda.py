@@ -298,14 +298,11 @@ class RecurrentKdaAtkApi(BaseApi):
             inputs["initial_state"].numel() * inputs["initial_state"].element_size()
         )
 
-        # Lower-bound arithmetic model for one decode token per sequence.
-        # It counts recurrent state decay, two state-vector products, delta,
-        # outer-product update, q/k normalization and query scaling. Exp/sigmoid
-        # transcendental instructions are intentionally excluded.
-        flops_per_head = (
-            7 * KEY_DIM * VALUE_DIM + 2 * VALUE_DIM + 7 * KEY_DIM
+        # Algorithm-level FLOPs lower bound, aligned with TEST_REPORT.md:
+        # 5 * B * H * T * K * V. Exp/sigmoid instructions are excluded.
+        calc_flops = float(
+            5 * self.batch * HEADS * DECODE_STEP * KEY_DIM * VALUE_DIM
         )
-        calc_flops = float(self.batch * HEADS * flops_per_head)
         mib = 1024.0 * 1024.0
         return {
             "read_bytes": read_bytes / mib,

@@ -43,6 +43,19 @@ run_performance() {
   python verify_results.py performance --not-before "${started_at}"
 }
 
+run_profile() {
+  atk task \
+    -c "${CASES}" \
+    -n nodes_performance.yaml \
+    --task performance_device \
+    --performance_data 1,1,1 \
+    --save_data profile \
+    --white_list "[0,2,4,6]" \
+    -p executor_recurrent_kda.py \
+    -sp \
+    -to 2000
+}
+
 case "${TASK}" in
   accuracy)
     run_accuracy
@@ -50,12 +63,15 @@ case "${TASK}" in
   performance)
     run_performance
     ;;
+  profile)
+    run_profile
+    ;;
   all)
     run_accuracy
     run_performance
     ;;
   *)
-    echo "usage: $0 [accuracy|performance|all]" >&2
+    echo "usage: $0 [accuracy|performance|profile|all]" >&2
     exit 2
     ;;
 esac

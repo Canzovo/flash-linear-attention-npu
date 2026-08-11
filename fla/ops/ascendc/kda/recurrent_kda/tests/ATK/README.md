@@ -14,10 +14,13 @@ NPU，保证 CPU reference 与 NPU 收到完全相同的数据。算子属性与
 ```bash
 bash run_atk.sh accuracy
 bash run_atk.sh performance
+bash run_atk.sh profile  # 仅保存 base case 0/2/4/6 的 profile
 bash run_atk.sh all
 ```
 
-脚本在 ATK 命令结束后调用 `verify_results.py`，校验 8 个 case、失败用例、
+`profile` 模式仅执行 base case 0、2、4、6，使用 `--performance_data 1,1,1` 预热并只采集一次，通过 `--save_data profile` 将原始流水保留在 ATK 输出目录；该模式不调用 8-case 结果校验。
+
+精度和性能模式在 ATK 命令结束后调用 `verify_results.py`，校验 8 个 case、失败用例、
 精度结果和性能 custom data，避免 ATK 内部失败但命令返回 0 时产生误判。最终报告见
 `TEST_REPORT.md`，稳定副本和逐 case 数据位于 `results/`。
 
@@ -25,4 +28,3 @@ bash run_atk.sh all
 ATK 报告中的 `calc_utilization(%)` 和 `mem_utilization(%)`。FLOPs 使用 decode
 recurrent 主路径的下界模型，GM 搬运量统计全部输入读取、输出写回与 state 原位写回。
 指数和 sigmoid 等超越函数不计入 FLOPs，因而 MFU 是保守估计。
-
