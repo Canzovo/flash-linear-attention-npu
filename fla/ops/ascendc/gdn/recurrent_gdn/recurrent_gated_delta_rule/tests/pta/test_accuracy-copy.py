@@ -11,6 +11,9 @@ import torch_npu
 from golden import recurrent_gated_delta_rule_golden
 from utils import compare_tensors_by_ratio
 from fla_npu.ops import ascendc
+import torch_npu
+
+ascendc.install_torch_npu_ops_compat()
 
 def make_inputs(bs, mtp, nk, nv, dk, dv, use_g=True, use_gk=False,
                 use_accepted_tokens=False, seed=42):
@@ -97,8 +100,7 @@ def run_npu(inp, device):
     
     print("start run npu_recurrent_gated_delta_rule")
 
-    result = ascendc.npu_recurrent_gated_delta_rule(
-    # result = torch_npu.npu_recurrent_gated_delta_rule(
+    result = fla_npu.ops.ascendc.npu_recurrent_gated_delta_rule(
         q_npu, k_npu, v_npu, s_npu,
         beta=b_npu,
         scale=inp["scale"],
@@ -155,7 +157,7 @@ def run_test_case(desc, bs, mtp, nk, nv, dk, dv, device,
 
 
 def main():
-    device = torch.device("npu:2")
+    device = torch.device("npu:0")
     torch_npu.npu.set_device(device)
     results = []
     print(f"Using device: {device}")
