@@ -112,9 +112,14 @@ wheel 内嵌 OPP；wheel 通过绝对路径加载 `libcust_opapi.so`，不会再
 
 ```sh
 # 覆盖当前 Python 环境中 flash-linear-attention-npu wheel 内嵌的 OPP
+# （无参数直接运行 .run 也是同样的行为，等价于 --install / --full）
 ./build_out/fla-npu-*.run --install
 # 或等价写法
 ./build_out/fla-npu-*.run --full
+
+# 如需装到 CANN OPP 目录（ASCEND_CUSTOM_OPP_PATH / ASCEND_OPP_PATH），
+# 使用 --cann 或 --install-path=<绝对路径>
+# ./build_out/fla-npu-*.run --cann
 
 # 如果 Python wrapper 也有修改，再安装单独编译出的 wheel
 WHEEL_PATH="dist/本轮构建生成的-wheel-文件名.whl"
