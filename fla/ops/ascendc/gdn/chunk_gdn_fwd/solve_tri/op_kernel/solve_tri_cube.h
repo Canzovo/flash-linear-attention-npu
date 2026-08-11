@@ -194,11 +194,11 @@ __aicore__ inline void SolveTriCube<MATRIX_SIZE, T>::Init(
     totalChunks_ = tilingData->totalChunks;
     layoutMode_ = tilingData->layoutMode;
 
-    // 行间步长: BHTD=BT, BSND/THD=H*BT
-    if (layoutMode_ == 0) {
-        rowStride_ = matrixSize_;  // BHTD
+    // 行间步长: BNSD(0)/NTD(3) = BT (单 chunk 内连续), BSND(1)/TND(2) = H*BT (非连续)
+    if (layoutMode_ == 0 || layoutMode_ == 3) {
+        rowStride_ = matrixSize_;  // BNSD or NTD (contiguous)
     } else {
-        rowStride_ = numHeads_ * matrixSize_;  // BSND or THD
+        rowStride_ = numHeads_ * matrixSize_;  // BSND or TND (non-contiguous)
     }
     
     // AIC 的核索引
@@ -286,8 +286,22 @@ __aicore__ inline int64_t SolveTriCube<MATRIX_SIZE, T>::GetTileGMOffset(int64_t 
     int64_t H = numHeads_;
     int64_t BT = matrixSize_;
 
-    if (layoutMode_ == 2) {
-        // THD 变长格式: [total_T, H, BT]
+    if (layoutMode_ == 3) {
+        // NTD 变长格式: [H, total_T, BT] (B=1, chunks contiguous, row_stride = BT)
+        // 遍历顺序: chunk_global → H (H 变化最快)
+        int64_t chunk_global_idx = tileIdx / H;
+        int64_t h = tileIdx % H;
+
+        int64_t seq_idx = chunkIndicesGM_.GetValue(chunk_global_idx * 2);
+        int64_t chunk_in_seq = chunkIndicesGM_.GetValue(chunk_global_idx * 2 + 1);
+
+        int64_t bos = cuSeqlensGM_.GetValue(seq_idx);
+
+        // head 在最外维: h * total_T * BT + (bos + chunk_in_seq * BT) * BT
+        return h * seqLen_ * BT + (bos + chunk_in_seq * BT) * BT;
+
+    } else if (layoutMode_ == 2) {
+        // TND 变长格式: [total_T, H, BT]
         // 遍历顺序: chunk_global → H (H 变化最快)
         int64_t chunk_global_idx = tileIdx / H;
         int64_t h = tileIdx % H;
@@ -303,7 +317,7 @@ __aicore__ inline int64_t SolveTriCube<MATRIX_SIZE, T>::GetTileGMOffset(int64_t 
         return (bos + chunk_in_seq * BT) * H * BT + h * BT;
 
     } else if (layoutMode_ == 1) {
-        // BSND 格式: [B, T, H, BT]
+        // BSND 格式: [B, S, H, BT]
         // 遍历顺序: B → chunk → H (H 变化最快)
         int64_t seqT = seqLen_;
 
@@ -315,7 +329,7 @@ __aicore__ inline int64_t SolveTriCube<MATRIX_SIZE, T>::GetTileGMOffset(int64_t 
         return b * seqT * H * BT + chunk * BT * H * BT + h * BT;
 
     } else {
-        // BHTD 格式: [B, H, T, BT]
+        // BNSD 格式 (mode 0): [B, H, S, BT]
         // 遍历顺序: B → H → chunk (chunk 变化最快)
         int64_t seqT = seqLen_;
         int64_t chunk = tileIdx % numChunks_;
@@ -328,8 +342,8 @@ __aicore__ inline int64_t SolveTriCube<MATRIX_SIZE, T>::GetTileGMOffset(int64_t 
 template <int MATRIX_SIZE, typename T>
 __aicore__ inline int64_t SolveTriCube<MATRIX_SIZE, T>::GetTileValidSize(int64_t tileIdx)
 {
-    if (layoutMode_ == 2) {
-        // THD: 动态计算每个序列的尾块
+    if (layoutMode_ == 2 || layoutMode_ == 3) {
+        // TND/NTD: 动态计算每个序列的尾块
         int64_t H = numHeads_;
         int64_t BT = matrixSize_;
         int64_t chunk_global_idx = tileIdx / H;
@@ -348,13 +362,13 @@ __aicore__ inline int64_t SolveTriCube<MATRIX_SIZE, T>::GetTileValidSize(int64_t
         int64_t remaining = seq_len - chunk_start;
         return (remaining >= BT) ? BT : remaining;
     } else {
-        // BHTD/BSND: 使用预计算的 lastChunkValidSize
+        // BNSD/BSND: 使用预计算的 lastChunkValidSize
         int64_t chunk;
         if (layoutMode_ == 1) {
             // BSND: tileIdx = b×(H×numChunks) + chunk×H + h
             chunk = (tileIdx / numHeads_) % numChunks_;
         } else {
-            // BHTD: tileIdx = b×(H×numChunks) + h×numChunks + chunk
+            // BNSD: tileIdx = b×(H×numChunks) + h×numChunks + chunk
             chunk = tileIdx % numChunks_;
         }
         if (chunk == numChunks_ - 1) {
@@ -773,15 +787,38 @@ __aicore__ inline void SolveTriCube<MATRIX_SIZE, T>::LoadInputTile(int64_t gmOff
 {
     // MCH 路径：批量搬运所有对角 fractals
     // 使用 Nd2Nz 的 ndNum + srcNdMatrixStride 一次性搬运所有对角块
-    // validSize < MATRIX_SIZE 时为尾块，最后一个对角块如果不足 16x16，硬件自动补零
     ClearSlot(SLOT_INPUT);
     PipeBarrier<PIPE_MTE2>();
 
-    int32_t numDiagFracs = (static_cast<int32_t>(validSize) + FRAC - 1) / FRAC;
+    int32_t fullDiagFracs = static_cast<int32_t>(validSize) / FRAC;
+    int32_t tailSize = static_cast<int32_t>(validSize) % FRAC;
 
-    // 使用预计算的参数模板，只修改变化的字段
-    diagLoadParams_.ndNum = numDiagFracs;
-    DataCopy(l1_[SLOT_INPUT * L1_SLOT_ELEMS], inputGM_[gmOffset], diagLoadParams_);
+    if (fullDiagFracs > 0) {
+        // 使用预计算的参数模板批量搬运完整的 16x16 对角块。
+        diagLoadParams_.ndNum = fullDiagFracs;
+        DataCopy(l1_[SLOT_INPUT * L1_SLOT_ELEMS], inputGM_[gmOffset], diagLoadParams_);
+    }
+
+    if (tailSize > 0) {
+        // 尾部对角块只搬运实际有效区域。若仍按 16x16 搬运，最后一个
+        // TND 序列会越过输入末尾读取，并把相邻显存中的 NaN 带入矩阵求逆。
+        Nd2NzParams tailParams;
+        tailParams.ndNum = 1;
+        tailParams.nValue = tailSize;
+        tailParams.dValue = tailSize;
+        tailParams.srcDValue = static_cast<uint32_t>(rowStride_);
+        tailParams.srcNdMatrixStride = 0;
+        tailParams.dstNzNStride = 1;
+        tailParams.dstNzC0Stride = FRAC;
+        tailParams.dstNzMatrixStride = 0;
+
+        int32_t tailSrcOffset = fullDiagFracs * (FRAC * static_cast<int32_t>(rowStride_) + FRAC);
+        int32_t tailDstOffset = fullDiagFracs * (NUM_FRACS + 1) * FRAC_LEN;
+        DataCopy(
+            l1_[SLOT_INPUT * L1_SLOT_ELEMS + tailDstOffset],
+            inputGM_[gmOffset + tailSrcOffset],
+            tailParams);
+    }
     SetFlag<HardEvent::MTE2_MTE1>(EVT_MTE2_MTE1);
     WaitFlag<HardEvent::MTE2_MTE1>(EVT_MTE2_MTE1);
 }

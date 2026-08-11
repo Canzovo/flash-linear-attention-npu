@@ -150,7 +150,6 @@ site-packages/
         fla_npu_transformer/
           bin/set_env.bash
           op_api/lib/libcust_opapi.so
-          op_api/lib/libopapi.so
           op_impl/ai_core/tbe/op_host/...
           op_impl/ai_core/tbe/op_tiling/...
           op_impl/ai_core/tbe/kernel/...
@@ -164,6 +163,12 @@ site-packages/
 3. `ASCEND_CUSTOM_OPP_PATH` 或 `ASCEND_OPP_PATH` 中唯一匹配的 vendor。
 
 选中后，包会把 vendor root 前置到 `ASCEND_CUSTOM_OPP_PATH`，把 `op_api/lib` 前置到 `LD_LIBRARY_PATH`，并用 `FLA_NPU_OP_API_LIB` 记录实际加载的 `libcust_opapi.so`。
+`import fla_npu` 会立即完成上述选择并加载 `libcust_opapi.so`。调用方必须先 source
+CANN `set_env.sh`；CANN 环境、OPP 或动态库不满足要求时，import 直接失败。root
+import 不会因此导入 `torch`、`torch_npu` 或注册 legacy dispatcher。
+自定义 OPP 不得提供 `libopapi.so`，该名字属于 CANN runtime。runtime 会删除旧版本
+安装器遗留且与 `libcust_opapi.so` 相邻的别名；如果目录不可写，则停止加载并提示
+手工清理，避免动态链接器命中错误的自定义库。
 
 ### 2.7 解耦后仍然保留的运行时依赖
 
@@ -406,6 +411,12 @@ run 包 `--install` / `--full` 会把 `packages/vendors/fla_npu_transformer` 合
 - 覆盖后仍可使用的算子。
 - 因共享库被替换而不可用的算子。
 - aclnn header 的 added / modified / removed 变化。
+
+覆盖结束后，安装器会删除自定义 `libopapi.so` 别名、重写可重复 source 的
+`set_env.bash`，并用当前 OPP 文件和摘要原子刷新 wheel `RECORD`。同一个 run 包
+重复覆盖后的文件清单必须一致；后续 wheel 强制重装依赖该 `RECORD` 清理 run 包
+增加的文件。每轮 wheel 构建也必须先清理旧 `build_lib/fla_npu`，避免已删除或
+重命名的 Python 适配从上一次构建目录混入新 wheel。
 
 runtime 会缓存 CDLL 和符号，并使用 `RTLD_NODELETE`。覆盖 OPP 后必须重启 Python 进程，不能期待当前进程自动卸载旧 so。
 

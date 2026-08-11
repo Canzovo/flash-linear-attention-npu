@@ -19,7 +19,8 @@ vendordir=vendors/$vendor_name
 
 QUIET="n"
 INSTALL_FOR_ALL="n"
-WHEEL_INSTALL="n"
+WHEEL_INSTALL="y"
+MODE_SET="n"
 
 
 while true
@@ -31,11 +32,23 @@ do
     ;;
     --full|--install)
         WHEEL_INSTALL="y"
+        MODE_SET="y"
+        shift
+    ;;
+    --cann)
+        WHEEL_INSTALL="n"
+        MODE_SET="y"
         shift
     ;;
     --install-path=*)
         INSTALL_PATH=$(echo $1 | cut -d"=" -f2-)
         INSTALL_PATH=${INSTALL_PATH%*/}
+        # An explicit install path targets the CANN OPP layout, unless a
+        # wheel/cann install mode was already requested explicitly.
+        if [ "${MODE_SET}" = "n" ]; then
+            WHEEL_INSTALL="n"
+            MODE_SET="y"
+        fi
         shift
     ;;
     --install-for-all)
@@ -71,28 +84,23 @@ get_wheel_opp_root() {
     local python_bin
     python_bin=$(get_python_bin)
     if [ -z "${python_bin}" ]; then
-        log "[ERROR] python is required to locate the installed fla_npu wheel OPP."
-        exit 1
+        log "[WARNING] python is required to locate the installed fla_npu wheel OPP."
+        return 1
     fi
 
     "${python_bin}" - <<'PY'
 import importlib.util
+import sys
 from pathlib import Path
 
 spec = importlib.util.find_spec("fla_npu")
 if spec is None or spec.origin is None:
-    raise SystemExit("fla_npu is not importable. Install flash-linear-attention-npu wheel first.")
+    print("fla_npu is not importable. Install flash-linear-attention-npu wheel first.", file=sys.stderr)
+    raise SystemExit(1)
 
 package_dir = Path(spec.origin).resolve().parent
 print(package_dir / "opp")
 PY
-}
-
-copy_wheel_file() {
-    local src_file="$1"
-    local dst_file="$2"
-    mkdir -p "$(dirname "${dst_file}")"
-    cp -a "${src_file}" "${dst_file}"
 }
 
 to_snake_name() {
@@ -357,8 +365,24 @@ merge_vendor_to_wheel_opp() {
         cp -a "${src_vendor}/." "${dst_vendor}/"
     fi
 
-    if [ -f "${dst_vendor}/op_api/lib/libcust_opapi.so" ]; then
-        copy_wheel_file "${dst_vendor}/op_api/lib/libcust_opapi.so" "${dst_vendor}/op_api/lib/libopapi.so"
+}
+
+finalize_wheel_opp() {
+    local wheel_opp_root="$1"
+    local python_bin
+    local script_dir
+    python_bin=$(get_python_bin)
+    script_dir=$(dirname "$(readlink -f "$0")")
+    if [ -z "${python_bin}" ]; then
+        log "[ERROR] python is required to finalize the installed wheel OPP."
+        exit 1
+    fi
+
+    if ! "${python_bin}" "${script_dir}/finalize_wheel_opp.py" \
+        --package-dir "$(dirname "${wheel_opp_root}")" \
+        --vendor-name "${vendor_name}"; then
+        log "[ERROR] Failed to finalize the installed wheel OPP and refresh wheel RECORD."
+        exit 1
     fi
 }
 
@@ -395,6 +419,10 @@ install_wheel_opp_package() {
     fi
 
     wheel_opp_root=$(get_wheel_opp_root)
+    if [ -z "${wheel_opp_root}" ]; then
+        log "[WARNING] fla_npu wheel is not importable, falling back to CANN OPP install."
+        return 1
+    fi
     wheel_opp_root="${wheel_opp_root%/}"
     dst_vendor="${wheel_opp_root}/${vendordir}"
 
@@ -410,6 +438,7 @@ install_wheel_opp_package() {
     confirm_partial_shared_lib_impact "${src_vendor}" "${dst_vendor}"
     merge_vendor_to_wheel_opp "${src_vendor}" "${dst_vendor}"
     update_wheel_vendors_config "${wheel_opp_root}/vendors"
+    finalize_wheel_opp "${wheel_opp_root}"
 
     log "[INFO] FLA NPU wheel OPP update completed. Restart Python processes to load the new libcust_opapi.so and kernels."
     echo "SUCCESS"
@@ -419,7 +448,6 @@ install_wheel_opp_package() {
 if [ "${WHEEL_INSTALL}" = "y" ]; then
     install_wheel_opp_package
 fi
-
 if [ -n "${INSTALL_PATH}" ]; then
     if [[ ! "${INSTALL_PATH}" = /* ]]; then
         log "[ERROR] use absolute path for --install-path argument"

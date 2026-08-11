@@ -1,3 +1,4 @@
+import glob
 import importlib
 from importlib import metadata as importlib_metadata
 import importlib.util
@@ -319,31 +320,17 @@ def _install_run_package(run_file, install_path):
 
 def _build_run_package():
     soc = os.getenv("FLA_NPU_SOC", DEFAULT_SOC)
-    ops_filter = os.getenv("FLA_NPU_OPS", "").strip()
-    incremental = _env_flag("FLA_NPU_INCREMENTAL_BUILD")
-    if incremental and ops_filter:
-        raise RuntimeError(
-            "FLA_NPU_INCREMENTAL_BUILD reuses the full CMake build graph so unchanged "
-            "operators stay packaged. Do not set FLA_NPU_OPS at the same time; "
-            "FLA_NPU_OPS intentionally builds a partial custom OPP package."
-        )
-
-    if not _env_flag("FLA_NPU_SKIP_RUN_BUILD"):
-        build_out = REPO_ROOT / "build_out"
-        if build_out.exists():
-            shutil.rmtree(build_out)
-        cmd = [
-            "bash",
-            "build.sh",
-            f"--soc={soc}",
-            "--pkg",
-            f"--vendor_name={DEFAULT_VENDOR_NAME}",
-        ]
-        if incremental:
-            cmd.append("--incremental")
-        if ops_filter:
-            cmd.append(f"--ops={ops_filter}")
-        _run(cmd, REPO_ROOT)
+    build_out = REPO_ROOT / "build_out"
+    if build_out.exists():
+        shutil.rmtree(build_out)
+    cmd = [
+        "bash",
+        "build.sh",
+        f"--soc={soc}",
+        "--pkg",
+        f"--vendor_name={DEFAULT_VENDOR_NAME}",
+    ]
+    _run(cmd, REPO_ROOT)
 
     return _find_single_run_package()
 
@@ -464,10 +451,6 @@ def _validate_staged_opp(vendor_dir):
 
 
 def _stage_run_package(run_file, opp_root):
-    if _env_flag("FLA_NPU_SKIP_RUN_INSTALL"):
-        print("[fla-npu build] Skipping embedded OPP staging because FLA_NPU_SKIP_RUN_INSTALL is set")
-        return
-
     opp_root = Path(opp_root).resolve()
     if opp_root.exists():
         shutil.rmtree(opp_root)
@@ -490,6 +473,20 @@ def _stage_run_package(run_file, opp_root):
         )
     _validate_staged_opp(vendor_dir)
     print(f"[fla-npu build] Embedded OPP staged at {vendor_dir}")
+
+
+def _cleanup_build_residuals():
+    """Remove setuptools egg-info artifacts from the repo root.
+
+    Building a wheel from the source root leaves ``*.egg-info`` directories
+    behind. When the repo root is on ``sys.path`` (e.g. the CANN set_env.sh
+    appends a trailing ``:`` to PYTHONPATH, which makes Python add the current
+    directory), those stale metadata dirs shadow the real installed
+    distribution: ``pip show`` reports the source root as Location and
+    ``pip install --force-reinstall`` fails to uninstall the previous build.
+    """
+    for egg_info in glob.glob(str(REPO_ROOT / "*.egg-info")):
+        shutil.rmtree(egg_info, ignore_errors=True)
 
 
 def _build_torch_extension_inplace():
@@ -530,6 +527,9 @@ class FlaNpuBuildPy(_build_py):
             _build_torch_extension_inplace()
             _EXTERNAL_BUILD_DONE = True
 
+        built_package_dir = Path(self.build_lib) / "fla_npu"
+        if built_package_dir.exists():
+            shutil.rmtree(built_package_dir)
         super().run()
         run_package = _RUN_PACKAGE or _find_single_run_package()
         _stage_run_package(run_package, Path(self.build_lib) / "fla_npu" / "opp")
@@ -553,6 +553,10 @@ if _bdist_wheel is not None:
             build_tag = get_wheel_build_tag(REPO_ROOT)
             if build_tag:
                 self.build_number = build_tag
+
+        def run(self):
+            super().run()
+            _cleanup_build_residuals()
 
     CMDCLASS["bdist_wheel"] = FlaNpuBdistWheel
 

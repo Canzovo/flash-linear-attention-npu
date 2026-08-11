@@ -14,6 +14,7 @@ import torch_npu
 from fla_npu.ops import ascendc as ascendc_ops
 from golden import recurrent_gated_delta_rule_golden
 from utils import compare_tensors_by_ratio
+from fla_npu.ops import ascendc as ascendc_ops
 
 
 def make_inputs(bs, mtp, nk, nv, dk, dv, use_g=True, use_gk=False,

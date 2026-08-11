@@ -45,6 +45,7 @@ _ASCENDC_OPS = (
     "npu_chunk_kda_fwd",
     "npu_chunk_kda_bwd_intra",
     "npu_kda_gate_cumsum",
+    "npu_recurrent_kda",
 )
 
 BACKWARD_OPS = {
@@ -59,8 +60,13 @@ BACKWARD_OPS = {
 MUTATED_ARGUMENTS = {
     "causal_conv1d": ("conv_states",),
     "npu_causal_conv1d": ("conv_states",),
+    "npu_recurrent_kda": ("initial_state",),
     "recurrent_gated_delta_rule": ("state",),
     "npu_recurrent_gated_delta_rule": ("state",),
+}
+
+MUTATION_PREDICATES = {
+    "npu_recurrent_kda": lambda arguments: bool(arguments["inplace_final_state"]),
 }
 
 _LEGACY_TORCH_OPS_WARNING = (
@@ -147,7 +153,11 @@ def _wrap_mutable_direct_op(name: str, op: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        mutated_tensors = [bound.arguments[arg_name] for arg_name in mutated_names]
+        active_mutated_names = mutated_names
+        predicate = MUTATION_PREDICATES.get(name)
+        if predicate is not None and not predicate(bound.arguments):
+            active_mutated_names = ()
+        mutated_tensors = [bound.arguments[arg_name] for arg_name in active_mutated_names]
 
         try:
             import torch
@@ -156,7 +166,8 @@ def _wrap_mutable_direct_op(name: str, op: Callable) -> Callable:
 
         mutated_tensors = [tensor for tensor in mutated_tensors if isinstance(tensor, torch.Tensor)]
         requiring_grad = [
-            arg_name for arg_name in mutated_names if getattr(bound.arguments[arg_name], "requires_grad", False)
+            arg_name for arg_name in active_mutated_names
+            if getattr(bound.arguments[arg_name], "requires_grad", False)
         ]
         if requiring_grad:
             names = ", ".join(requiring_grad)

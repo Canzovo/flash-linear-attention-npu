@@ -175,7 +175,7 @@ def run_npu(inp, state_layout, api_mode):
         "g": g_npu,
         "gk": gk_npu,
     }
-    if api_mode == "
+    if api_mode == "functional":
         result = torch.ops.ascend_ops.recurrent_gated_delta_rule_functional(
             q_npu, k_npu, v_npu, s_npu, **kwargs
         )
