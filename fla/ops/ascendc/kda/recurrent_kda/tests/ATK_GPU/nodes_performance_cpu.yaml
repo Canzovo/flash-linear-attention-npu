@@ -1,0 +1,4 @@
+nodes:
+  - name: cpu_performance
+    backend: cpu
+    task: [performance_device]

@@ -1,0 +1,15 @@
+nodes:
+  - name: npu_dut
+    backend: npu
+    devices: [0]
+    task: [accuracy]
+    is_compare: true
+  - name: gpu_control
+    backend: gpu
+    devices: [0]
+    task: [accuracy]
+    is_compare: true
+  - name: cpu_benchmark
+    backend: cpu
+    task: [accuracy]
+    is_compare: false
