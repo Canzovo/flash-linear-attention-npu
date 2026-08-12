@@ -260,34 +260,53 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
     use_exp2=False,
     transpose_state_layout=False,
 ):
+    import torch
+
     q_shape = _shape(q)
     dv_shape = _shape(dv)
     B, _, T, K = q_shape
     Hv, V = dv_shape[1], dv_shape[3]
+    if (g is None) == (gK is None):
+        raise ValueError("Exactly one of g and gK must be provided.")
+    if any(tensor.dtype != q.dtype for tensor in (k, w, d_o, dv)):
+        raise ValueError("q, k, w, d_o and dv must have the same dtype.")
+    gate = g if g is not None else gK
+    if gate.dtype not in (q.dtype, torch.float32):
+        raise ValueError("g or gK must be float32 or have the same dtype as q and k.")
+    if g is not None and _shape(g) != (B, Hv, T):
+        raise ValueError(f"g must have shape {(B, Hv, T)}, got {_shape(g)}.")
+    if gK is not None and _shape(gK) != (B, Hv, T, K):
+        raise ValueError(f"gK must have shape {(B, Hv, T, K)}, got {_shape(gK)}.")
     NT = _chunk_num(T, int(chunk_size), chunk_indices)
     dh = _empty((B, Hv, NT, K, V), q)
     dh0 = _empty((B, Hv, NT, K, V), q) if h0 is not None else None
     dv2 = _empty_like(dv)
     outputs = (dh, dh0, dv2)
+
+    def logical_tensor(ctx, tensor, name):
+        if tensor is None:
+            return ctx.tensor(tensor, name)
+        return ctx.tensor(tensor, name, storage_shape_override=_shape(tensor))
+
     return _call_aclnn(
         "aclnnChunkGatedDeltaRuleBwdDhu",
         lambda ctx: [
-            ctx.tensor(q, "q"),
-            ctx.tensor(k, "k"),
-            ctx.tensor(w, "w"),
-            ctx.tensor(d_o, "d_o"),
-            ctx.tensor(dv, "dv"),
-            ctx.tensor(g, "g"),
-            ctx.tensor(gK, "gK"),
-            ctx.tensor(h0, "h0"),
-            ctx.tensor(dht, "dht"),
+            logical_tensor(ctx, q, "q"),
+            logical_tensor(ctx, k, "k"),
+            logical_tensor(ctx, w, "w"),
+            logical_tensor(ctx, d_o, "d_o"),
+            logical_tensor(ctx, dv, "dv"),
+            logical_tensor(ctx, g, "g"),
+            logical_tensor(ctx, gK, "gK"),
+            logical_tensor(ctx, h0, "h0"),
+            logical_tensor(ctx, dht, "dht"),
             ctx.int_array(cu_seqlens),
             ctx.int_array(chunk_indices),
             ctypes.c_double(float(scale)),
             ctypes.c_int64(int(chunk_size)),
-            ctx.tensor(dh, "dh"),
-            ctx.tensor(dh0, "dh0"),
-            ctx.tensor(dv2, "dv2"),
+            logical_tensor(ctx, dh, "dh"),
+            logical_tensor(ctx, dh0, "dh0"),
+            logical_tensor(ctx, dv2, "dv2"),
         ],
         outputs,
     )
