@@ -365,6 +365,7 @@ atk task \
 ./run_atk.sh accuracy
 ./run_atk.sh performance_gpu
 ./run_atk.sh performance_npu
+./run_atk.sh profile_npu
 ./run_atk.sh performance_cpu
 ```
 
@@ -377,6 +378,11 @@ atk task \
 默认性能参数为 `5,5,5`（预热 5 次、采集 5 次、取后 5 次平均）。执行器通过 `--enable_custom_data` 提供计算量和
 访存量。测试前应确认 GPU 没有其他高负载任务，且不要把 Triton 首次 JIT
 编译耗时当作算子耗时。
+
+`profile_npu` 仅在 NPU 节点执行全部 8 个固定 case，通过
+`--save_data profile` 保存性能流水，并固定使用
+`--performance_data 1,1,1`（预热 1 次、采集 1 次、取后 1 次）。
+该模式是主动执行入口，不包含在 `performance` 或 `all` 中。
 
 已知限制：当前 ATK `0.3.28` 仅在 NPU backend 中消费
 `export_custom_data()` 并结合 Ascend 硬件峰值计算利用率。GPU 和 CPU

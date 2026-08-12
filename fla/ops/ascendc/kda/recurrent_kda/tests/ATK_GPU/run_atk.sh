@@ -32,6 +32,18 @@ run_npu_performance() {
     -to "${ATK_TIMEOUT}"
 }
 
+run_npu_profile() {
+  atk task \
+    -c "${CASES}" \
+    -n nodes_performance_npu.yaml \
+    --task performance_device \
+    --performance_data 1,1,1 \
+    --enable_custom_data \
+    --save_data profile \
+    -p executor_recurrent_kda_gpu.py \
+    -to "${ATK_TIMEOUT}"
+}
+
 run_gpu_performance() {
   atk task \
     -c "${CASES}" \
@@ -61,6 +73,9 @@ case "${TASK}" in
   performance_npu)
     run_npu_performance
     ;;
+  profile_npu)
+    run_npu_profile
+    ;;
   performance_gpu)
     run_gpu_performance
     ;;
@@ -79,7 +94,7 @@ case "${TASK}" in
     run_cpu_performance
     ;;
   *)
-    echo "usage: $0 [accuracy|performance_npu|performance_gpu|performance_cpu|performance|all]" >&2
+    echo "usage: $0 [accuracy|performance_npu|profile_npu|performance_gpu|performance_cpu|performance|all]" >&2
     exit 2
     ;;
 esac

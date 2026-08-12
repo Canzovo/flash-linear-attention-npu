@@ -53,6 +53,7 @@ server 的 `host`、`port` 和 `output_path`。
 ```bash
 ./run_atk.sh accuracy
 ./run_atk.sh performance_npu
+./run_atk.sh profile_npu
 ./run_atk.sh performance_gpu
 ./run_atk.sh performance_cpu
 ./run_atk.sh performance
@@ -65,6 +66,11 @@ server 的 `host`、`port` 和 `output_path`。
 ```bash
 PERFORMANCE_DATA=1,1,1 ./run_atk.sh performance_gpu
 ```
+
+`profile_npu` 仅运行 NPU 的 8 个固定 case，并通过 `--save_data profile`
+保存性能流水。该模式固定使用 `--performance_data 1,1,1`，即预热 1 次、
+采集 1 次并取最后 1 次数据，不受环境变量 `PERFORMANCE_DATA` 影响，也
+不会由 `performance` 或 `all` 自动触发。
 
 固定 case 文件 `all_recurrent_kda.json` 已随目录交付；日常执行不会调用
 `atk case` 重新生成。仅在测试矩阵发生变化时，才使用 YAML 和 generator
