@@ -281,10 +281,9 @@ class RecurrentKdaGpuAtkApi(BaseApi):
             inputs["initial_state"].numel()
             * inputs["initial_state"].element_size()
         )
-        flops_per_head = (
-            7 * KEY_DIM * VALUE_DIM + 2 * VALUE_DIM + 7 * KEY_DIM
+        calc_flops = float(
+            5 * self.batch * HEADS * DECODE_STEP * KEY_DIM * VALUE_DIM
         )
-        calc_flops = float(self.batch * HEADS * flops_per_head)
         mib = 1024.0 * 1024.0
         return {
             "read_bytes": read_bytes / mib,

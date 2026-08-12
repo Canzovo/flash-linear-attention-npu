@@ -60,7 +60,7 @@ server 的 `host`、`port` 和 `output_path`。
 ```
 
 `performance` 依次运行 NPU、GPU 和 CPU 的全部 8 个 case。
-默认性能参数为 `20,20,10`，可覆盖：
+默认性能参数为 `5,5,5`（预热 5 次、采集 5 次、取后 5 次平均），可覆盖：
 
 ```bash
 PERFORMANCE_DATA=1,1,1 ./run_atk.sh performance_gpu

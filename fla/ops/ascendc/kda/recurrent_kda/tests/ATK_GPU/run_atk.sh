@@ -4,7 +4,7 @@ set -euo pipefail
 ATK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK="${1:-all}"
 CASES="${ATK_DIR}/all_recurrent_kda.json"
-PERFORMANCE_DATA="${PERFORMANCE_DATA:-20,20,10}"
+PERFORMANCE_DATA="${PERFORMANCE_DATA:-5,5,5}"
 ATK_TIMEOUT="${ATK_TIMEOUT:-2000}"
 
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
@@ -18,7 +18,6 @@ run_accuracy() {
     --task accuracy \
     --bm_device cpu \
     -p executor_recurrent_kda_gpu.py \
-    -sp \
     -to "${ATK_TIMEOUT}"
 }
 
@@ -30,7 +29,6 @@ run_npu_performance() {
     --performance_data "${PERFORMANCE_DATA}" \
     --enable_custom_data \
     -p executor_recurrent_kda_gpu.py \
-    -sp \
     -to "${ATK_TIMEOUT}"
 }
 
@@ -42,7 +40,6 @@ run_gpu_performance() {
     --performance_data "${PERFORMANCE_DATA}" \
     --enable_custom_data \
     -p executor_recurrent_kda_gpu.py \
-    -sp \
     -to "${ATK_TIMEOUT}"
 }
 
@@ -54,7 +51,6 @@ run_cpu_performance() {
     --performance_data "${PERFORMANCE_DATA}" \
     --enable_custom_data \
     -p executor_recurrent_kda_gpu.py \
-    -sp \
     -to "${ATK_TIMEOUT}"
 }
 
