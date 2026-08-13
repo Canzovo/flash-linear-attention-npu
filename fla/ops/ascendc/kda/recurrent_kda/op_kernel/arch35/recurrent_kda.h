@@ -662,11 +662,13 @@ private:
         }
     }
 
-    __aicore__ inline void MatVecReduce128(const LocalTensor<float> &stateTensor,
-                                           const LocalTensor<float> &vecTensor,
-                                           LocalTensor<float> &dstTensor, uint32_t rows)
+    __aicore__ inline void DecayMatVecReduce128(LocalTensor<float> &stateTensor,
+                                                const LocalTensor<float> &gateTensor,
+                                                const LocalTensor<float> &vecTensor,
+                                                LocalTensor<float> &dstTensor, uint32_t rows)
     {
         __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
+        __ubuf__ float *gateAddr = (__ubuf__ float *)gateTensor.GetPhyAddr();
         __ubuf__ float *vecAddr = (__ubuf__ float *)vecTensor.GetPhyAddr();
         __ubuf__ float *dstAddr = (__ubuf__ float *)dstTensor.GetPhyAddr();
         uint16_t rowNum = static_cast<uint16_t>(rows);
@@ -674,21 +676,29 @@ private:
         {
             RegTensor<float> state0;
             RegTensor<float> state1;
+            RegTensor<float> gate0;
+            RegTensor<float> gate1;
             RegTensor<float> vec0;
             RegTensor<float> vec1;
             RegTensor<float> product0;
             RegTensor<float> product1;
             RegTensor<float> sum;
             MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
+            DataCopy(gate0, gateAddr);
+            DataCopy(gate1, gateAddr + V_LENGTH);
             DataCopy(vec0, vecAddr);
             DataCopy(vec1, vecAddr + V_LENGTH);
             for (uint16_t i = 0; i < rowNum; ++i) {
                 DataCopy(state0, stateAddr + i * alignK_);
                 DataCopy(state1, stateAddr + i * alignK_ + V_LENGTH);
+                Mul(state0, state0, gate0, pregFull);
+                Mul(state1, state1, gate1, pregFull);
                 Mul(product0, state0, vec0, pregFull);
                 Mul(product1, state1, vec1, pregFull);
                 Add(product0, product0, product1, pregFull);
                 ReduceSum(sum, product0, pregFull);
+                DataCopy(stateAddr + i * alignK_, state0, pregFull);
+                DataCopy(stateAddr + i * alignK_ + V_LENGTH, state1, pregFull);
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
             }
         }
@@ -860,11 +870,12 @@ private:
 
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset, uint64_t curVOffset)
     {
-        MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
         if (alignK_ == TWO_V_LENGTH) {
-            MatVecReduce128(stateInUb, kInUb[curQKOffset], deltaInUb, curSingleV);
+            DecayMatVecReduce128(stateInUb, gateInUb[curQKOffset],
+                                 kInUb[curQKOffset], deltaInUb, curSingleV);
         } else {
+            MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
             MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
             AscendC::PipeBarrier<PIPE_V>();
             ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
