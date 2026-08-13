@@ -662,6 +662,38 @@ private:
         }
     }
 
+    __aicore__ inline void MatVecReduce128(const LocalTensor<float> &stateTensor,
+                                           const LocalTensor<float> &vecTensor,
+                                           LocalTensor<float> &dstTensor, uint32_t rows)
+    {
+        __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
+        __ubuf__ float *vecAddr = (__ubuf__ float *)vecTensor.GetPhyAddr();
+        __ubuf__ float *dstAddr = (__ubuf__ float *)dstTensor.GetPhyAddr();
+        uint16_t rowNum = static_cast<uint16_t>(rows);
+        __VEC_SCOPE__
+        {
+            RegTensor<float> state0;
+            RegTensor<float> state1;
+            RegTensor<float> vec0;
+            RegTensor<float> vec1;
+            RegTensor<float> product0;
+            RegTensor<float> product1;
+            RegTensor<float> sum;
+            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
+            DataCopy(vec0, vecAddr);
+            DataCopy(vec1, vecAddr + V_LENGTH);
+            for (uint16_t i = 0; i < rowNum; ++i) {
+                DataCopy(state0, stateAddr + i * alignK_);
+                DataCopy(state1, stateAddr + i * alignK_ + V_LENGTH);
+                Mul(product0, state0, vec0, pregFull);
+                Mul(product1, state1, vec1, pregFull);
+                Add(product0, product0, product1, pregFull);
+                ReduceSum(sum, product0, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
+            }
+        }
+    }
+
     __aicore__ inline void ProcessKQ(const LocalTensor<float> &cubeTensor, const LocalTensor<float> &vec1Tensor,
                                           LocalTensor<float> &dst1Tensor, const LocalTensor<float> &vec2Tensor,
                                           LocalTensor<float> &dst2Tensor, uint32_t rows)
@@ -696,6 +728,57 @@ private:
                     DataCopy(dst1Addr + i * alignK_ + j * V_LENGTH, dst1, pregLoop);
                     DataCopy(dst2Addr + i * alignK_ + j * V_LENGTH, dst2, pregLoop);
                 }
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessKQReduce128(const LocalTensor<float> &deltaTensor,
+                                              const LocalTensor<float> &kTensor,
+                                              LocalTensor<float> &stateTensor,
+                                              const LocalTensor<float> &qTensor,
+                                              LocalTensor<float> &attnTensor, uint32_t rows)
+    {
+        __ubuf__ float *deltaAddr = (__ubuf__ float *)deltaTensor.GetPhyAddr();
+        __ubuf__ float *kAddr = (__ubuf__ float *)kTensor.GetPhyAddr();
+        __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
+        __ubuf__ float *qAddr = (__ubuf__ float *)qTensor.GetPhyAddr();
+        __ubuf__ float *attnAddr = (__ubuf__ float *)attnTensor.GetPhyAddr();
+        uint16_t rowNum = static_cast<uint16_t>(rows);
+        __VEC_SCOPE__
+        {
+            RegTensor<float> delta;
+            RegTensor<float> k0;
+            RegTensor<float> k1;
+            RegTensor<float> q0;
+            RegTensor<float> q1;
+            RegTensor<float> state0;
+            RegTensor<float> state1;
+            RegTensor<float> update;
+            RegTensor<float> dot0;
+            RegTensor<float> dot1;
+            RegTensor<float> sum;
+            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
+            DataCopy(k0, kAddr);
+            DataCopy(k1, kAddr + V_LENGTH);
+            DataCopy(q0, qAddr);
+            DataCopy(q1, qAddr + V_LENGTH);
+            for (uint16_t i = 0; i < rowNum; ++i) {
+                DataCopy<float, LoadDist::DIST_BRC_B32>(delta, deltaAddr + i);
+                DataCopy(state0, stateAddr + i * alignK_);
+                Mul(update, delta, k0, pregFull);
+                Add(state0, state0, update, pregFull);
+                Mul(dot0, state0, q0, pregFull);
+
+                DataCopy(state1, stateAddr + i * alignK_ + V_LENGTH);
+                Mul(update, delta, k1, pregFull);
+                Add(state1, state1, update, pregFull);
+                Mul(dot1, state1, q1, pregFull);
+
+                Add(dot0, dot0, dot1, pregFull);
+                ReduceSum(sum, dot0, pregFull);
+                DataCopy(stateAddr + i * alignK_, state0, pregFull);
+                DataCopy(stateAddr + i * alignK_ + V_LENGTH, state1, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + i, sum, pregFull);
             }
         }
     }
@@ -779,17 +862,27 @@ private:
     {
         MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
-        MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
+        if (alignK_ == TWO_V_LENGTH) {
+            MatVecReduce128(stateInUb, kInUb[curQKOffset], deltaInUb, curSingleV);
+        } else {
+            MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
+        }
         AscendC::PipeBarrier<PIPE_V>();
         Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
         Muls(deltaInUb, deltaInUb, beta_, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
-        ProcessKQ(deltaInUb, kInUb[curQKOffset], stateInUb, qInUb[curQKOffset], broadTmpInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
-        ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
+        if (alignK_ == TWO_V_LENGTH) {
+            ProcessKQReduce128(deltaInUb, kInUb[curQKOffset], stateInUb,
+                               qInUb[curQKOffset], attnInUb, curSingleV);
+        } else {
+            ProcessKQ(deltaInUb, kInUb[curQKOffset], stateInUb,
+                      qInUb[curQKOffset], broadTmpInUb, curSingleV);
+            AscendC::PipeBarrier<PIPE_V>();
+            ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
+        }
         LocalTensor<outType> attnOutLocal = attnOutQueue_.AllocTensor<outType>();
         if (shouldStoreState_) {
             LocalTensor<stateType> stateOutLocal = stateOutQueue_.AllocTensor<stateType>();
