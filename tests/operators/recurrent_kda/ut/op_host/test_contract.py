@@ -1,5 +1,6 @@
 """Static op_host contract for recurrent_kda; device execution lives in accuracy/routes."""
 
+import re
 from pathlib import Path
 
 from tests.operators.recurrent_kda.common.case_matrix import manifest
@@ -91,8 +92,13 @@ def test_cu_seqlens_uses_fla_prefix_sum_semantics():
     )
     for path in kernel_paths:
         kernel = _read_repo_file(path)
-        assert "int64_t seq0 = SequenceStart(batch_i)" in kernel
-        assert "int64_t seq1 = SequenceEnd(batch_i)" in kernel
+        sequence_start = re.search(
+            r"int64_t seq0 = SequenceStart\(([A-Za-z_][A-Za-z0-9_]*)\);",
+            kernel,
+        )
+        assert sequence_start is not None
+        batch_index = sequence_start.group(1)
+        assert f"int64_t seq1 = SequenceEnd({batch_index});" in kernel
         assert "LoadCuSeqlens" in kernel
         assert "cuSeqlensInt32Gm_" in kernel and "cuSeqlensInt64Gm_" in kernel
         assert "int64_t seqLen64 = seq1 - seq0" in kernel

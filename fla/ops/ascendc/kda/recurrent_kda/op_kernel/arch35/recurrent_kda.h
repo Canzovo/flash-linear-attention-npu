@@ -25,6 +25,7 @@ using namespace matmul;
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
 constexpr uint64_t BUFFER_NUM = 1;
+constexpr uint64_t INPUT_BUFFER_NUM = 2;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 constexpr uint64_t MAX_MTP = 8;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
@@ -158,7 +159,7 @@ public:
         pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
         pipe_->InitBuffer(gateInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(float));
         pipe_->InitBuffer(betaInQueue_, BUFFER_NUM, betaUbSize);
-        pipe_->InitBuffer(stateInQueue_, BUFFER_NUM, alignK_ * vStep_ * sizeof(stateType));
+        pipe_->InitBuffer(stateInQueue_, INPUT_BUFFER_NUM, alignK_ * vStep_ * sizeof(stateType));
         pipe_->InitBuffer(stateOutQueue_, stateOutBufferNum_, alignK_ * vStep_ * sizeof(stateType));
         pipe_->InitBuffer(attnOutQueue_, attnOutBufferNum_, vStep_ * sizeof(outType));
         pipe_->InitBuffer(tmpBuff, restUbSize_);
@@ -236,35 +237,81 @@ public:
             ReleaseEvents();
             return;
         }
-        uint64_t vectorCoreNum = GetBlockNum();
+        uint64_t taskIdx = blockIdx;
         uint64_t taskNum = B_ * NV_;
-        for (uint64_t taskIdx = blockIdx; taskIdx < taskNum; taskIdx += vectorCoreNum) {
-            uint64_t batch_i = taskIdx / NV_;
-            uint64_t head_i = taskIdx % NV_;
-            int64_t seq0 = SequenceStart(batch_i);
-            int64_t seq1 = SequenceEnd(batch_i);
-            int64_t seqLen64 = seq1 - seq0;
-            if (seqLen64 == 0) {
-                continue;
+        uint64_t taskStride = GetBlockNum();
+        RKDATaskInfo currentTask{};
+        RKDATaskInfo nextTask{};
+        bool taskValid = true;
+        bool hasCurrentTask = PrepareNextTask(taskIdx, taskNum, taskStride, currentTask, taskValid);
+        bool hasNextTask = PrepareNextTask(taskIdx, taskNum, taskStride, nextTask, taskValid);
+        if (!taskValid) {
+            ReleaseEvents();
+            return;
+        }
+        bool statePrefetched = false;
+        while (hasCurrentTask) {
+            CopyInBeta(currentTask.seq0, currentTask.seq1);
+            statePrefetched = ProcessHead(
+                currentTask.batch, currentTask.seq0, currentTask.seq1,
+                currentTask.head, currentTask.stateSlot, statePrefetched,
+                hasNextTask, nextTask.stateSlot, nextTask.head);
+            if (!hasNextTask) {
+                break;
             }
-            int32_t seqLen = static_cast<int32_t>(seqLen64);
-            if (!ValidateStateSlots(batch_i, seq0, seqLen)) {
+            currentTask = nextTask;
+            hasNextTask = PrepareNextTask(taskIdx, taskNum, taskStride, nextTask, taskValid);
+            if (!taskValid) {
                 ReleaseEvents();
                 return;
             }
-
-            uint64_t stateSlot = ResolveInitialStateSlot(batch_i, seq0, seqLen);
-            if (stateSlot == INVALID_STATE_SLOT) {
-                ReleaseEvents();
-                return;
-            }
-            CopyInBeta(seq0, seq1);
-            ProcessHead(batch_i, seq0, seq1, head_i, stateSlot);
         }
         ReleaseEvents();
     }
 
 private:
+    struct RKDATaskInfo {
+        uint64_t batch;
+        uint64_t head;
+        uint64_t stateSlot;
+        int64_t seq0;
+        int64_t seq1;
+    };
+
+    __aicore__ inline bool PrepareNextTask(uint64_t &taskIdx, uint64_t taskNum, uint64_t taskStride,
+                                           RKDATaskInfo &task, bool &taskValid)
+    {
+        taskValid = true;
+        while (taskIdx < taskNum) {
+            uint64_t currentTaskIdx = taskIdx;
+            taskIdx += taskStride;
+            uint64_t batch = currentTaskIdx / NV_;
+            int64_t seq0 = SequenceStart(batch);
+            int64_t seq1 = SequenceEnd(batch);
+            int64_t seqLen64 = seq1 - seq0;
+            if (seqLen64 == 0) {
+                continue;
+            }
+            int32_t seqLen = static_cast<int32_t>(seqLen64);
+            if (!ValidateStateSlots(batch, seq0, seqLen)) {
+                taskValid = false;
+                return false;
+            }
+            uint64_t stateSlot = ResolveInitialStateSlot(batch, seq0, seqLen);
+            if (stateSlot == INVALID_STATE_SLOT) {
+                taskValid = false;
+                return false;
+            }
+            task.batch = batch;
+            task.head = currentTaskIdx % NV_;
+            task.stateSlot = stateSlot;
+            task.seq0 = seq0;
+            task.seq1 = seq1;
+            return true;
+        }
+        return false;
+    }
+
     __aicore__ inline bool ValidateCuSeqlens() const
     {
         if (!hasCuSeqlens_) {
@@ -846,26 +893,39 @@ private:
         return beta;
     }
 
-    __aicore__ inline void ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
-                                      uint64_t head_i, uint64_t stateSlot)
+    __aicore__ inline bool ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
+                                      uint64_t head_i, uint64_t stateSlot, bool statePrefetched,
+                                      bool hasNextTask, uint64_t nextStateSlot, uint64_t nextHead)
     {
         uint64_t vOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realV_;
         uint64_t qkOffset = (static_cast<uint64_t>(seq0) * NK_ + head_i / (NV_ / NK_)) * realK_;
         uint64_t gateOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realK_;
         CopyInQKVGate(vOffset, qkOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
         if (realV_ == 0) {
-            return;
+            return false;
         }
-        uint64_t nextVOffset = 0;
-        uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-        PrefetchState(stateSlot, head_i, 0, nextSingleV);
+        uint64_t nextVOffset = statePrefetched ? vStep_ : 0;
+        uint32_t queuedBufferNum = statePrefetched ? 1 : 0;
+        for (uint32_t bufferIdx = queuedBufferNum;
+             bufferIdx < INPUT_BUFFER_NUM && nextVOffset < realV_; ++bufferIdx) {
+            uint32_t nextSingleV =
+                nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
+            PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
+            nextVOffset += vStep_;
+        }
+        bool nextStatePrefetched = false;
         for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
             uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
             LoadPrefetchedState(curSingleV);
-            nextVOffset = v_i + vStep_;
             if (nextVOffset < realV_) {
-                nextSingleV = nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
+                uint32_t nextSingleV =
+                    nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
                 PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
+                nextVOffset += vStep_;
+            } else if (hasNextTask && !nextStatePrefetched) {
+                uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
+                PrefetchState(nextStateSlot, nextHead, 0, nextSingleV);
+                nextStatePrefetched = true;
             }
             uint64_t pendingAttnOffset = 0;
             uint64_t pendingStateSlot = 0;
@@ -908,6 +968,7 @@ private:
                 CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
             }
         }
+        return nextStatePrefetched;
      }
 
 private:
@@ -937,7 +998,7 @@ private:
     TQue<QuePosition::VECIN, 1> vInQueue_;
     TQue<QuePosition::VECIN, 1> gateInQueue_;
     TQue<QuePosition::VECIN, 1> betaInQueue_;
-    TQue<QuePosition::VECIN, 1> stateInQueue_;
+    TQue<QuePosition::VECIN, INPUT_BUFFER_NUM> stateInQueue_;
     TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> attnOutQueue_;
     TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> stateOutQueue_;
     TBuf<TPosition::VECCALC> tmpBuff;

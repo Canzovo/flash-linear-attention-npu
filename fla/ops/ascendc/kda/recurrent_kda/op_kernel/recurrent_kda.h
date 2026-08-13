@@ -24,6 +24,7 @@ namespace RecurrentKda {
 using namespace matmul;
 using namespace AscendC;
 constexpr uint64_t BUFFER_NUM = 1;
+constexpr uint64_t INPUT_BUFFER_NUM = 2;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 constexpr uint64_t MAX_MTP = 8;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
@@ -155,7 +156,7 @@ public:
         pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
         pipe_->InitBuffer(gateInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(float));
         pipe_->InitBuffer(betaInQueue_, BUFFER_NUM, betaUbSize);
-        pipe_->InitBuffer(stateInQueue_, BUFFER_NUM, alignK_ * vStep_ * sizeof(stateType));
+        pipe_->InitBuffer(stateInQueue_, INPUT_BUFFER_NUM, alignK_ * vStep_ * sizeof(stateType));
         pipe_->InitBuffer(stateOutQueue_, stateOutBufferNum_, alignK_ * vStep_ * sizeof(stateType));
         pipe_->InitBuffer(attnOutQueue_, attnOutBufferNum_, vStep_ * sizeof(outType));
         pipe_->InitBuffer(tmpBuff, restUbSize_);
@@ -246,22 +247,22 @@ public:
                 return;
             }
 
-            uint32_t copyFlag = 0;
-            uint64_t stateSlot = batch_i;
-            for (uint64_t head_i = 0; head_i < NV_; head_i++) {
-                if (!IsCurrentTask(batch_i, head_i)) {
-                    continue;
-                }
-                copyFlag++;
-                if (copyFlag == 1) {
-                    stateSlot = ResolveInitialStateSlot(batch_i, seq0, seqLen);
-                    if (stateSlot == INVALID_STATE_SLOT) {
-                        ReleaseEvents();
-                        return;
-                    }
-                    CopyInBeta(seq0, seq1);
-                }
-                ProcessHead(batch_i, seq0, seq1, head_i, stateSlot);
+            uint64_t head_i = FindNextTaskHead(batch_i, 0);
+            if (head_i == NV_) {
+                continue;
+            }
+            uint64_t stateSlot = ResolveInitialStateSlot(batch_i, seq0, seqLen);
+            if (stateSlot == INVALID_STATE_SLOT) {
+                ReleaseEvents();
+                return;
+            }
+            CopyInBeta(seq0, seq1);
+            bool statePrefetched = false;
+            while (head_i < NV_) {
+                uint64_t nextHead = FindNextTaskHead(batch_i, head_i + 1);
+                statePrefetched = ProcessHead(batch_i, seq0, seq1, head_i, stateSlot,
+                                              statePrefetched, nextHead < NV_, stateSlot, nextHead);
+                head_i = nextHead;
             }
         }
         ReleaseEvents();
@@ -805,26 +806,39 @@ private:
         return beta;
     }
 
-    __aicore__ inline void ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
-                                      uint64_t head_i, uint64_t stateSlot)
+    __aicore__ inline bool ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
+                                      uint64_t head_i, uint64_t stateSlot, bool statePrefetched,
+                                      bool hasNextHead, uint64_t nextStateSlot, uint64_t nextHead)
     {
         uint64_t vOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realV_;
         uint64_t qkOffset = (static_cast<uint64_t>(seq0) * NK_ + head_i / (NV_ / NK_)) * realK_;
         uint64_t gateOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realK_;
         CopyInQKVGate(vOffset, qkOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
         if (realV_ == 0) {
-            return;
+            return false;
         }
-        uint64_t nextVOffset = 0;
-        uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-        PrefetchState(stateSlot, head_i, 0, nextSingleV);
+        uint64_t nextVOffset = statePrefetched ? vStep_ : 0;
+        uint32_t queuedBufferNum = statePrefetched ? 1 : 0;
+        for (uint32_t bufferIdx = queuedBufferNum;
+             bufferIdx < INPUT_BUFFER_NUM && nextVOffset < realV_; ++bufferIdx) {
+            uint32_t nextSingleV =
+                nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
+            PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
+            nextVOffset += vStep_;
+        }
+        bool nextStatePrefetched = false;
         for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
             uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
             LoadPrefetchedState(curSingleV);
-            nextVOffset = v_i + vStep_;
             if (nextVOffset < realV_) {
-                nextSingleV = nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
+                uint32_t nextSingleV =
+                    nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
                 PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
+                nextVOffset += vStep_;
+            } else if (hasNextHead && !nextStatePrefetched) {
+                uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
+                PrefetchState(nextStateSlot, nextHead, 0, nextSingleV);
+                nextStatePrefetched = true;
             }
             uint64_t pendingAttnOffset = 0;
             uint64_t pendingStateSlot = 0;
@@ -867,7 +881,18 @@ private:
                 CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
             }
         }
+        return nextStatePrefetched;
      }
+
+    __aicore__ inline uint64_t FindNextTaskHead(uint64_t batchIdx, uint64_t startHead) const
+    {
+        for (uint64_t head = startHead; head < NV_; ++head) {
+            if (IsCurrentTask(batchIdx, head)) {
+                return head;
+            }
+        }
+        return NV_;
+    }
 
     __aicore__ inline bool IsCurrentTask(uint64_t batchIdx, uint64_t headIdx) const
     {
@@ -901,7 +926,7 @@ private:
     TQue<QuePosition::VECIN, 1> vInQueue_;
     TQue<QuePosition::VECIN, 1> gateInQueue_;
     TQue<QuePosition::VECIN, 1> betaInQueue_;
-    TQue<QuePosition::VECIN, 1> stateInQueue_;
+    TQue<QuePosition::VECIN, INPUT_BUFFER_NUM> stateInQueue_;
     TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> attnOutQueue_;
     TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> stateOutQueue_;
     TBuf<TPosition::VECCALC> tmpBuff;

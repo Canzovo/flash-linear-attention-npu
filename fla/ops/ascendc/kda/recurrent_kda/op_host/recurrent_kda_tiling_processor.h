@@ -46,6 +46,7 @@ static constexpr size_t RKDA_DIM_3 = 3;
 static constexpr uint32_t RKDA_LAYOUT_BSND = 0;
 static constexpr uint32_t RKDA_LAYOUT_TND = 1;
 static constexpr size_t RKDA_MAX_MTP = 8;
+static constexpr int64_t RKDA_INPUT_BUFFER_NUM = 2;
 static constexpr int64_t RKDA_UB_GUARD_BYTES = 2048;
 static constexpr size_t RKDA_SYS_WORKSPACE_SIZE = 16U * 1024U * 1024U;
 
@@ -551,7 +552,7 @@ private:
     int64_t CalcVStepCoeff(int64_t aDk, uint32_t stateOutBufferNum, uint32_t attnOutBufferNum) const
     {
         int64_t stateDtypeSize = (ctx_.stateDtype == ge::DT_FLOAT) ? 4 : 2;
-        int64_t coeff = stateDtypeSize * aDk; // state input queue.
+        int64_t coeff = RKDA_INPUT_BUFFER_NUM * stateDtypeSize * aDk; // state input queue.
         coeff += static_cast<int64_t>(stateOutBufferNum) * stateDtypeSize * aDk;
         coeff += static_cast<int64_t>(attnOutBufferNum) * 2;
         coeff += 8 * aDk + 8;
