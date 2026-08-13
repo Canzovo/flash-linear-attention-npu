@@ -251,7 +251,7 @@ public:
         }
         bool statePrefetched = false;
         while (hasCurrentTask) {
-            CopyInBeta(currentTask.seq0, currentTask.seq1);
+            CopyInBeta(currentTask.seq0, currentTask.seq1, currentTask.head);
             statePrefetched = ProcessHead(
                 currentTask.batch, currentTask.seq0, currentTask.seq1,
                 currentTask.head, currentTask.stateSlot, statePrefetched,
@@ -837,39 +837,45 @@ private:
     }
 
     template <typename betaType>
-    __aicore__ inline void CopyInBetaTyped(int64_t seq0, int64_t seq1)
+    __aicore__ inline void CopyInBetaTyped(int64_t seq0, int64_t seq1, uint64_t head)
     {
         int64_t seqLen = seq1 - seq0;
-        uint64_t betaCount = static_cast<uint64_t>(seqLen) * NV_;
-        uint64_t betaBatchSize = Ceil(betaCount, FP32_NUM_PER_BLOCK) * FP32_NUM_PER_BLOCK;
+        constexpr uint64_t betaRowStride = 32 / sizeof(betaType);
+        uint64_t betaCount = static_cast<uint64_t>(seqLen) * betaRowStride;
         LocalTensor<betaType> betaLocal = betaInQueue_.AllocTensor<betaType>();
+        DataCopyExtParams betaInParams{
+            static_cast<uint16_t>(seqLen), static_cast<uint32_t>(sizeof(betaType)),
+            static_cast<uint32_t>((NV_ - 1) * sizeof(betaType)), 0, 0};
+        DataCopyPadExtParams<betaType> betaPadParams{
+            true, 0, static_cast<uint8_t>(betaRowStride - 1), static_cast<betaType>(0)};
+        uint64_t betaOffset = static_cast<uint64_t>(seq0) * NV_ + head;
         if constexpr (std::is_same<betaType, float32_t>()) {
-            CopyVectorIn(betaLocal, betaFloatGm_, static_cast<uint64_t>(seq0) * NV_, betaCount);
+            DataCopyPad(betaLocal, betaFloatGm_[betaOffset], betaInParams, betaPadParams);
         } else if constexpr (std::is_same<betaType, bfloat16_t>()) {
-            CopyVectorIn(betaLocal, betaBf16Gm_, static_cast<uint64_t>(seq0) * NV_, betaCount);
+            DataCopyPad(betaLocal, betaBf16Gm_[betaOffset], betaInParams, betaPadParams);
         } else {
-            CopyVectorIn(betaLocal, betaFp16Gm_, static_cast<uint64_t>(seq0) * NV_, betaCount);
+            DataCopyPad(betaLocal, betaFp16Gm_[betaOffset], betaInParams, betaPadParams);
         }
         betaInQueue_.EnQue<betaType>(betaLocal);
         betaLocal = betaInQueue_.DeQue<betaType>();
         if constexpr (std::is_same<betaType, float32_t>()) {
-            Adds(betaInUb, betaLocal, 0.0f, static_cast<uint32_t>(betaBatchSize));
+            Adds(betaInUb, betaLocal, 0.0f, static_cast<uint32_t>(betaCount));
         } else {
-            Cast(betaInUb, betaLocal, AscendC::RoundMode::CAST_NONE, static_cast<uint32_t>(betaBatchSize));
+            Cast(betaInUb, betaLocal, AscendC::RoundMode::CAST_NONE, static_cast<uint32_t>(betaCount));
         }
         betaInQueue_.FreeTensor(betaLocal);
         PipeBarrier<PIPE_V>();
         SyncVToS();
     }
 
-    __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1)
+    __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1, uint64_t head)
     {
         if (betaDtype_ == 0) {
-            CopyInBetaTyped<float>(seq0, seq1);
+            CopyInBetaTyped<float>(seq0, seq1, head);
         } else if (betaDtype_ == 1) {
-            CopyInBetaTyped<bfloat16_t>(seq0, seq1);
+            CopyInBetaTyped<bfloat16_t>(seq0, seq1, head);
         } else {
-            CopyInBetaTyped<half>(seq0, seq1);
+            CopyInBetaTyped<half>(seq0, seq1, head);
         }
     }
 
@@ -881,9 +887,11 @@ private:
         return batchIdx;
     }
 
-    __aicore__ inline float LoadBeta(uint64_t gbOffset)
+    __aicore__ inline float LoadBeta(uint64_t tokenOffset)
     {
-        float beta = betaInUb.GetValue(gbOffset);
+        uint64_t betaRowStride =
+            betaDtype_ == 0 ? FP32_NUM_PER_BLOCK : BF16_NUM_PER_BLOCK;
+        float beta = betaInUb.GetValue(tokenOffset * betaRowStride);
         if (useBetaSigmoid_) {
             beta = SigmoidScalar(beta);
             if (allowNegEigval_) {
@@ -932,13 +940,13 @@ private:
             bool hasPendingAttn = false;
             bool hasPendingState = false;
             for (int64_t seq_i = seq0; seq_i < seq1; seq_i++) {
-                uint64_t gbOffset = head_i + static_cast<uint64_t>(seq_i - seq0) * NV_;
+                uint64_t betaOffset = static_cast<uint64_t>(seq_i - seq0);
                 uint64_t curQKOffset = static_cast<uint64_t>(seq_i - seq0) * alignK_;
                 uint64_t curVOffset = static_cast<uint64_t>(seq_i - seq0) * alignV_ + v_i;
                 uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
                 uint64_t curStateOutSlot = curStateSlot;
-                beta_ = LoadBeta(gbOffset);
+                beta_ = LoadBeta(betaOffset);
                 Compute(curSingleV, curQKOffset, curVOffset);
                 if (attnOutBufferNum_ == BUFFER_NUM) {
                     CopyOutAttn(attnOffset, curSingleV);
