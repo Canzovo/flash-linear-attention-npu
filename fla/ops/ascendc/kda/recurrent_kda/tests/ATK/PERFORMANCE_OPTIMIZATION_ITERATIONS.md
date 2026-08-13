@@ -381,3 +381,65 @@ case 6 相对第5轮 profile：
 ### 9.5 结论
 
 精度、契约 UT 和两次性能均通过，收益显著，保留并提交。
+
+## 10. 第8轮：Beta Vector 化并移除 K=128 标量同步
+
+### 10.1 优化内容
+
+ATK 路径每个 token/head 只使用一个 FP32 Beta，但此前仍需：
+
+1. Vector copy padded Beta；
+2. V→S 同步；
+3. Scalar `LoadBeta`；
+4. 逐 token `ExpScalar` 计算 sigmoid；
+5. 再将 `beta_` 广播回 Vector 寄存器。
+
+本轮 K=128 路径在 Vector pipe 内批量处理 padded Beta：
+
+- 使用 AscendC Vector `Sigmoid`，必要时乘2处理 `allowNegEigval`；
+- `ProcessDeltaKQReduce128` 从 `betaInUb` 直接广播当前 token；
+- 删除该路径的 V→S、`LoadBeta`、`ExpScalar` 和 Scalar→Vector 往返；
+- 非 K=128 保留原标量实现。
+
+### 10.2 构建与精度
+
+- README 方式A ascend950 wheel：PASS。
+- Wheel SHA256：`b3d82b2e50d76eb8ffee83a1d8dcb78a0c18760c148dc439e8542af3317a80fe`。
+- `bash run_atk.sh accuracy`：`verified accuracy: 8/8 PASS`。
+
+### 10.3 Performance
+
+两次独立运行均为 `verified performance: 8/8 SUCCESS`。
+
+| case | 第7轮稳定值 (us) | 第8轮首次 (us) | 第8轮复跑 (us) |
+|---:|---:|---:|---:|
+| 0 | 11.0242 | 11.1985 | 11.2990 |
+| 1 | 11.2630 | 11.4260 | 11.4821 |
+| 2 | 25.8466 | 26.4214 | 26.6438 |
+| 3 | 26.6449 | 26.6816 | 26.9123 |
+| 4 | 88.8061 | 89.3130 | 88.5592 |
+| 5 | 89.3855 | 89.2840 | 89.0997 |
+| 6 | 399.4756 | 378.2262 | 382.2576 |
+| 7 | 400.7237 | 384.5969 | 392.8329 |
+| **合计** | **1053.1696** | **1017.1476** | **1029.0866** |
+
+- 首次相对上一版提升：`3.4203%`。
+- 复跑相对上一版提升：`2.2867%`。
+- 相对第0轮累计提升：`19.4385%`（按复跑值）。
+- 小 B 增加约0.1–0.8 us，但 B=64 的总收益覆盖该开销；以8-case总量为保留门槛。
+
+### 10.4 Profile
+
+| case | Duration (us) | Block Num | aiv_vec_ratio | aiv_scalar_ratio | aiv_mte2_ratio | aiv_mte3_ratio |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 12.273 | 56 | 0.465 | 0.552 | 0.226 | 0.045 |
+| 2 | 27.020 | 56 | 0.674 | 0.465 | 0.263 | 0.068 |
+| 4 | 89.257 | 56 | 0.762 | 0.433 | 0.301 | 0.078 |
+| 6 | 379.770 | 56 | 0.713 | 0.376 | 0.573 | 0.093 |
+
+相对第7轮，case 2/4/6 的 vec ratio 分别由0.620/0.695/0.628提高到
+0.674/0.762/0.713；case 6 Duration 由391.547 us降至379.770 us。
+
+### 10.5 结论
+
+精度通过，两次总耗时均下降且 vec ratio 提高，保留并提交。

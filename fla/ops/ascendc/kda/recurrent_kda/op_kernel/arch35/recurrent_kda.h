@@ -16,6 +16,7 @@
 #define __RECURRENT_KDA_KERNEL_H_
 
 #include "kernel_operator.h"
+#include "lib/activation/sigmoid.h"
 #include "lib/matmul_intf.h"
 #include "../recurrent_kda_tiling_data.h"
 
@@ -748,6 +749,8 @@ private:
 
     __aicore__ inline void ProcessDeltaKQReduce128(const LocalTensor<float> &dotTensor,
                                                    const LocalTensor<float> &vTensor,
+                                                   const LocalTensor<float> &betaTensor,
+                                                   uint64_t betaOffset,
                                                    const LocalTensor<float> &kTensor,
                                                    LocalTensor<float> &stateTensor,
                                                    const LocalTensor<float> &qTensor,
@@ -755,6 +758,9 @@ private:
     {
         __ubuf__ float *dotAddr = (__ubuf__ float *)dotTensor.GetPhyAddr();
         __ubuf__ float *vAddr = (__ubuf__ float *)vTensor.GetPhyAddr();
+        uint64_t betaRowStride =
+            betaDtype_ == 0 ? FP32_NUM_PER_BLOCK : BF16_NUM_PER_BLOCK;
+        __ubuf__ float *betaAddr = (__ubuf__ float *)betaTensor.GetPhyAddr() + betaOffset * betaRowStride;
         __ubuf__ float *kAddr = (__ubuf__ float *)kTensor.GetPhyAddr();
         __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
         __ubuf__ float *qAddr = (__ubuf__ float *)qTensor.GetPhyAddr();
@@ -776,7 +782,7 @@ private:
             RegTensor<float> dot1;
             RegTensor<float> sum;
             MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
-            Duplicate(beta, beta_);
+            DataCopy<float, LoadDist::DIST_BRC_B32>(beta, betaAddr);
             DataCopy(k0, kAddr);
             DataCopy(k1, kAddr + V_LENGTH);
             DataCopy(q0, qAddr);
@@ -880,7 +886,8 @@ private:
         }
     }
 
-    __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset, uint64_t curVOffset)
+    __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset,
+                                   uint64_t curVOffset, uint64_t betaOffset)
     {
         if (alignK_ == TWO_V_LENGTH) {
             DecayMatVecReduce128(stateInUb, gateInUb[curQKOffset],
@@ -895,7 +902,7 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
         if (alignK_ == TWO_V_LENGTH) {
             ProcessDeltaKQReduce128(deltaInUb, vInUb[curVOffset],
-                                    kInUb[curQKOffset], stateInUb,
+                                    betaInUb, betaOffset, kInUb[curQKOffset], stateInUb,
                                     qInUb[curQKOffset], attnInUb, curSingleV);
         } else {
             Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
@@ -982,7 +989,18 @@ private:
         }
         betaInQueue_.FreeTensor(betaLocal);
         PipeBarrier<PIPE_V>();
-        SyncVToS();
+        if (alignK_ == TWO_V_LENGTH) {
+            if (useBetaSigmoid_) {
+                Sigmoid<float, true>(betaInUb, betaInUb, static_cast<uint32_t>(betaCount));
+                PipeBarrier<PIPE_V>();
+                if (allowNegEigval_) {
+                    Muls(betaInUb, betaInUb, 2.0f, static_cast<uint32_t>(betaCount));
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+        } else {
+            SyncVToS();
+        }
     }
 
     __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1, uint64_t head)
@@ -1063,8 +1081,10 @@ private:
                 uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
                 uint64_t curStateOutSlot = curStateSlot;
-                beta_ = LoadBeta(betaOffset);
-                Compute(curSingleV, curQKOffset, curVOffset);
+                if (alignK_ != TWO_V_LENGTH) {
+                    beta_ = LoadBeta(betaOffset);
+                }
+                Compute(curSingleV, curQKOffset, curVOffset, betaOffset);
                 if (attnOutBufferNum_ == BUFFER_NUM) {
                     CopyOutAttn(attnOffset, curSingleV);
                 } else {
