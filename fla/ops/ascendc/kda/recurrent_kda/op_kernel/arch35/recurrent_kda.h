@@ -16,7 +16,6 @@
 #define __RECURRENT_KDA_KERNEL_H_
 
 #include "kernel_operator.h"
-#include "lib/activation/sigmoid.h"
 #include "lib/matmul_intf.h"
 #include "../recurrent_kda_tiling_data.h"
 
@@ -747,6 +746,7 @@ private:
         }
     }
 
+    template <bool useSigmoid, bool allowNeg>
     __aicore__ inline void ProcessDeltaKQReduce128(const LocalTensor<float> &dotTensor,
                                                    const LocalTensor<float> &vTensor,
                                                    const LocalTensor<float> &betaTensor,
@@ -781,8 +781,19 @@ private:
             RegTensor<float> dot0;
             RegTensor<float> dot1;
             RegTensor<float> sum;
+            RegTensor<float> one;
             MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
             DataCopy<float, LoadDist::DIST_BRC_B32>(beta, betaAddr);
+            if constexpr (useSigmoid) {
+                Muls(beta, beta, -1.0f, pregFull);
+                Exp(beta, beta, pregFull);
+                Adds(beta, beta, 1.0f, pregFull);
+                Duplicate(one, 1.0f);
+                Div(beta, one, beta, pregFull);
+                if constexpr (allowNeg) {
+                    Muls(beta, beta, 2.0f, pregFull);
+                }
+            }
             DataCopy(k0, kAddr);
             DataCopy(k1, kAddr + V_LENGTH);
             DataCopy(q0, qAddr);
@@ -808,6 +819,32 @@ private:
                 DataCopy(stateAddr + i * alignK_ + V_LENGTH, state1, pregFull);
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + i, sum, pregFull);
             }
+        }
+    }
+
+    __aicore__ inline void ProcessDeltaKQReduce128Dispatch(const LocalTensor<float> &dotTensor,
+                                                           const LocalTensor<float> &vTensor,
+                                                           const LocalTensor<float> &betaTensor,
+                                                           uint64_t betaOffset,
+                                                           const LocalTensor<float> &kTensor,
+                                                           LocalTensor<float> &stateTensor,
+                                                           const LocalTensor<float> &qTensor,
+                                                           LocalTensor<float> &attnTensor, uint32_t rows)
+    {
+        if (useBetaSigmoid_) {
+            if (allowNegEigval_) {
+                ProcessDeltaKQReduce128<true, true>(
+                    dotTensor, vTensor, betaTensor, betaOffset, kTensor,
+                    stateTensor, qTensor, attnTensor, rows);
+            } else {
+                ProcessDeltaKQReduce128<true, false>(
+                    dotTensor, vTensor, betaTensor, betaOffset, kTensor,
+                    stateTensor, qTensor, attnTensor, rows);
+            }
+        } else {
+            ProcessDeltaKQReduce128<false, false>(
+                dotTensor, vTensor, betaTensor, betaOffset, kTensor,
+                stateTensor, qTensor, attnTensor, rows);
         }
     }
 
@@ -901,7 +938,7 @@ private:
         }
         AscendC::PipeBarrier<PIPE_V>();
         if (alignK_ == TWO_V_LENGTH) {
-            ProcessDeltaKQReduce128(deltaInUb, vInUb[curVOffset],
+            ProcessDeltaKQReduce128Dispatch(deltaInUb, vInUb[curVOffset],
                                     betaInUb, betaOffset, kInUb[curQKOffset], stateInUb,
                                     qInUb[curQKOffset], attnInUb, curSingleV);
         } else {
@@ -989,16 +1026,7 @@ private:
         }
         betaInQueue_.FreeTensor(betaLocal);
         PipeBarrier<PIPE_V>();
-        if (alignK_ == TWO_V_LENGTH) {
-            if (useBetaSigmoid_) {
-                Sigmoid<float, true>(betaInUb, betaInUb, static_cast<uint32_t>(betaCount));
-                PipeBarrier<PIPE_V>();
-                if (allowNegEigval_) {
-                    Muls(betaInUb, betaInUb, 2.0f, static_cast<uint32_t>(betaCount));
-                    PipeBarrier<PIPE_V>();
-                }
-            }
-        } else {
+        if (alignK_ != TWO_V_LENGTH) {
             SyncVToS();
         }
     }
