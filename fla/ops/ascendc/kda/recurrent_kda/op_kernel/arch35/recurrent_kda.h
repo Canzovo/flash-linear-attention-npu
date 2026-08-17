@@ -687,21 +687,18 @@ private:
             RegTensor<float> product1;
             RegTensor<float> sum;
             MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
-            DataCopy(gate0, gateAddr);
-            DataCopy(gate1, gateAddr + V_LENGTH);
-            DataCopy(vec0, vecAddr);
-            DataCopy(vec1, vecAddr + V_LENGTH);
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(gate0, gate1, gateAddr);
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(vec0, vec1, vecAddr);
             for (uint16_t i = 0; i < rowNum; ++i) {
-                DataCopy(state0, stateAddr + i * alignK_);
-                DataCopy(state1, stateAddr + i * alignK_ + V_LENGTH);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(state0, state1, stateAddr + i * alignK_);
                 Mul(state0, state0, gate0, pregFull);
                 Mul(state1, state1, gate1, pregFull);
                 Mul(product0, state0, vec0, pregFull);
                 Mul(product1, state1, vec1, pregFull);
                 Add(product0, product0, product1, pregFull);
                 ReduceSum(sum, product0, pregFull);
-                DataCopy(stateAddr + i * alignK_, state0, pregFull);
-                DataCopy(stateAddr + i * alignK_ + V_LENGTH, state1, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + i * alignK_, state0, state1, pregFull);
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
             }
         }
@@ -793,29 +790,26 @@ private:
                     Muls(beta, beta, 2.0f, pregFull);
                 }
             }
-            DataCopy(k0, kAddr);
-            DataCopy(k1, kAddr + V_LENGTH);
-            DataCopy(q0, qAddr);
-            DataCopy(q1, qAddr + V_LENGTH);
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(k0, k1, kAddr);
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(q0, q1, qAddr);
             for (uint16_t i = 0; i < rowNum; ++i) {
                 DataCopy<float, LoadDist::DIST_BRC_B32>(delta, dotAddr + i);
                 DataCopy<float, LoadDist::DIST_BRC_B32>(value, vAddr + i);
                 Sub(delta, value, delta, pregFull);
                 Mul(delta, delta, beta, pregFull);
-                DataCopy(state0, stateAddr + i * alignK_);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(state0, state1, stateAddr + i * alignK_);
                 Mul(update, delta, k0, pregFull);
                 Add(state0, state0, update, pregFull);
                 Mul(dot0, state0, q0, pregFull);
 
-                DataCopy(state1, stateAddr + i * alignK_ + V_LENGTH);
                 Mul(update, delta, k1, pregFull);
                 Add(state1, state1, update, pregFull);
                 Mul(dot1, state1, q1, pregFull);
 
                 Add(dot0, dot0, dot1, pregFull);
                 ReduceSum(sum, dot0, pregFull);
-                DataCopy(stateAddr + i * alignK_, state0, pregFull);
-                DataCopy(stateAddr + i * alignK_ + V_LENGTH, state1, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + i * alignK_, state0, state1, pregFull);
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + i, sum, pregFull);
             }
         }
