@@ -1,5 +1,0 @@
-nodes:
-  - backend: npu
-    devices: [0]
-    task: [performance_device]
-

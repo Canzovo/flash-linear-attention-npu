@@ -1,5 +1,0 @@
-nodes:
-  - name: gpu_performance
-    backend: gpu
-    devices: [0]
-    task: [performance_device]
