@@ -207,7 +207,7 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     const auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     const uint32_t blockDim = std::max<uint32_t>(platform.GetCoreNumAic(), 1);
     const bool isAscend950 =
-        platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
+        platform.GetCurNpuArch() == NpuArch::DAV_3510;
     const bool useChunk64K128V128Template =
         chunkSize == 64 && shape.kDim == 128 && shape.vDim == 128;
     const auto arch35Options = arch35::ConfigureChunkKdaFwdArch35(
