@@ -33,6 +33,9 @@ constexpr size_t ATTR_CHUNK_SIZE_IDX = 2;
 constexpr size_t ATTR_SAFE_GATE_IDX = 3;
 constexpr size_t ATTR_LOWER_BOUND_IDX = 4;
 constexpr size_t ATTR_USE_GATE_IDX = 5;
+constexpr size_t ATTR_STAGE_IDX = 7;
+constexpr int64_t KDA_STAGE_FULL = -1;
+constexpr int64_t KDA_STAGE_FINALIZE = 3;
 
 constexpr uint64_t KDA_ALIGN = 512;
 constexpr uint64_t KDA_SOLVE_SCRATCH_SLOTS = 5;
@@ -171,7 +174,9 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     const bool safeGate = *attrs->GetAttrPointer<bool>(ATTR_SAFE_GATE_IDX);
     const float lowerBound = *attrs->GetAttrPointer<float>(ATTR_LOWER_BOUND_IDX);
     const bool useGateInKernel = *attrs->GetAttrPointer<bool>(ATTR_USE_GATE_IDX);
-    if (chunkSize <= 0) {
+    const int64_t stage = *attrs->GetAttrPointer<int64_t>(ATTR_STAGE_IDX);
+    if (chunkSize <= 0 || stage < KDA_STAGE_FULL ||
+        stage > KDA_STAGE_FINALIZE) {
         return ge::GRAPH_FAILED;
     }
 
@@ -328,6 +333,7 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     tiling.set_storeKg(storeKg);
     tiling.set_storeVNew(storeVNew);
     tiling.set_storeH(storeH);
+    tiling.set_stage(stage);
     tiling.set_gateDataType(gDesc->GetDataType() == ge::DT_FLOAT ? 2 :
         (gDesc->GetDataType() == ge::DT_BF16 ? 1 : 0));
     tiling.set_gateUsedCoreNum(static_cast<int64_t>(blockDim) * 2);
