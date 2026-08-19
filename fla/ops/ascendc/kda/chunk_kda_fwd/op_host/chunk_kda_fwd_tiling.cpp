@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include "platform/soc_spec.h"
 #include <register/op_impl_registry.h>
 #include "arch35/chunk_kda_fwd_tiling_impl.h"
 #include "tiling/platform/platform_ascendc.h"
