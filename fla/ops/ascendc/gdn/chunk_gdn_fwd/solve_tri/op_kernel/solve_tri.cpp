@@ -17,7 +17,6 @@
 #else
 #include "lib/matmul_intf.h"
 #include "solve_tri_cube.h"
-#include "solve_tri_fp32.h"
 #include "solve_tri_vector.h"
 #endif
 
