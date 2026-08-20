@@ -1,19 +1,17 @@
 # Copyright (c) Tianjin University, Ltd. 2025. All rights reserved.
-import sys
-from pathlib import Path
-
 import torch
+import sys
+import os
 from typing import Optional, Tuple, List
 
 from atk.configs.dataset_config import InputDataset
 from atk.configs.results_config import TaskResult
 from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi
+from fla_npu.ops import ascendc as ascendc_ops
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-
-from chunk_bwd_dqkwg_cpu import chunk_bwd_dqkwg_cpu
+# sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from scripts.chunk_bwd_dqkwg_cpu import chunk_bwd_dqkwg_cpu
 
 def create_gate_g(B: int, H: int, T: int, gtype):
     lo, hi = -5e-2, -5e-5
@@ -28,30 +26,53 @@ def create_gate_g(B: int, H: int, T: int, gtype):
     return g_t.unsqueeze(0).unsqueeze(0).expand(B, H, T).contiguous().to(gtype)
 
 
+def generate_tensor(shape, data_type, data_max):
+    tensor = torch.rand(shape) * (data_max * 2) - data_max
+    return tensor.to(data_type)
+
+
+def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    return cu_seqlens[1:] - cu_seqlens[:-1]
+
+
+def cdiv(a: torch.LongTensor, b: int):
+    return (a + b - 1) // b
+
+
 def prepare_chunk_indices(
     cu_seqlens: list[int],
     chunk_size: int
 ) -> list[int]:
     """
-    基于 cu_seqlens 生成扁平 chunk 索引。
+    基于 cu_seqlens (list[int]) 生成 chunk 索引。
 
-    返回格式为 [seq_id, chunk_id, seq_id, chunk_id, ...]，可直接传给
-    aclnn wrapper 的 int_array 参数。
+    注意：原 PyTorch 版本返回的是 shape [N, 2] 的 Tensor。
+    为了保持纯 Python 兼容性，这里返回 list[tuple[start_seq_idx, chunk_idx_in_seq]]。
+    如果算子需要扁平化的 list[int] (如 [s0, c0, s1, c1, ...])，请在调用前展开。
+
+    逻辑复刻原代码：
+    1. 计算每个序列的长度: lens[i] = cu_seqlens[i+1] - cu_seqlens[i]
+    2. 计算每个序列需要的 chunk 数: ceil(lens[i] / chunk_size)
+    3. 生成对应的 (sequence_id, chunk_id) 对
     """
     indices = []
 
-    # 遍历每个序列段，生成对应的 (sequence_id, chunk_id)。
+    # 遍历每个序列段
     for i in range(len(cu_seqlens) - 1):
         start = cu_seqlens[i]
-        end = cu_seqlens[i + 1]
+        end = cu_seqlens[i+1]
         length = end - start
 
         if length <= 0:
             continue
 
+        # 计算该序列需要多少个 chunk
+        # 等价于 cdiv(length, chunk_size)
         num_chunks = (length + chunk_size - 1) // chunk_size
 
         for chunk_id in range(num_chunks):
+            # 原逻辑: indices.eq(0).cumsum(0) - 1 对应的是序列索引 i
+            # 原逻辑: indices 对应的是 chunk_id
             indices.append((i))
             indices.append((chunk_id))
 
@@ -79,24 +100,6 @@ def _as_int_list_chunk_indices(chunk_indices) -> Optional[List[int]]:
     if isinstance(chunk_indices, torch.Tensor):
         return [int(x) for x in chunk_indices.detach().cpu().reshape(-1).tolist()]
     return [int(x) for x in chunk_indices]
-
-
-def _finite_tuple(outputs) -> Tuple[torch.Tensor, ...]:
-    if isinstance(outputs, torch.Tensor):
-        outputs = (outputs,)
-
-    visible = []
-    for output in outputs:
-        if output is None:
-            continue
-        check_tensor = output.to(torch.float32) if output.is_floating_point() else output
-        if not torch.isfinite(check_tensor.to(torch.float32)).all().item():
-            raise RuntimeError("算子输出包含 NaN 或 Inf")
-        visible.append(output.contiguous())
-
-    if not visible:
-        raise RuntimeError("算子没有返回可见张量输出")
-    return tuple(visible)
 
 
 def chunk_bwd_dqkwg_torch(
@@ -140,42 +143,11 @@ def chunk_bwd_dqkwg_torch(
     return dq, dk, dw, dg
 
 
-def chunk_bwd_dqkwg_npu(input_data: InputDataset):
-    try:
-        from fla_npu.ops import ascendc as ascendc_ops
-
-        op = ascendc_ops.npu_chunk_bwd_dqkwg
-    except (ImportError, AttributeError):
-        op = torch.ops.npu.npu_chunk_bwd_dqkwg
-
-    return op(
-        input_data.kwargs["q"],
-        input_data.kwargs["k"],
-        input_data.kwargs["v"],
-        input_data.kwargs["g"],
-        input_data.kwargs["h"],
-        input_data.kwargs["do"],
-        input_data.kwargs["dh"],
-        input_data.kwargs["dv"],
-        input_data.kwargs["chunk_size"],
-        cu_seqlens=_as_int_list_cu_seqlens(input_data.kwargs.get("cu_seqlens", None)),
-        chunk_indices=_as_int_list_chunk_indices(input_data.kwargs.get("chunk_indices", None)),
-        w=input_data.kwargs.get("w", None),
-        g_gamma=input_data.kwargs.get("g_gamma", None),
-        scale=input_data.kwargs.get("scale", None),
-        use_exp2=input_data.kwargs.get("use_exp2", False),
-        transpose_state_layout=input_data.kwargs.get("transpose_state_layout", False),
-    )
-
-
 @register("executor_chunk_bwd_dqkwg")
 class FunctionApi(BaseApi):
     def __init__(self, task_result: TaskResult):
         super(FunctionApi, self).__init__(task_result)
         self.qkv_type = None
-        self.is_mix = True
-        self.is_benchmark_task = bool(task_result.is_benchmark_task)
-        self.high_precision = self.device == "cpu" and self.is_benchmark_task
 
     def cpu(self, input_data: InputDataset, with_output: bool = False):
         q = input_data.kwargs["q"]
@@ -204,7 +176,8 @@ class FunctionApi(BaseApi):
             dk = dk.to(torch.float16)
             dw_out = dw_out.to(torch.float16) if dw_out is not None else None
 
-        if not self.is_mix:
+        is_mix = input_data.kwargs.get("is_mix", True)
+        if not is_mix:
             if self.qkv_type == "bf16":
                 dg = dg.to(torch.bfloat16)
             if self.qkv_type == "fp16":
@@ -235,21 +208,7 @@ class FunctionApi(BaseApi):
 
         return dq, dk, dw_out, dg
 
-    def __call__(self, input_data: InputDataset, with_output: bool = False):
-        if self.device in {"npu", "pyaclnn"}:
-            outputs = chunk_bwd_dqkwg_npu(input_data)
-        elif self.device == "cpu" and self.high_precision:
-            outputs = self.cpu_benchmark(input_data, with_output)
-        elif self.device == "cpu":
-            outputs = self.cpu(input_data, with_output)
-        else:
-            raise RuntimeError(f"chunk_bwd_dqkwg 仅支持 NPU DUT 与 CPU 标杆节点，当前设备：{self.device!r}")
-        return _finite_tuple(outputs)
-
-    def init_by_input_data(self, input_data: InputDataset):
-        B, HK, T_json, K = input_data.kwargs["q"].shape
-        HV = input_data.kwargs["v"].shape[1]
-        V = input_data.kwargs["v"].shape[3]
+    def npu_chunk_bwd_dqkwg(self, input_data: InputDataset, with_output: bool = False):
         q = input_data.kwargs["q"]
         k = input_data.kwargs["k"]
         v = input_data.kwargs["v"]
@@ -257,6 +216,40 @@ class FunctionApi(BaseApi):
         h = input_data.kwargs["h"]
         dh = input_data.kwargs["dh"]
         w = input_data.kwargs.get("w", None)
+        g = input_data.kwargs["g"]
+        dv = input_data.kwargs["dv"]
+        cu_seqlens = input_data.kwargs.get("cu_seqlens", None)
+        chunk_indices = input_data.kwargs.get("chunk_indices", None)
+        chunk_size = input_data.kwargs["chunk_size"]
+        scale = input_data.kwargs["scale"]
+
+        dq, dk, dw, dg = ascendc_ops.npu_chunk_bwd_dqkwg(
+            q, k, v, g, h, do, dh, dv, chunk_size, cu_seqlens=cu_seqlens, w=None, g_gamma=None, chunk_indices=chunk_indices, scale=scale, use_exp2=None, transpose_state_layout=None
+        )
+
+        return dq, dk, dw, dg
+
+    def __call__(self, input_data: InputDataset, with_output: bool = False):
+        q = input_data.kwargs["q"]
+        if self.device == "npu":
+            return self.npu_chunk_bwd_dqkwg(input_data, with_output)
+        elif q.dtype == torch.float64:
+            return self.cpu_benchmark(input_data, with_output)
+        else:
+            return self.cpu(input_data, with_output)
+
+    def init_by_input_data(self, input_data: InputDataset):
+        B, HK, T_json, K = input_data.kwargs["q"].shape
+        HV = input_data.kwargs["v"].shape[1]
+        V = input_data.kwargs["v"].shape[3]
+        n_ratio = HV // HK
+        q = input_data.kwargs["q"]
+        k = input_data.kwargs["k"]
+        v = input_data.kwargs["v"]
+        do = input_data.kwargs["do"]
+        h = input_data.kwargs["h"]
+        dh = input_data.kwargs["dh"]
+        w = input_data.kwargs["w"]
         g = input_data.kwargs["g"]
         dv = input_data.kwargs["dv"]
         cu_seqlens = input_data.kwargs["cu_seqlens"]
@@ -270,7 +263,6 @@ class FunctionApi(BaseApi):
         qkv_type = input_data.kwargs["q"].dtype
         g_type = input_data.kwargs["g"].dtype
         is_mix = input_data.kwargs["is_mix"]
-        self.is_mix = is_mix
         if not is_mix:
             g_type = qkv_type
 
@@ -297,17 +289,16 @@ class FunctionApi(BaseApi):
             num_chunks = (T_json + chunk_size - 1) // chunk_size
             T = T_json
             dtype = qkv_type
-            g_type_runtime = g_type
+            Gtype = g_type
             # g = create_gate_g(B, HV, T_json, g_type)
-            q = torch.randn(B, HK, T, K, dtype=dtype, requires_grad=True)
-            k = torch.randn(B, HK, T, K, dtype=dtype, requires_grad=True)
-            v = torch.randn(B, HV, T, V, dtype=dtype, requires_grad=True)
+            q = torch.randn(B,HK,T,K, dtype=dtype, requires_grad=True)
+            k = torch.randn(B,HK,T,K, dtype=dtype, requires_grad=True)
+            v = torch.randn(B,HV,T,V, dtype=dtype, requires_grad=True)
 
-            # 固定长度用例要求 g 递减且为负数。
-            g = -torch.sort(torch.rand(B * T * HV) * 10, descending=False)[0].reshape((B, HV, T)).to(g_type_runtime)
-            do = torch.randn(B, HV, T, V, dtype=dtype, requires_grad=True)
+            g = -torch.sort(torch.rand(B*T*HV) * 10, descending=False)[0].reshape((B,HV,T)).to(Gtype)    #G必须递减且为负数
+            do = torch.randn(B,HV,T,V, dtype=dtype, requires_grad=True)
 
-            dv = torch.randn(B, HV, T, V, dtype=dtype, requires_grad=True)
+            dv = torch.randn(B,HV,T,V, dtype=dtype, requires_grad=True)
             w = None
 
             h = torch.randn(B, HV, num_chunks, K, V, dtype=dtype, requires_grad=True)
@@ -323,7 +314,7 @@ class FunctionApi(BaseApi):
         dh = dh.to(qkv_type)
         g = g.to(g_type)
 
-        if self.device in {"npu", "pyaclnn"}:
+        if self.device == "npu":
             q = q.npu()
             k = k.npu()
             v = v.npu()
@@ -333,10 +324,10 @@ class FunctionApi(BaseApi):
             g = g.npu()
             h = h.npu()
             dh = dh.npu()
-            # if cu_seqlens is not None:
-            #     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int64, device=q.device)
-            # if chunk_indices is not None:
-            #     chunk_indices = torch.tensor(chunk_indices, dtype=torch.int64, device=q.device)
+            if cu_seqlens is not None:
+                cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int64, device=q.device)
+            if chunk_indices is not None:
+                chunk_indices = torch.tensor(chunk_indices, dtype=torch.int64, device=q.device)
 
         input_data.kwargs["q"] = q
         input_data.kwargs["k"] = k
