@@ -92,7 +92,9 @@ def run_cpu(spec: dict[str, Any], high_precision: bool = False):
         g=inputs["g"],
         scale=inputs["scale"],
         chunk_size=inputs["chunk_size"],
-        golden_mode="fp64" if high_precision else "fp32",
+        # 同精度标杆用 npu 模式：matmul 不升精度（操作数量化到元素精度，累加保持 fp32），
+        # 与 NPU 计算精度一致；高精度标杆全程 fp64（ATK 自动生成）。
+        golden_mode="fp64" if high_precision else "npu",
     )
 
 
