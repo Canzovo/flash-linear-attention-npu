@@ -46,15 +46,17 @@ ACLNN_CTYPES = load_aclnn_ctypes_module()
 
 
 class FakeTensor:
-    def __init__(self, shape):
+    def __init__(self, shape, dtype=None):
         self.shape = tuple(shape)
+        self.dtype = dtype
 
 
 class FakeCallContext:
     def __init__(self):
         self.descriptor_names = []
 
-    def tensor(self, tensor, name):
+    def tensor(self, tensor, name, **kwargs):
+        del kwargs
         del tensor
         self.descriptor_names.append(name)
         return ctypes.c_void_p(0x1000 + len(self.descriptor_names))
@@ -66,6 +68,62 @@ class FakeCallContext:
 
 
 class AclnnCtypesAbiTest(unittest.TestCase):
+    def test_chunk_gated_delta_rule_bwd_dhu_signature_and_default_use_exp2(self):
+        import inspect
+
+        import torch
+
+        expected_argtypes = [
+            *([ctypes.c_void_p] * 11),
+            ctypes.c_double,
+            ctypes.c_int64,
+            ctypes.c_bool,
+            *([ctypes.c_void_p] * 3),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.assertEqual(
+            ACLNN_CTYPES._GET_WORKSPACE_ARGTYPES["aclnnChunkGatedDeltaRuleBwdDhu"],
+            expected_argtypes,
+        )
+        self.assertIs(
+            inspect.signature(ACLNN_CTYPES.npu_chunk_gated_delta_rule_bwd_dhu)
+            .parameters["use_exp2"]
+            .default,
+            False,
+        )
+
+        captured = {}
+
+        def fake_empty(shape, like, **kwargs):
+            return FakeTensor(shape, kwargs.get("dtype", like.dtype))
+
+        def fake_empty_like(tensor, **kwargs):
+            return FakeTensor(tensor.shape, kwargs.get("dtype", tensor.dtype))
+
+        def fake_call_aclnn(name, build_args, outputs):
+            context = FakeCallContext()
+            captured["name"] = name
+            captured["args"] = build_args(context)
+            return outputs
+
+        dtype = torch.float16
+        q = FakeTensor((1, 2, 64, 128), dtype)
+        state = FakeTensor((1, 2, 64, 128), dtype)
+        g = FakeTensor((1, 2, 64), torch.float32)
+        with mock.patch.object(ACLNN_CTYPES, "_empty", side_effect=fake_empty):
+            with mock.patch.object(ACLNN_CTYPES, "_empty_like", side_effect=fake_empty_like):
+                with mock.patch.object(ACLNN_CTYPES, "_call_aclnn", side_effect=fake_call_aclnn):
+                    ACLNN_CTYPES.npu_chunk_gated_delta_rule_bwd_dhu(
+                        q, q, q, state, state, scale=0.125, chunk_size=64, g=g
+                    )
+
+        operator_argtypes = expected_argtypes[:-2]
+        self.assertEqual(captured["name"], "aclnnChunkGatedDeltaRuleBwdDhu")
+        self.assertEqual(len(captured["args"]), len(operator_argtypes))
+        self.assertEqual([type(arg) for arg in captured["args"]], operator_argtypes)
+        self.assertFalse(captured["args"][13].value)
+
     def test_recurrent_gated_delta_rule_requires_at_least_one_gate_before_launch(self):
         with mock.patch.object(ACLNN_CTYPES, "_call_aclnn") as call_aclnn:
             with self.assertRaisesRegex(

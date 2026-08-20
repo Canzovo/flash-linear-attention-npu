@@ -74,6 +74,27 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
         ctypes.POINTER(ctypes.c_void_p),  # executor
     ],
+    "aclnnChunkGatedDeltaRuleBwdDhu": [
+        ctypes.c_void_p,  # q
+        ctypes.c_void_p,  # k
+        ctypes.c_void_p,  # w
+        ctypes.c_void_p,  # dO
+        ctypes.c_void_p,  # dv
+        ctypes.c_void_p,  # gOptional
+        ctypes.c_void_p,  # gkOptional
+        ctypes.c_void_p,  # h0Optional
+        ctypes.c_void_p,  # dhtOptional
+        ctypes.c_void_p,  # cuSeqlensOptional
+        ctypes.c_void_p,  # chunkIndicesOptional
+        ctypes.c_double,  # scale
+        ctypes.c_int64,  # chunkSize
+        ctypes.c_bool,  # useExp2
+        ctypes.c_void_p,  # dhOut
+        ctypes.c_void_p,  # dh0Out
+        ctypes.c_void_p,  # dv2Out
+        ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
+        ctypes.POINTER(ctypes.c_void_p),  # executor
+    ],
     "aclnnSolveTri": [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -326,6 +347,8 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
     Hv, V = dv_shape[1], dv_shape[3]
     if (g is None) == (gK is None):
         raise ValueError("Exactly one of g and gK must be provided.")
+    if gK is not None and not _optional_bool(use_exp2, True):
+        raise ValueError("use_exp2 must be true when gK is provided.")
     if any(tensor.dtype != q.dtype for tensor in (k, w, d_o, dv)):
         raise ValueError("q, k, w, d_o and dv must have the same dtype.")
     gate = g if g is not None else gK
@@ -362,6 +385,7 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
             ctx.int_array(chunk_indices),
             ctypes.c_double(float(scale)),
             ctypes.c_int64(int(chunk_size)),
+            ctypes.c_bool(_optional_bool(use_exp2, gK is not None)),
             logical_tensor(ctx, dh, "dh"),
             logical_tensor(ctx, dh0, "dh0"),
             logical_tensor(ctx, dv2, "dv2"),
