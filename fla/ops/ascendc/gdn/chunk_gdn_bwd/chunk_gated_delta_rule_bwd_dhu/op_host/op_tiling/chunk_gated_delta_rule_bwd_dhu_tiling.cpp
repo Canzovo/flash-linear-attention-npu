@@ -37,6 +37,7 @@ void ChunkGatedDeltaRuleBwdDhuTilingDataPrint(
     OP_LOGD(nodeName, "=== totalChunkNum: %ld", tiling.totalChunkNum);
     OP_LOGD(nodeName, "=== chunkTaskNum: %ld", tiling.chunkTaskNum);
     OP_LOGD(nodeName, "=== seqNum: %ld", tiling.seqNum);
+    OP_LOGD(nodeName, "=== headsPerTask: %ld", tiling.headsPerTask);
     OP_LOGD(nodeName, "=== headWindowNum: %ld", tiling.headWindowNum);
     OP_LOGD(nodeName, "=== taskNum: %ld", tiling.taskNum);
     OP_LOGD(nodeName, "=== isVariable: %ld", tiling.isVariable);

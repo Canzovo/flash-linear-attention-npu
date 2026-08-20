@@ -46,6 +46,7 @@ static constexpr int64_t CHUNK_SIZE_128 = 128;
 static constexpr int64_t CHUNK_INDICES_PAIR = 2;
 static constexpr int64_t VAR_LEN_B = 1;
 static constexpr int64_t HEADS_PER_TASK = 4;
+static constexpr int64_t MAX_TASKS_PER_CORE = 4;
 static constexpr int64_t WORKSPACE_BUFFER_COUNT = 8;
 static constexpr uint64_t VECTOR_SUB_BLOCK_NUM = 2;
 static constexpr uint64_t DTYPE_SIZE_HALF = 2;
@@ -404,7 +405,6 @@ private:
             return ge::GRAPH_FAILED;
         }
         tiling_.chunkSize = chunkSize;
-        tiling_.headWindowNum = CeilDiv(tiling_.HV, HEADS_PER_TASK);
         return ge::GRAPH_SUCCESS;
     }
 
@@ -445,8 +445,16 @@ private:
 
     ge::graphStatus WorkspaceTiling()
     {
+        const uint32_t maxBlockDim = ctx_.aicCoreNum == 0 ? 1U : ctx_.aicCoreNum;
+        const int64_t totalHeadTaskNum = tiling_.seqNum * tiling_.HV;
+        tiling_.headsPerTask = std::min(
+            HEADS_PER_TASK, CeilDiv(totalHeadTaskNum, static_cast<int64_t>(maxBlockDim)));
+        tiling_.headWindowNum = CeilDiv(tiling_.HV, tiling_.headsPerTask);
         tiling_.taskNum = tiling_.seqNum * tiling_.headWindowNum;
-        blockDim_ = ctx_.aicCoreNum == 0 ? 1U : ctx_.aicCoreNum;
+        const int64_t targetTaskPerCore = std::min(
+            MAX_TASKS_PER_CORE, CeilDiv(tiling_.taskNum, static_cast<int64_t>(maxBlockDim)));
+        blockDim_ = std::min(
+            maxBlockDim, static_cast<uint32_t>(CeilDiv(tiling_.taskNum, targetTaskPerCore)));
 
         const uint64_t qSize = DtypeSize(ctx_.qDataType);
         tiling_.dh0ClearCoreNum = 0;

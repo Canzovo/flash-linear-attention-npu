@@ -217,6 +217,7 @@ public:
         HRatio_ = tiling_->HRatio;
         chunkSize_ = tiling_->chunkSize;
         totalChunkNum_ = tiling_->totalChunkNum;
+        headsPerTask_ = tiling_->headsPerTask;
         headWindowNum_ = tiling_->headWindowNum;
         taskNum_ = tiling_->taskNum;
         isVariable_ = tiling_->isVariable;
@@ -324,8 +325,8 @@ public:
         for (int64_t taskIdx = coreIdx; taskIdx < taskNum_; taskIdx += blockNum) {
             const int64_t seqIdx = taskIdx / headWindowNum_;
             const int64_t headWindowIdx = taskIdx - seqIdx * headWindowNum_;
-            const int64_t hvBase = headWindowIdx * HEADS_PER_TASK;
-            const int64_t headCnt = Min(HEADS_PER_TASK, HV_ - hvBase);
+            const int64_t hvBase = headWindowIdx * headsPerTask_;
+            const int64_t headCnt = Min(headsPerTask_, HV_ - hvBase);
             const int64_t taskRound = (taskIdx - coreIdx) / blockNum;
             const int64_t windowStartSlot = (taskRound & 1) * HEADS_PER_TASK;
             if (headCnt <= 0) {
@@ -889,6 +890,7 @@ private:
     int64_t vecRow_ = 8;
     int64_t gateElems_ = 0;
     int64_t totalChunkNum_ = 0;
+    int64_t headsPerTask_ = 0;
     int64_t headWindowNum_ = 0;
     int64_t taskNum_ = 0;
     int64_t subBlockNum_ = 1;
