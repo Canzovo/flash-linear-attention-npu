@@ -391,9 +391,16 @@ public:
                         CastGateInputRows(gateRaw, gateInputBuf_[gateIdx],
                                           static_cast<uint32_t>(chunkInfo.chunkLen), gateIdx);
                         AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Muls(gateFactor, gateRaw, tiling_->useExp2 != 0 ? LN2 : 1.0f,
-                                      static_cast<uint32_t>(chunkInfo.chunkLen));
-                        AscendC::Exp(gateFactor, gateFactor, static_cast<uint32_t>(chunkInfo.chunkLen));
+                        if (tiling_->useExp2 != 0) {
+                            AscendC::Muls(gateFactor, gateRaw, LN2,
+                                          static_cast<uint32_t>(chunkInfo.chunkLen));
+                            AscendC::PipeBarrier<PIPE_V>();
+                            AscendC::Exp(gateFactor, gateFactor,
+                                         static_cast<uint32_t>(chunkInfo.chunkLen));
+                        } else {
+                            AscendC::Exp(gateFactor, gateRaw,
+                                         static_cast<uint32_t>(chunkInfo.chunkLen));
+                        }
                         AscendC::PipeBarrier<PIPE_V>();
                     } else {
                         const int64_t lastToken = chunkInfo.tokenStart + chunkInfo.chunkLen - 1;

@@ -160,7 +160,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdDhuGetWorkspaceSize(
         cuSeqlensOptional, chunkIndicesOptional, scale, chunkSize, useExp2, dhOut, dh0Out, dv2Out};
     L2_DFX_PHASE_1(aclnnChunkGatedDeltaRuleBwdDhu,
                    DFX_IN(q, k, w, dO, dv, gOptional, gkOptional, h0Optional, dhtOptional,
-                          cuSeqlensOptional, chunkIndicesOptional),
+                          cuSeqlensOptional, chunkIndicesOptional, scale, chunkSize, useExp2),
                    DFX_OUT(dhOut, dh0Out, dv2Out));
 
     auto uniqueExecutor = CREATE_EXECUTOR();

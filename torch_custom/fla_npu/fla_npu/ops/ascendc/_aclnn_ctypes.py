@@ -74,6 +74,27 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
         ctypes.POINTER(ctypes.c_void_p),  # executor
     ],
+    "aclnnChunkGatedDeltaRuleBwdDhu": [
+        ctypes.c_void_p,  # q
+        ctypes.c_void_p,  # k
+        ctypes.c_void_p,  # w
+        ctypes.c_void_p,  # dO
+        ctypes.c_void_p,  # dv
+        ctypes.c_void_p,  # gOptional
+        ctypes.c_void_p,  # gkOptional
+        ctypes.c_void_p,  # h0Optional
+        ctypes.c_void_p,  # dhtOptional
+        ctypes.c_void_p,  # cuSeqlensOptional
+        ctypes.c_void_p,  # chunkIndicesOptional
+        ctypes.c_double,  # scale
+        ctypes.c_int64,  # chunkSize
+        ctypes.c_bool,  # useExp2
+        ctypes.c_void_p,  # dhOut
+        ctypes.c_void_p,  # dh0Out
+        ctypes.c_void_p,  # dv2Out
+        ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
+        ctypes.POINTER(ctypes.c_void_p),  # executor
+    ],
     "aclnnSolveTri": [
         ctypes.c_void_p,
         ctypes.c_void_p,
