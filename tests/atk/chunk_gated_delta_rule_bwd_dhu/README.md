@@ -25,8 +25,11 @@ YAML 元信息覆盖 `ascend910b`、`ascend910_93` 和 `ascend950`，可配合�
 
 ## 默认用例
 
-- BF16 用例：`{"dtype": "bf16", "B": 1, "HK": 1, "HV": 1, "T": 64, "K": 128, "V": 128, "chunk_size": 64, "op": "chunk_gated_delta_rule_bwd_dhu", "case_id": 0, "seed": 20260817, "route": "ascendc", "soc": "ascend910b"}`
-- FP16 用例：`{"dtype": "fp16", "B": 1, "HK": 1, "HV": 1, "T": 64, "K": 128, "V": 128, "chunk_size": 64, "op": "chunk_gated_delta_rule_bwd_dhu", "case_id": 1, "seed": 20260818, "route": "ascendc", "soc": "ascend910b"}`
+本目录 `atk_chunk_gated_delta_rule_bwd_dhu.json` 内置 200 条泛化用例（100 个 shape × bf16/fp16），
+标准为 `cv_fused_double_benchmark`，SOC 为 `ascend950`。覆盖 noGVA（`HK==HV`）与 GVA（`HV>HK`）。
+
+示例（BF16 首条）：
+`{"dtype": "bf16", "B": 64, "HK": 8, "HV": 8, "T": 1024, "K": 128, "V": 128, "chunk_size": 64, "op": "chunk_gated_delta_rule_bwd_dhu", "case_id": 0, "seed": 20260817, "route": "ascendc", "soc": "ascend950"}`
 
 ## 执行方式
 

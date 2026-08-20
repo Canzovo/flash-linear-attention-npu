@@ -1,6 +1,10 @@
 """chunk_gated_delta_rule_fwd_h 的 ATK executor。
 
 输入生成、CPU 标杆、run_cpu、run_npu 和 FunctionApi 都放在本算子目录中。
+
+w 语义（GVA）：w 与 u 同为 HV 个 head（`[B,HV,T,K]`），ACLNN 校验
+`w.H == u.H`。k 为 HK 个 head，HV 与 HK 满足 `HV >= HK && HV % HK == 0`。
+CPU 标杆逐 value-head 使用各自 `w[b,hv]` 与共享 `k[b, hk]，hk = hv // (HV/HK)`。
 """
 
 from __future__ import annotations
@@ -49,29 +53,49 @@ def build_inputs(spec: dict[str, Any], device: torch.device, high_precision: boo
     chunk_size = int(spec["chunk_size"])
     return {
         "k": _randn((B, HK, T, K), dtype_name, calc_dtype, device, seed + 1),
-        "w": _zeros((B, HK, T, K), dtype_name, calc_dtype, device),
-        "u": _zeros((B, HV, T, V), dtype_name, calc_dtype, device),
-        "g": _gate((B, HV, T), torch.float64 if high_precision else torch.float32, device, seed + 2),
+        "w": _randn((B, HV, T, K), dtype_name, calc_dtype, device, seed + 2),
+        "u": _randn((B, HV, T, V), dtype_name, calc_dtype, device, seed + 3),
+        "g": _gate((B, HV, T), torch.float64 if high_precision else torch.float32, device, seed + 4),
         "chunk_size": chunk_size,
     }
 
 
-def _zero_h_ref(inputs):
-    if "u" in inputs:
-        B, _, T, K = inputs["k"].shape
-        HV, V = inputs["u"].shape[1], inputs["u"].shape[3]
-        h = torch.zeros((B, HV, _num_chunks(T, int(inputs["chunk_size"])), K, V), dtype=inputs["u"].dtype, device=inputs["u"].device)
-        return h, torch.zeros_like(inputs["u"])
-    B, _, T, K = inputs["q"].shape
-    HV, V = inputs["dv"].shape[1], inputs["dv"].shape[3]
-    dh = torch.zeros((B, HV, _num_chunks(T, int(inputs["chunk_size"])), K, V), dtype=inputs["dv"].dtype, device=inputs["dv"].device)
-    return dh, torch.zeros_like(inputs["dv"])
+def _forward_h_ref(inputs):
+    """Fixed-length CPU reference（w=HV，GVA 对齐 ACLNN / 内核）。"""
+    k, w, u, g = (inputs[name] for name in ("k", "w", "u", "g"))
+    B, HK, T, K = k.shape
+    HV, V = u.shape[1], u.shape[3]
+    chunk_size = int(inputs["chunk_size"])
+    num_chunks = _num_chunks(T, chunk_size)
+    group = HV // HK
+    calc = torch.float64 if k.dtype == torch.float64 else torch.float32
+
+    h = torch.zeros((B, HV, num_chunks, K, V), dtype=calc, device=k.device)
+    v_new = torch.zeros((B, HV, T, V), dtype=calc, device=k.device)
+    for b in range(B):
+        for hv in range(HV):
+            hk = hv // group
+            for chunk_idx, (start, end) in enumerate(_chunks(T, chunk_size)):
+                k_chunk = k[b, hk, start:end].to(calc)
+                w_chunk = w[b, hv, start:end].to(calc)
+                u_chunk = u[b, hv, start:end].to(calc)
+                g_chunk = g[b, hv, start:end].to(calc)
+                state = h[b, hv, chunk_idx]
+                current_v = u_chunk - w_chunk @ state
+                v_new[b, hv, start:end] = current_v
+                if chunk_idx + 1 < num_chunks:
+                    decay = torch.exp(g_chunk[-1] - g_chunk).unsqueeze(-1)
+                    h[b, hv, chunk_idx + 1] = (
+                        state * torch.exp(g_chunk[-1])
+                        + k_chunk.transpose(-1, -2) @ (current_v * decay)
+                    )
+    return h.to(k.dtype), v_new.to(u.dtype)
 
 
 def run_cpu(spec: dict[str, Any], high_precision: bool = False):
     """运行 CPU 同精度或 fp64 高精度标杆。"""
     inputs = build_inputs(spec, torch.device("cpu"), high_precision=high_precision)
-    return _zero_h_ref(inputs)
+    return _forward_h_ref(inputs)
 
 
 def run_npu(spec: dict[str, Any], input_data: InputDataset):
