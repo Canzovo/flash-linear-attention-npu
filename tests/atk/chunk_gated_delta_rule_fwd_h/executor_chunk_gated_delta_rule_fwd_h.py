@@ -60,42 +60,76 @@ def build_inputs(spec: dict[str, Any], device: torch.device, high_precision: boo
     }
 
 
-def _forward_h_ref(inputs):
-    """Fixed-length CPU reference（w=HV，GVA 对齐 ACLNN / 内核）。"""
+def _round_elem(x: torch.Tensor, elem_dtype: torch.dtype) -> torch.Tensor:
+    """舍入到 elem_dtype（bf16/fp16）精度，仍留在 fp32 容器计算（对齐 Cube MMAD）。"""
+    if elem_dtype == torch.float32:
+        return x.to(torch.float32)
+    return x.to(elem_dtype).to(torch.float32)
+
+
+def _matmul_npu_aligned(a: torch.Tensor, b: torch.Tensor, elem_dtype: torch.dtype) -> torch.Tensor:
+    """bf16/fp16 乘 + fp32 累加，与 NPU Cube MMAD 语义一致（同精度标杆关键）。"""
+    return _round_elem(a, elem_dtype) @ _round_elem(b, elem_dtype)
+
+
+def _forward_h_ref(inputs, golden_mode: str = "fp64"):
+    """定长 CPU 标杆（w=HV, GVA 对齐 ACLNN / 内核）。
+
+    golden_mode:
+      "fp64" - 输入升 fp64、fp64 累加（升精度真值标杆，ATK 自动计算）。
+      "npu"  - k/w/u 保持 bf16/fp16 乘、fp32 累加，逐 chunk 状态回写 elem_dtype，
+               与 NPU 单算子同精度标杆一致（双标杆中的同精度参考）。
+    """
     k, w, u, g = (inputs[name] for name in ("k", "w", "u", "g"))
     B, HK, T, K = k.shape
     HV, V = u.shape[1], u.shape[3]
     chunk_size = int(inputs["chunk_size"])
     num_chunks = _num_chunks(T, chunk_size)
     group = HV // HK
-    calc = torch.float64 if k.dtype == torch.float64 else torch.float32
 
-    h = torch.zeros((B, HV, num_chunks, K, V), dtype=calc, device=k.device)
-    v_new = torch.zeros((B, HV, T, V), dtype=calc, device=k.device)
+    if golden_mode == "npu":
+        elem_dtype = k.dtype
+        k = k.to(elem_dtype)
+        w = w.to(elem_dtype)
+        u = u.to(elem_dtype)
+        g = g.float()
+        matmul = lambda a, b: _matmul_npu_aligned(a, b, elem_dtype)
+        store = lambda x: _round_elem(x, elem_dtype)
+    else:
+        compute = torch.float64
+        k = k.to(compute)
+        w = w.to(compute)
+        u = u.to(compute)
+        g = g.to(compute)
+        matmul = lambda a, b: a @ b
+        store = lambda x: x
+
+    h = torch.zeros((B, HV, num_chunks, K, V), dtype=k.dtype, device=k.device)
+    v_new = torch.zeros((B, HV, T, V), dtype=u.dtype, device=u.device)
     for b in range(B):
         for hv in range(HV):
             hk = hv // group
             for chunk_idx, (start, end) in enumerate(_chunks(T, chunk_size)):
-                k_chunk = k[b, hk, start:end].to(calc)
-                w_chunk = w[b, hv, start:end].to(calc)
-                u_chunk = u[b, hv, start:end].to(calc)
-                g_chunk = g[b, hv, start:end].to(calc)
+                k_chunk = k[b, hk, start:end]
+                w_chunk = w[b, hv, start:end]
+                u_chunk = u[b, hv, start:end]
+                g_chunk = g[b, hv, start:end]
                 state = h[b, hv, chunk_idx]
-                current_v = u_chunk - w_chunk @ state
-                v_new[b, hv, start:end] = current_v
+                current_v = u_chunk - matmul(w_chunk, state)
+                v_new[b, hv, start:end] = current_v.to(u.dtype)
                 if chunk_idx + 1 < num_chunks:
                     decay = torch.exp(g_chunk[-1] - g_chunk).unsqueeze(-1)
-                    h[b, hv, chunk_idx + 1] = (
-                        state * torch.exp(g_chunk[-1])
-                        + k_chunk.transpose(-1, -2) @ (current_v * decay)
-                    )
-    return h.to(k.dtype), v_new.to(u.dtype)
+                    g_last = torch.exp(g_chunk[-1])
+                    s_decayed = store(state) * g_last
+                    s_update = matmul(k_chunk.transpose(-1, -2), current_v * decay)
+                    h[b, hv, chunk_idx + 1] = store(s_decayed + s_update)
+    return h, v_new
 
 
 def run_cpu(spec: dict[str, Any], high_precision: bool = False):
-    """运行 CPU 同精度或 fp64 高精度标杆。"""
+    """运行 CPU 标杆：高精度用 fp64，其余用 npu 对齐（bf16/fp16 乘 + fp32 累加）。"""
     inputs = build_inputs(spec, torch.device("cpu"), high_precision=high_precision)
-    return _forward_h_ref(inputs)
+    return _forward_h_ref(inputs, golden_mode="fp64" if high_precision else "npu")
 
 
 def run_npu(spec: dict[str, Any], input_data: InputDataset):
