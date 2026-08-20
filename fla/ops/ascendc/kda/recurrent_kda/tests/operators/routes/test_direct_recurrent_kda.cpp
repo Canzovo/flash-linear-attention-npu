@@ -1,5 +1,5 @@
 // Canonical Ascend C direct-launch contract for RecurrentKda.
-// blockDim/workspace/tiling are produced from tests/op_cases/recurrent_kda.json.
+// blockDim/workspace/tiling are produced from ../recurrent_kda.json.
 #include "acl/acl.h"
 #include "kernel_operator.h"
 

@@ -26,7 +26,7 @@ GDN recurrent 的函数接口。
 
 实现类型：`ascendc`
 
-支持范围统一记录在 `tests/op_cases/recurrent_kda.json`，Shape 符号引用 [KDA 模型符号表](../../README.md#model-shape-symbols)。
+支持范围统一记录在 `fla/ops/ascendc/kda/recurrent_kda/tests/operators/recurrent_kda.json`，Shape 符号引用 [KDA 模型符号表](../../README.md#model-shape-symbols)。
 
 | 维度 | 支持范围 |
 | --- | --- |
@@ -157,7 +157,7 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 ## 9. 精度设计
 
 Q/K/V 公开输入为 BF16，gate/beta 在 aclnn 预处理后以 FP32 进入 kernel。state 可为 FP32 或 BF16；推荐 FP32 状态以降低
-小步长多 token 更新中的累计误差。CPU reference 位于 `tests/reference/recurrent_kda_reference.py`，JSON 阈值对 BF16
+小步长多 token 更新中的累计误差。CPU reference 位于 `fla/ops/ascendc/kda/recurrent_kda/tests/pta/recurrent_kda_reference.py`，JSON 阈值对 BF16
 输出使用 `rtol=0.02, atol=0.01`。
 
 ## 10. 性能设计
@@ -167,7 +167,7 @@ Q/K/V 公开输入为 BF16，gate/beta 在 aclnn 预处理后以 FP32 进入 ker
 
 ## 11. 测试设计
 
-唯一 case 规格为 `tests/op_cases/recurrent_kda.json`。测试矩阵覆盖：
+唯一 case 规格为 `fla/ops/ascendc/kda/recurrent_kda/tests/operators/recurrent_kda.json`。测试矩阵覆盖：
 
 - BSND raw gate + unsafe gate + beta sigmoid。
 - BSND safe gate + `allow_neg_eigval`。
@@ -183,7 +183,7 @@ Q/K/V 公开输入为 BF16，gate/beta 在 aclnn 预处理后以 FP32 进入 ker
 - 非连续 state 覆盖 V-first/K-first、FP32/BF16、原位/非原位、slot pool guard 与未命中槽。
 - 负向参数组合：长序列、`safe_gate` 与 raw gate 组合、内部矩阵非稠密 stride 与外层重叠 stride。
 
-设备侧主入口为 `tests/operators/recurrent_kda/accuracy/test_recurrent_kda.py`，底层 PTA 入口为
+设备侧主入口为 `fla/ops/ascendc/kda/recurrent_kda/tests/operators/accuracy/test_recurrent_kda.py`，底层 PTA 入口为
 `fla/ops/ascendc/kda/recurrent_kda/tests/pta/test_accuracy.py`。
 
 ## 12. 验证修复记录

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from tests.operators._shared.cases import load_cases, select_cases
+from .cases import load_cases, select_cases
 
 
 OP = "recurrent_kda"

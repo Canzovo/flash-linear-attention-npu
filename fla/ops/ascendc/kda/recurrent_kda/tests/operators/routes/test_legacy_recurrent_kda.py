@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[8]
+TEST_DIR = Path(__file__).resolve().parents[1]
+for path in (ROOT, TEST_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import pytest
 
-from tests.operators._shared.route_requirements import require_legacy_route
+from common.route_requirements import require_legacy_route
 
 require_legacy_route()
 
-from tests.operators.recurrent_kda.common.case_matrix import case_ids  # noqa: E402
+from common.case_matrix import case_ids  # noqa: E402
 
 
 @pytest.mark.npu

@@ -14,15 +14,17 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[4]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parents[8]
+REFERENCE_DIR = Path(__file__).resolve().parents[2] / "pta"
+for path in (ROOT, REFERENCE_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import torch
 import torch_npu  # noqa: F401
 
 from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+from recurrent_kda_reference import recurrent_kda_reference
 
 
 DTYPES = {

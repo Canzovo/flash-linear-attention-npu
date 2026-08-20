@@ -217,4 +217,4 @@ recurrent KDA 的 Torch 接口保持一致。
 | 内部 tensor 创建或 L0 调用失败 | `ACLNN_ERR_INNER_NULLPTR` |
 | Python 输入不是 NPU tensor 或 runtime/op_api 未加载 | `RuntimeError` |
 
-负向 case 的预期返回码与消息片段集中定义在 `tests/op_cases/recurrent_kda.json`。
+负向 case 的预期返回码与消息片段集中定义在 `fla/ops/ascendc/kda/recurrent_kda/tests/operators/recurrent_kda.json`。

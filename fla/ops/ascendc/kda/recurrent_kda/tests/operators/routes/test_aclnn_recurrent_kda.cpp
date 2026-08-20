@@ -1,5 +1,5 @@
 // Canonical aclnn route contract for RecurrentKda.
-// Runtime inputs are defined by tests/op_cases/recurrent_kda.json.
+// Runtime inputs are defined by ../recurrent_kda.json.
 #include "aclnn_recurrent_kda.h"
 
 namespace {

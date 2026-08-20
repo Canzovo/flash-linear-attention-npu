@@ -12,9 +12,12 @@ import torch_npu
 from fla_npu.ops.ascendc import recurrent_kda  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT))
+REFERENCE_DIR = ROOT / "fla/ops/ascendc/kda/recurrent_kda/tests/pta"
+for path in (ROOT, REFERENCE_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-from tests.reference.recurrent_kda_reference import recurrent_kda_reference  # noqa: E402
+from recurrent_kda_reference import recurrent_kda_reference  # noqa: E402
 
 
 def _device():

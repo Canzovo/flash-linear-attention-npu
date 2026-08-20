@@ -3,12 +3,12 @@
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[5]
+ROOT = Path(__file__).resolve().parents[9]
 OP_ROOT = ROOT / "fla/ops/ascendc/kda/recurrent_kda"
 
 
 def test_direct_launch_matches_a_real_kernel_entry():
-    direct = ROOT / "tests/operators/recurrent_kda/routes/test_direct_recurrent_kda.cpp"
+    direct = ROOT / "fla/ops/ascendc/kda/recurrent_kda/tests/operators/routes/test_direct_recurrent_kda.cpp"
     kernel = OP_ROOT / "op_kernel/recurrent_kda.cpp"
     assert direct.is_file() and kernel.is_file()
     direct_text = direct.read_text(encoding="utf-8")

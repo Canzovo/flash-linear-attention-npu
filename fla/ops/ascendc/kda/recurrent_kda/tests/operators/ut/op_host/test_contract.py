@@ -1,11 +1,16 @@
 """Static op_host contract for recurrent_kda; device execution lives in accuracy/routes."""
 
 import re
+import sys
 from pathlib import Path
 
-from tests.operators.recurrent_kda.common.case_matrix import manifest
+ROOT = Path(__file__).resolve().parents[9]
+TEST_DIR = Path(__file__).resolve().parents[2]
+for path in (ROOT, TEST_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-ROOT = Path(__file__).resolve().parents[5]
+from common.case_matrix import manifest
 
 
 def _read_repo_file(path: str) -> str:

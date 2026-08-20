@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[8]
+TEST_DIR = Path(__file__).resolve().parents[1]
+REFERENCE_DIR = Path(__file__).resolve().parents[2] / "pta"
+for path in (ROOT, TEST_DIR, Path(__file__).resolve().parent, REFERENCE_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import pytest
 
-from tests.operators._shared.cases import load_cases, select_cases
+from common.cases import load_cases, select_cases
 
 
 OP = "recurrent_kda"
-ROOT = Path(__file__).resolve().parents[4]
 
 
 def test_case_manifest_covers_required_matrix():
@@ -237,7 +244,7 @@ def test_json_accuracy_cases():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-    from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+    from recurrent_kda_reference import recurrent_kda_reference
 
     device_id = int(os.environ.get("TEST_DEVICE_ID", "0"))
     device = torch.device(f"npu:{device_id}")
@@ -296,7 +303,7 @@ def test_non_contiguous_state_cases():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-    from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+    from recurrent_kda_reference import recurrent_kda_reference
 
     device_id = int(os.environ.get("TEST_DEVICE_ID", "0"))
     device = torch.device(f"npu:{device_id}")
@@ -463,7 +470,7 @@ def test_kimi_k3_tp16_device_metadata_and_state_pool():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-    from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+    from recurrent_kda_reference import recurrent_kda_reference
 
     device_id = int(os.environ.get("TEST_DEVICE_ID", "0"))
     device = torch.device(f"npu:{device_id}")
@@ -547,7 +554,7 @@ def test_kimi_k3_tp16_bsnd_graph_padding_capacity():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-    from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+    from recurrent_kda_reference import recurrent_kda_reference
 
     device_id = int(os.environ.get("TEST_DEVICE_ID", "0"))
     device = torch.device(f"npu:{device_id}")
@@ -631,12 +638,12 @@ def test_bsnd_multisequence_beta_scalar_visibility():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-    from tests.operators.recurrent_kda.accuracy.run_generated_generalization import (
+    from run_generated_generalization import (
         generate_case,
         make_inputs,
         to_device,
     )
-    from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+    from recurrent_kda_reference import recurrent_kda_reference
 
     device_id = int(os.environ.get("TEST_DEVICE_ID", "0"))
     device = torch.device(f"npu:{device_id}")
@@ -674,7 +681,7 @@ def test_kimi_k3_tp16_tnd_mtp_lengths_1_to_8():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     from fla_npu.ops.ascendc import npu_recurrent_kda as recurrent_kda
-    from tests.reference.recurrent_kda_reference import recurrent_kda_reference
+    from recurrent_kda_reference import recurrent_kda_reference
 
     device_id = int(os.environ.get("TEST_DEVICE_ID", "0"))
     device = torch.device(f"npu:{device_id}")
