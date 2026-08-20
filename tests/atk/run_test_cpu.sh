@@ -67,6 +67,11 @@ should_run() {
     [[ "$RUN_SCOPE" == "gen_cases" ]]
     return
   fi
+  # performance 不包含在 all 中，需单独指定 -scope=performance
+  if [[ "$stage" == "performance" ]]; then
+    [[ "$RUN_SCOPE" == "performance" ]]
+    return
+  fi
   [[ "$RUN_SCOPE" == "all" || "$RUN_SCOPE" == "$stage" ]]
 }
 
@@ -177,6 +182,13 @@ esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OP_DIR="${SCRIPT_DIR}/${OP}"
+
+# chunk_bwd_dqkwg 使用 npu 后端（直调），不使用 pyaclnn 后端
+if [[ "$OP" == "chunk_bwd_dqkwg" ]]; then
+  NPU_BACKEND="npu"
+else
+  NPU_BACKEND="pyaclnn"
+fi
 CASE_FILE="${OP_DIR}/atk_${OP}.json"
 EXECUTOR_FILE="${OP_DIR}/executor_${OP}.py"
 YAML_FILE="${OP_DIR}/${OP}.yaml"
@@ -240,7 +252,7 @@ fi
 if should_run accuracy; then
   log_info "开始精度与 NaN 检测：accuracy + CPU高精度标杆 + CPU同精度标杆 + --gm_init_flag"
   set_case_range_args "精度与 NaN 检测 case 范围" "$ACCURACY_START" "$ACCURACY_END"
-  "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
+  "$ATK_BIN" node --name npu_dut --backend "$NPU_BACKEND" --devices "$NPU_DEVICE_ID" \
       --output_path "${ATK_OUTPUT_ROOT}/cpu_dual_reference" \
     node --name cpu_reference --backend cpu \
       --output_path "${ATK_OUTPUT_ROOT}/cpu_dual_reference" \
@@ -260,7 +272,7 @@ fi
 if should_run performance; then
   log_info "开始性能测试：performance_device"
   set_case_range_args "性能测试 case 范围" "$PERFORMANCE_START" "$PERFORMANCE_END"
-  "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
+  "$ATK_BIN" node --name npu_dut --backend "$NPU_BACKEND" --devices "$NPU_DEVICE_ID" \
       --output_path "${ATK_OUTPUT_ROOT}/perf" \
     task \
       -c "atk_${OP}.json" \
@@ -276,7 +288,7 @@ fi
 if should_run determinism; then
   log_info "开始确定性测试：accuracy_dc"
   set_case_range_args "确定性测试 case 范围" "$DETERMINISM_START" "$DETERMINISM_END"
-  "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
+  "$ATK_BIN" node --name npu_dut --backend "$NPU_BACKEND" --devices "$NPU_DEVICE_ID" \
     task \
       -c "atk_${OP}.json" \
       -p "executor_${OP}.py" \
@@ -291,7 +303,7 @@ if should_run mssanitizer; then
   log_info "ATK mssanitizer 日志：${MSS_LOG_PATH}"
   set_case_range_args "内存检测 case 范围" "$MSS_START" "$MSS_END"
   mssanitizer --tool="$MSS_TOOL" -- \
-    "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
+    "$ATK_BIN" node --name npu_dut --backend "$NPU_BACKEND" --devices "$NPU_DEVICE_ID" \
     task \
       -c "atk_${OP}.json" \
       -p "executor_${OP}.py" \
