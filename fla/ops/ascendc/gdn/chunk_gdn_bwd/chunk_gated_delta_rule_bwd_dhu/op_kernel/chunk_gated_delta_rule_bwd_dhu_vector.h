@@ -216,7 +216,9 @@ public:
                         CastGateInputRows(gateRaw, gateInputBuf_[gateIdx],
                                           static_cast<uint32_t>(chunkInfo.chunkLen), gateIdx);
                         AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Exp(gateFactor, gateRaw, static_cast<uint32_t>(chunkInfo.chunkLen));
+                        AscendC::Muls(gateFactor, gateRaw, tiling_->useExp2 != 0 ? LN2 : 1.0f,
+                                      static_cast<uint32_t>(chunkInfo.chunkLen));
+                        AscendC::Exp(gateFactor, gateFactor, static_cast<uint32_t>(chunkInfo.chunkLen));
                         AscendC::PipeBarrier<PIPE_V>();
                         const int64_t lastRow = chunkInfo.chunkLen - 1;
                         const int64_t lastRowBase = (lastRow / BRCB_GROUP_ROWS) * BRCB_GROUP_ROWS;
@@ -322,6 +324,11 @@ public:
                                          gBrcb[lastLane * BRCB_ROW_FLOAT_ELEMS], cur, 1, {1, 1, 0, 8, 8, 1});
                         }
                         AscendC::PipeBarrier<PIPE_V>();
+                        if (tiling_->useExp2 != 0) {
+                            AscendC::Muls(dvGateFactor, dvGateFactor, LN2,
+                                          static_cast<uint32_t>(chunkInfo.chunkLen));
+                            AscendC::PipeBarrier<PIPE_V>();
+                        }
                         AscendC::Exp(dvGateFactor, dvGateFactor, static_cast<uint32_t>(chunkInfo.chunkLen));
                         AscendC::PipeBarrier<PIPE_V>();
                     }

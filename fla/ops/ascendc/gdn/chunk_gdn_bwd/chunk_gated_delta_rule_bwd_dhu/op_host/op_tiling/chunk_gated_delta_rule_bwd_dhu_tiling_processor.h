@@ -79,6 +79,7 @@ struct ChunkGatedDeltaRuleBwdDhuTilingContext {
     ge::DataType gDataType;
     bool hasG;
     bool hasGk;
+    bool useExp2;
     bool hasDh0;
     bool stage0Debug;
     double scale;
@@ -385,6 +386,11 @@ private:
         tiling_.HRatio = tiling_.HV / tiling_.HK;
         tiling_.hasDh0 = ctx_.hasDh0 ? 1 : 0;
         tiling_.hasGk = ctx_.hasGk ? 1 : 0;
+        if (ctx_.hasGk && !ctx_.useExp2) {
+            OP_LOGE(ctx_.nodeName, "use_exp2 must be true when gk is provided.");
+            return ge::GRAPH_FAILED;
+        }
+        tiling_.useExp2 = ctx_.useExp2 ? 1 : 0;
 
         if (tiling_.K != K_SIZE_128) {
             return ge::GRAPH_FAILED;

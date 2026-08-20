@@ -87,7 +87,7 @@ __simd_vf__ inline void FillFloatRegbase(__ubuf__ float *dst, float value, uint1
 }
 
 __simd_vf__ inline void ExpScalarSubFloatRegbase(__ubuf__ float *dst, __ubuf__ float *src,
-                                                 __ubuf__ float *scalar, uint16_t elements)
+                                                 __ubuf__ float *scalar, uint16_t elements, bool useExp2)
 {
     constexpr uint32_t ELEMS_PER_VF = AscendC::VECTOR_REG_WIDTH / sizeof(float);
     const uint16_t loopCnt = static_cast<uint16_t>((elements + ELEMS_PER_VF - 1) / ELEMS_PER_VF);
@@ -103,6 +103,9 @@ __simd_vf__ inline void ExpScalarSubFloatRegbase(__ubuf__ float *dst, __ubuf__ f
         maskLoop = UpdateMask<float>(curElems);
         LoadAlign(srcReg, src + elemOffset);
         Sub(dstReg, scalarReg, srcReg, maskLoop);
+        if (useExp2) {
+            Muls(dstReg, dstReg, 0.69314718055994530942f, maskLoop);
+        }
         Exp(dstReg, dstReg, maskLoop);
         StoreAlign(dst + elemOffset, dstReg, maskLoop);
     }
@@ -388,7 +391,9 @@ public:
                         CastGateInputRows(gateRaw, gateInputBuf_[gateIdx],
                                           static_cast<uint32_t>(chunkInfo.chunkLen), gateIdx);
                         AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Exp(gateFactor, gateRaw, static_cast<uint32_t>(chunkInfo.chunkLen));
+                        AscendC::Muls(gateFactor, gateRaw, tiling_->useExp2 != 0 ? LN2 : 1.0f,
+                                      static_cast<uint32_t>(chunkInfo.chunkLen));
+                        AscendC::Exp(gateFactor, gateFactor, static_cast<uint32_t>(chunkInfo.chunkLen));
                         AscendC::PipeBarrier<PIPE_V>();
                     } else {
                         const int64_t lastToken = chunkInfo.tokenStart + chunkInfo.chunkLen - 1;
@@ -487,7 +492,7 @@ public:
                             (__ubuf__ float *)reinterpret_cast<uint64_t>(dvGateFactor.GetPhyAddr()),
                             (__ubuf__ float *)reinterpret_cast<uint64_t>(gateRaw.GetPhyAddr()),
                             ((__ubuf__ float *)reinterpret_cast<uint64_t>(gateRaw.GetPhyAddr())) + lastRow,
-                            static_cast<uint16_t>(chunkInfo.chunkLen));
+                            static_cast<uint16_t>(chunkInfo.chunkLen), tiling_->useExp2 != 0);
                         AscendC::PipeBarrier<PIPE_V>();
                     }
                     Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
