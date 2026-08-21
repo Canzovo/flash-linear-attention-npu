@@ -4,6 +4,14 @@
  */
 #include "kernel_operator.h"
 
+#ifndef CATLASS_ARCH
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#define CATLASS_ARCH 3510
+#else
+#define CATLASS_ARCH 2201
+#endif
+#endif
+
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/solve_tri_ascend950.h"
 #else
