@@ -1,12 +1,16 @@
 """chunk_gated_delta_rule_bwd_dhu 的 ATK executor。
 
 输入生成、CPU 标杆、run_cpu、run_npu 和 FunctionApi 都放在本算子目录中。
+
+CPU 标杆直接复用 `torch_custom/fla_npu/test/test_bwd_dhu.py` 里的
+`chunk_gated_delta_rule_bwd_dhu_cpu`（真标杆，非 zeros stub）；输入全部为非零随机业务输入。
 """
 
 from __future__ import annotations
 
 import math
 import sys
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +44,23 @@ from _ascendc_common_executor import (
 
 OP_NAME = "chunk_gated_delta_rule_bwd_dhu"
 
+_CPU_REFERENCE_FILE = (
+    Path(__file__).resolve().parents[3]
+    / "torch_custom"
+    / "fla_npu"
+    / "test"
+    / "test_bwd_dhu.py"
+)
+_cpu_reference_spec = importlib.util.spec_from_file_location(
+    "atk_chunk_gated_delta_rule_bwd_dhu_reference",
+    _CPU_REFERENCE_FILE,
+)
+if _cpu_reference_spec is None or _cpu_reference_spec.loader is None:
+    raise ImportError(f"Unable to load CPU reference: {_CPU_REFERENCE_FILE}")
+_cpu_reference_module = importlib.util.module_from_spec(_cpu_reference_spec)
+_cpu_reference_spec.loader.exec_module(_cpu_reference_module)
+_bwd_dhu_reference = _cpu_reference_module.chunk_gated_delta_rule_bwd_dhu_cpu
+
 
 def build_inputs(spec: dict[str, Any], device: torch.device, high_precision: bool = False) -> dict[str, Any]:
     dtype_name = str(spec.get("dtype", "bf16")).lower()
@@ -50,31 +71,31 @@ def build_inputs(spec: dict[str, Any], device: torch.device, high_precision: boo
     return {
         "q": _randn((B, HK, T, K), dtype_name, calc_dtype, device, seed + 1),
         "k": _randn((B, HK, T, K), dtype_name, calc_dtype, device, seed + 2),
-        "w": _zeros((B, HV, T, K), dtype_name, calc_dtype, device),
-        "do": _zeros((B, HV, T, V), dtype_name, calc_dtype, device),
-        "dv": _zeros((B, HV, T, V), dtype_name, calc_dtype, device),
-        "g": _gate((B, HV, T), torch.float64 if high_precision else torch.float32, device, seed + 3),
+        "w": _randn((B, HV, T, K), dtype_name, calc_dtype, device, seed + 3),
+        "do": _randn((B, HV, T, V), dtype_name, calc_dtype, device, seed + 4),
+        "dv": _randn((B, HV, T, V), dtype_name, calc_dtype, device, seed + 5),
+        "g": _gate((B, HV, T), torch.float64 if high_precision else torch.float32, device, seed + 6),
         "chunk_size": chunk_size,
         "scale": float(spec.get("scale", 1.0 / math.sqrt(K))),
     }
 
 
-def _zero_h_ref(inputs):
-    if "u" in inputs:
-        B, _, T, K = inputs["k"].shape
-        HV, V = inputs["u"].shape[1], inputs["u"].shape[3]
-        h = torch.zeros((B, HV, _num_chunks(T, int(inputs["chunk_size"])), K, V), dtype=inputs["u"].dtype, device=inputs["u"].device)
-        return h, torch.zeros_like(inputs["u"])
-    B, _, T, K = inputs["q"].shape
-    HV, V = inputs["dv"].shape[1], inputs["dv"].shape[3]
-    dh = torch.zeros((B, HV, _num_chunks(T, int(inputs["chunk_size"])), K, V), dtype=inputs["dv"].dtype, device=inputs["dv"].device)
-    return dh, torch.zeros_like(inputs["dv"])
-
-
 def run_cpu(spec: dict[str, Any], high_precision: bool = False):
     """运行 CPU 同精度或 fp64 高精度标杆。"""
     inputs = build_inputs(spec, torch.device("cpu"), high_precision=high_precision)
-    return _zero_h_ref(inputs)
+    return _bwd_dhu_reference(
+        inputs["q"],
+        inputs["k"],
+        inputs["w"],
+        inputs["do"],
+        inputs["dv"],
+        g=inputs["g"],
+        scale=inputs["scale"],
+        chunk_size=inputs["chunk_size"],
+        # 同精度标杆用 npu 模式：matmul 不升精度（操作数量化到元素精度，累加保持 fp32），
+        # 与 NPU 计算精度一致；高精度标杆全程 fp64（ATK 自动生成）。
+        golden_mode="fp64" if high_precision else "npu",
+    )
 
 
 def run_npu(spec: dict[str, Any], input_data: InputDataset):

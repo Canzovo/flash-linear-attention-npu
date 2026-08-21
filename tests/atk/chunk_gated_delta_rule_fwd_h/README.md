@@ -4,13 +4,15 @@
 
 ## 输入约束
 
-- `k/w` 必须为 `[B,HK,T,K]`，`u/v_new` 必须为 `[B,HV,T,V]`。
+- `k` 必须为 `[B,HK,T,K]`；**`w` 与 `u` 都必须为 `[B,HV,T,K]/[B,HV,T,V]`，head 同为 HV**（GVA 语义，对齐 ACLNN `w.H == u.H`）。
 - `g` 与 `gk` 至少提供一个：`g=[B,HV,T]`，`gk=[B,HV,T,K]`。
 - `h` 输出为 `[B,HV,Nc,K,V]`，`state_v_first=true` 时末两维为 `[V,K]`；`initial_state/final_state` 同样受 `state_v_first` 解释。
-- `k/w/u` 的 `B`、`T` 必须一致；`u` 的 `HV` 必须大于等于 `HK` 且 `HV % HK == 0`。
+- `k/w/u` 的 `B`、`T` 必须一致；`u` 的 `HV` 必须大于等于 `HK` 且 `HV % HK == 0`（`w` 亦为 HV，故 GVA 时 `w` 的 head 数与 `u` 相同）。
 - `k/w/u/h/v_new` 支持 `BFLOAT16/FLOAT16`；gate 支持 `FLOAT/FLOAT16/BFLOAT16`，state 支持 `FLOAT/BFLOAT16/FLOAT16`。
 - `V` 支持 `128/256`，`chunk_size` 仅支持 `64/128`；变长模式支持 `cu_seqlens/chunk_indices` 成对传入。
 - 当前 ATK 用例遵循上述约束，并通过 `case_spec` 固定具体取值；扩展用例时应继续满足这些限制。
+
+> **CPU 标杆（`_forward_h_ref`）**使用 `w[b,hv]`（HV head）+ 共享 `k[b,hk]`（`hk = hv // (HV/HK)`），与内核/ACLNN 的 w=HV 语义一致；请不要把 `w` 建成 `[B,HK,…]` 或沿用 HK 索引标杆，那会与 `u` 的 HV 不一致触发 `161002`（历史误判根因）。
 
 ## 标杆来源
 
@@ -24,8 +26,11 @@ YAML 元信息覆盖 `ascend910b`、`ascend910_93` 和 `ascend950`，可配合�
 
 ## 默认用例
 
-- BF16 用例：`{"dtype": "bf16", "B": 1, "HK": 1, "HV": 1, "T": 64, "K": 128, "V": 128, "chunk_size": 64, "op": "chunk_gated_delta_rule_fwd_h", "case_id": 0, "seed": 20260817, "route": "ascendc", "soc": "ascend910b"}`
-- FP16 用例：`{"dtype": "fp16", "B": 1, "HK": 1, "HV": 1, "T": 64, "K": 128, "V": 128, "chunk_size": 64, "op": "chunk_gated_delta_rule_fwd_h", "case_id": 1, "seed": 20260818, "route": "ascendc", "soc": "ascend910b"}`
+本目录 `atk_chunk_gated_delta_rule_fwd_h.json` 内置 200 条泛化用例（100 个 shape × bf16/fp16），
+标准为 `cv_fused_double_benchmark`，SOC 为 `ascend950`。覆盖 noGVA（`HK==HV`）与 GVA（`HV>HK`）。
+
+示例（BF16 首条）：
+`{"dtype": "bf16", "B": 64, "HK": 8, "HV": 8, "T": 1024, "K": 128, "V": 128, "chunk_size": 64, "op": "chunk_gated_delta_rule_fwd_h", "case_id": 0, "seed": 20260817, "route": "ascendc", "soc": "ascend950"}`
 
 ## 执行方式
 

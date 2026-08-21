@@ -68,7 +68,16 @@ def _recompute_w_u_ref(inputs):
     B, HK, T, K = k.shape
     HV, V = v.shape[1], v.shape[3]
     chunk_size = int(inputs["chunk_size"])
-    calc = torch.float64 if k.dtype == torch.float64 else torch.float32
+    high = k.dtype == torch.float64
+    calc = torch.float64 if high else torch.float32
+    # matmul 不升精度：同精度路径把 matmul 操作数量化到元素精度（与 NPU 一致），
+    # 累加保持 fp32；高精度路径全程 fp64（ATK 自动生成的高精度标杆）。
+    elem = torch.float64 if high else k.dtype
+
+    def quant(x: torch.Tensor) -> torch.Tensor:
+        """把 matmul 操作数量化到元素精度，但保持 fp32 累加，与 NPU 对齐。"""
+        return x.to(elem).float() if not high else x.to(calc)
+
     w = torch.zeros((B, HV, T, K), dtype=calc, device=k.device)
     u = torch.zeros((B, HV, T, V), dtype=calc, device=k.device)
     group = max(HV // HK, 1)
@@ -77,9 +86,9 @@ def _recompute_w_u_ref(inputs):
             hk = hv // group
             for start, end in _chunks(T, chunk_size):
                 length = end - start
-                a = A[b, hv, start:end, :length].to(calc)
-                kbg = k[b, hk, start:end].to(calc) * beta[b, hv, start:end].to(calc).unsqueeze(-1) * torch.exp(g[b, hv, start:end].to(calc)).unsqueeze(-1)
-                vb = v[b, hv, start:end].to(calc) * beta[b, hv, start:end].to(calc).unsqueeze(-1)
+                a = quant(A[b, hv, start:end, :length])
+                kbg = quant(k[b, hk, start:end].float() * (beta[b, hv, start:end].float() * torch.exp(g[b, hv, start:end].float())).unsqueeze(-1))
+                vb = quant(v[b, hv, start:end].float() * beta[b, hv, start:end].float().unsqueeze(-1))
                 w[b, hv, start:end] = torch.matmul(a, kbg)
                 u[b, hv, start:end] = torch.matmul(a, vb)
     return w.to(k.dtype), u.to(v.dtype)
