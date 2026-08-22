@@ -682,10 +682,12 @@ if __name__ == '__main__':
     if len(args.argv) <= 3:
         raise RuntimeError('arguments must greater than 3')
     bisheng_flags_option = ['oom', 'dump_cce', 'dump_bin', 'dump_loc', 'ccec_o0', 'ccec_g', 'check_flag_sanitizer']
-    input_bisheng_flags = ""
+    matched_flags = []
     for elem in args.argv:
-        if elem in bisheng_flags_option:
-            input_bisheng_flags = elem
+        for sub in elem.split(','):
+            if sub in bisheng_flags_option:
+                matched_flags.append(sub)
+    input_bisheng_flags = ",".join(matched_flags)
     gen_bin_param_file(args.argv[1],
                     args.argv[2],
                     args.argv[3],

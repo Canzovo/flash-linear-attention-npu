@@ -38,16 +38,14 @@ def gen_compile_options(compile_options_file: str, op_type: str, \
     compile_opt = []
     opc_debug_config = []
     opc_tiling_keys = ""
-    # 识别 kernel 侧插桩类选项：这类选项必须作为 asc_opc 的
-    # --op_debug_config 值传递，而不是作为普通编译选项。
-    OPC_DEBUG_CONFIG_OPT = {
-        "--oom": "oom",
-        "--save-temp-files": "dump_cce",
-        "-sanitizer": "sanitizer",
-    }
     for opts in compile_options:
-        if opts in OPC_DEBUG_CONFIG_OPT:
-            opc_debug_config.append(OPC_DEBUG_CONFIG_OPT[opts])
+        if "oom" in opts:
+            if opts == "--oom":
+                opc_debug_config.append("oom")
+            else:
+                raise RuntimeError(f"Unknown oom option format {opts}")
+        elif "--save-temp-files" in opts:
+            opc_debug_config.append("dump_cce")
         elif opts.startswith("--op_relocatable_kernel_binary"):
             opc_debug_config.append(opts)
         elif opts.startswith("--op_super_kernel_options"):
@@ -57,6 +55,11 @@ def gen_compile_options(compile_options_file: str, op_type: str, \
             keys_str = ";".join([key for key in keys])
             opc_tiling_keys = keys_str
         else:
+            # 其余选项（如 -g、-sanitizer）保留为普通编译选项，经
+            # custom_compile_options.ini 传入 bisheng 编译器。kernel
+            # sanitizer（--cce-enable-sanitizer）即依据编译选项中的
+            # "-sanitizer" 触发（见 CANN ascendc_compile_base.py
+            # is_enable_sanitizer）。
             compile_opt.append(opts)
     if len(compile_opt) > 0:
         options_str = ';'.join([opt for opt in compile_opt])

@@ -58,28 +58,60 @@ def _strip_op_debug_config(build_args: str) -> str:
     return " ".join(out)
 
 
-def _op_debug_config_args(args: argparse.Namespace) -> str:
-    """Map 一键编包的原生 -g / --sanitizer 选项到 build.sh 的 --op_debug_config。
+def _native_build_args(args: argparse.Namespace) -> str:
+    """Map 一键编包的原生 -g / --sanitizer / --oom 选项到 build.sh 参数。
 
-    build.sh 解析 `--op_debug_config <value>`（空格分隔，不用 '='），
-    value 用逗号分隔多个配置项。add_opc_config 会把
-    ccec_g -> -g、sanitizer -> -sanitizer。
+    映射为 build.sh --bisheng_flags（叠加 kernel 侧 asc_opc --op_debug_config）
+    - -g / --debug      -> ccec_g（kernel 调试信息）
+    - --sanitizer       -> check_flag_sanitizer（mssanitizer 运行时检测需要；
+                           asc_opc 识别后走 ascendc_enable_sanitizer 流程）
+    - --oom             -> oom（kernel 侧 OOM 检查）
+    多个值逗号合并，如 "--bisheng_flags ccec_g,check_flag_sanitizer"。
+
+    说明：此前的 --op_debug_config / --ops-compile-options 通道依赖
+    ADD_OPS_COMPILE_OPTION_V2=ON，当前 CANN（ascendc_kernel_cmake/cmake/util
+    缺失）为 V2=OFF，两通道均不生效；V2=OFF 时代建系统的唯一编译选项入口是
+    BISHENG_FLAGS（cmake/func.cmake add_compile_cmd_target 将其透传给
+    ascendc_bin_param_build.py，写入 gen/*.sh 的 asc_opc --op_debug_config）。
+    本仓库已对 ascendc_bin_param_build.py 打平，使其支持逗号多值 bisheng_flags。
     """
     configs = []
     if args.debug:
         configs.append("ccec_g")
     if args.sanitizer:
-        configs.append("sanitizer")
+        configs.append("check_flag_sanitizer")
+    if args.oom:
+        configs.append("oom")
     if not configs:
         return ""
-    return f"--op_debug_config {','.join(configs)}"
+    return f"--bisheng_flags {','.join(configs)}"
+
+
+def _strip_op_debug_config(build_args: str) -> str:
+    """从透传参数里去掉已有的 --op_debug_config（含其值），
+    避免与原生 -g 生成的配置重复。"""
+    tokens = build_args.split()
+    out = []
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--op_debug_config":
+            skip_next = True
+            continue
+        if token.startswith("--op_debug_config="):
+            continue
+        out.append(token)
+    return " ".join(out)
 
 
 def _assemble_build_args(args: argparse.Namespace) -> str:
     build_args = _collect_build_args(args)
-    native = _op_debug_config_args(args)
+    native = _native_build_args(args)
     if not native:
         return build_args
+    # 原生选项优先：去重掉透传参数里已有的 --op_debug_config。
     build_args = _strip_op_debug_config(build_args)
     return f"{build_args} {native}".strip()
 
@@ -104,9 +136,20 @@ def main() -> int:
         "--sanitizer",
         action="store_true",
         help=(
-            "enable Ascend kernel sanitizer instrumentation (asc_opc "
-            "--op_debug_config=sanitizer). Equivalent to passing "
-            "--op_debug_config sanitizer to build.sh."
+            "enable Ascend kernel memory sanitizer support for mssanitizer. "
+            "Maps to --bisheng_flags check_flag_sanitizer for build.sh (the "
+            "V2=OFF compile-option channel), which makes asc_opc run in "
+            "sanitizer mode. Runtime detection is done by mssanitizer via "
+            "LD_PRELOAD injection (libmssanitizer_injection.so). Requires the "
+            "Ascend toolkit's mssanitizer debug environment when running."
+        ),
+    )
+    parser.add_argument(
+        "--oom",
+        action="store_true",
+        help=(
+            "enable kernel-side OOM debug. Maps to --bisheng_flags oom for "
+            "build.sh."
         ),
     )
     parser.add_argument(
