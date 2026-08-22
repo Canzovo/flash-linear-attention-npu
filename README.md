@@ -272,6 +272,19 @@ NPU CI 的 Example/ST 用例由 [`ci/example_st_cases.json`](ci/example_st_cases
 
 当前端到端 Example/ST 已支持 `gate_source=g`；`gk` / `g+gk` 先作为用例 schema 预留，待 NPU fwd_h 路径支持后再启用。
 
+## Memory Checking with msSanitizer
+
+编译时开启 `--sanitizer`（Ascend 910）或运行时注入（Ascend 950）即可使用 msSanitizer 进行算子内存异常检测：
+
+```sh
+# 910（ascend910b/ascend910_93）：编译期静态插桩，产物带 __sanitizer_report_* 符号，直接运行测试
+FLA_NPU_SOC=ascend910b python scripts/build_wheel.py -g --sanitizer
+
+# 950（ascend950）：无 sanitizer stub，编译只需 -g 定位信息，内存检测靠运行时注入
+FLA_NPU_SOC=ascend950 python scripts/build_wheel.py -g
+mssanitizer --tool=memcheck -- python -m pytest -q -s tests/xxx.py
+```
+
 ## 维护文档
 
 NPU CI 维护说明见 [`docs/Fla-npu仓CI部署教程.md`](docs/Fla-npu仓CI部署教程.md)。
