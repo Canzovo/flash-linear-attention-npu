@@ -38,14 +38,16 @@ def gen_compile_options(compile_options_file: str, op_type: str, \
     compile_opt = []
     opc_debug_config = []
     opc_tiling_keys = ""
+    # 识别 kernel 侧插桩类选项：这类选项必须作为 asc_opc 的
+    # --op_debug_config 值传递，而不是作为普通编译选项。
+    OPC_DEBUG_CONFIG_OPT = {
+        "--oom": "oom",
+        "--save-temp-files": "dump_cce",
+        "-sanitizer": "sanitizer",
+    }
     for opts in compile_options:
-        if "oom" in opts:
-            if opts == "--oom":
-                opc_debug_config.append("oom")
-            else:
-                raise RuntimeError(f"Unknown oom option format {opts}")
-        elif "--save-temp-files" in opts:
-            opc_debug_config.append("dump_cce")
+        if opts in OPC_DEBUG_CONFIG_OPT:
+            opc_debug_config.append(OPC_DEBUG_CONFIG_OPT[opts])
         elif opts.startswith("--op_relocatable_kernel_binary"):
             opc_debug_config.append(opts)
         elif opts.startswith("--op_super_kernel_options"):
