@@ -10,6 +10,7 @@ from atk.tasks.api_execute import register
 from atk.tasks.api_execute.base_api import BaseApi
 from fla_npu.ops import ascendc as ascendc_ops
 
+os.environ["PYTORCH_NO_NPU_MEMORY_CACHING"] = "1"
 # sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from scripts.chunk_bwd_dqkwg_cpu import chunk_bwd_dqkwg_cpu
 
@@ -182,6 +183,7 @@ class FunctionApi(BaseApi):
                 dg = dg.to(torch.bfloat16)
             if self.qkv_type == "fp16":
                 dg = dg.to(torch.float16)
+        # print("[cpu output] dq:", dq.shape, dq.dtype, "dk:", dk.shape, dk.dtype, "dw_out:", dw_out.shape, dw_out.dtype, "dg:", dg.shape, dg.dtype)
 
         return dq, dk, dw_out, dg
 
@@ -205,6 +207,7 @@ class FunctionApi(BaseApi):
             q, k, v, do, h, dh, w, g, dv, scale, cu_seqlens, chunk_size,
             benchmark=True
         )
+        # print("[cpu bench output] dq:", dq.shape, dq.dtype, "dk:", dk.shape, dk.dtype, "dw_out:", dw_out.shape, dw_out.dtype, "dg:", dg.shape, dg.dtype)
 
         return dq, dk, dw_out, dg
 
@@ -226,6 +229,7 @@ class FunctionApi(BaseApi):
         dq, dk, dw, dg = ascendc_ops.npu_chunk_bwd_dqkwg(
             q, k, v, g, h, do, dh, dv, chunk_size, cu_seqlens=cu_seqlens, w=None, g_gamma=None, chunk_indices=chunk_indices, scale=scale, use_exp2=None, transpose_state_layout=None
         )
+        # print("[npu output] dq:", dq.shape, dq.dtype, "dk:", dk.shape, dk.dtype, "dw:", dw.shape, dw.dtype, "dg:", dg.shape, dg.dtype)
 
         return dq, dk, dw, dg
 
@@ -274,15 +278,15 @@ class FunctionApi(BaseApi):
             num_chunks = len(chunk_indices) // 2
             # q, k: [B, HK, T, K]; v, dox, dv: [B, HV, T, V]
             # g: [B, HV, T]; h, dh: [B, HV, num_chunks, K, V]
-            q = torch.rand((B, HK, T, K), dtype=qkv_type) * 5e-7
-            k = torch.rand((B, HK, T, K), dtype=qkv_type) * 5e-2
-            v = torch.rand((B, HV, T, V), dtype=qkv_type) * 5e-2
-            do = torch.rand((B, HV, T, V), dtype=qkv_type) * 5e-7
-            dv = torch.rand((B, HV, T, V), dtype=qkv_type) * 5e-1
-            w = torch.rand((B, HV, T, K), dtype=qkv_type) * 5e-2
+            q = torch.rand((B, HK, T, K), dtype=qkv_type)
+            k = torch.rand((B, HK, T, K), dtype=qkv_type)
+            v = torch.rand((B, HV, T, V), dtype=qkv_type)
+            do = torch.rand((B, HV, T, V), dtype=qkv_type)
+            dv = torch.rand((B, HV, T, V), dtype=qkv_type)
+            w = torch.rand((B, HV, T, K), dtype=qkv_type)
             g = create_gate_g(B, HV, T, g_type)
-            h = torch.rand((B, HV, num_chunks, K, V), dtype=qkv_type) * 5e-2
-            dh = torch.rand((B, HV, num_chunks, K, V), dtype=qkv_type) * 5e-2
+            h = torch.rand((B, HV, num_chunks, K, V), dtype=qkv_type)
+            dh = torch.rand((B, HV, num_chunks, K, V), dtype=qkv_type)
         else:
             cu_seqlens = None
             chunk_indices = None
@@ -290,20 +294,17 @@ class FunctionApi(BaseApi):
             T = T_json
             dtype = qkv_type
             Gtype = g_type
-            # g = create_gate_g(B, HV, T_json, g_type)
-            q = torch.randn(B,HK,T,K, dtype=dtype, requires_grad=True)
-            k = torch.randn(B,HK,T,K, dtype=dtype, requires_grad=True)
-            v = torch.randn(B,HV,T,V, dtype=dtype, requires_grad=True)
 
             g = -torch.sort(torch.rand(B*T*HV) * 10, descending=False)[0].reshape((B,HV,T)).to(Gtype)    #G必须递减且为负数
-            do = torch.randn(B,HV,T,V, dtype=dtype, requires_grad=True)
 
-            dv = torch.randn(B,HV,T,V, dtype=dtype, requires_grad=True)
-            w = None
-
-            h = torch.randn(B, HV, num_chunks, K, V, dtype=dtype, requires_grad=True)
-            dh = torch.randn(B, HV, num_chunks, K, V, dtype=dtype, requires_grad=True)
-
+            q = torch.rand((B, HK, T, K), dtype=qkv_type)
+            k = torch.rand((B, HK, T, K), dtype=qkv_type)
+            v = torch.rand((B, HV, T, V), dtype=qkv_type)
+            do = torch.rand((B, HV, T, V), dtype=qkv_type)
+            dv = torch.rand((B, HV, T, V), dtype=qkv_type)
+            w = torch.rand((B, HV, T, K), dtype=qkv_type)
+            h = torch.rand((B, HV, num_chunks, K, V), dtype=qkv_type)
+            dh = torch.rand((B, HV, num_chunks, K, V), dtype=qkv_type)
         q = q.to(qkv_type)
         k = k.to(qkv_type)
         v = v.to(qkv_type)

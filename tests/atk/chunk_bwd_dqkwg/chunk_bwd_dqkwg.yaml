@@ -234,7 +234,7 @@ inputs:
       values: [float]
     ranges:
       valid:
-        values: [1.0]
+        values: [0.05]
       invalid:
         values: []
   - name: chunk_size

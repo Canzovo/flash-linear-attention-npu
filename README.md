@@ -16,7 +16,7 @@ flash-linear-attention-npu 算子库由天津大学主导开发，是一个面�
 首先需安装 CANN 开发包，提供 NPU 算子运行所需的底层驱动与工具链。
 推荐使用是社区版8.5.2，总共要下2个run包，这里以A3机器为例（即需要下载A3-ops、toolkit）
 下载地址为
-[https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.5.2](https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.5.2)
+[https://www.hiascend.com/developer/download/community/result?module=cann&amp;cann=8.5.2](https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.5.2)
 需要找到与你当前机器对应的包
 
 ```
@@ -65,10 +65,10 @@ FLA_NPU_SOC=ascend910b python scripts/build_wheel.py
 
 方式 A 编译可用环境变量：
 
-| 环境变量 | 可选范围 | 作用 / 建议 | 默认 |
-|---|---|---|---|
-| `FLA_NPU_SOC` | `ascend910b` / `ascend910_93` / `ascend950` | 目标芯片；按实际运行机器选择 | `ascend910b` |
-| `FLA_NPU_DISABLE_LOCAL_VERSION` | `TRUE` / `FALSE` | wheel 版本号不追加 SOC/torch/ABI 本地版本；内部统一发版需要固定版本号时可设 `TRUE`，日常构建建议保持 `FALSE` 以区分产物兼容范围 | `FALSE` |
+| 环境变量                          | 可选范围                                          | 作用 / 建议                                                                                                                        | 默认           |
+| --------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `FLA_NPU_SOC`                   | `ascend910b` / `ascend910_93` / `ascend950` | 目标芯片；按实际运行机器选择                                                                                                       | `ascend910b` |
+| `FLA_NPU_DISABLE_LOCAL_VERSION` | `TRUE` / `FALSE`                              | wheel 版本号不追加 SOC/torch/ABI 本地版本；内部统一发版需要固定版本号时可设`TRUE`，日常构建建议保持 `FALSE` 以区分产物兼容范围 | `FALSE`      |
 
 布尔变量设为 `TRUE` 时也接受 `1`、`YES`、`ON`；未设置或其他值按 `FALSE` 处理。
 
@@ -149,7 +149,7 @@ run 包覆盖完成后会重写幂等的 `set_env.bash`，并把实际 OPP 文�
 
 ```sh
 python -c "import fla_npu; print('fla_npu runtime loaded')"
-python -c "from fla_npu.ops import ascendc; import torch_npu; print(hasattr(torch_npu.ops, 'chunk_fwd_o'))"
+python -c "from fla_npu.ops import ascendc; print(hasattr(ascendc, 'chunk_fwd_o'))"
 python scripts/check_packaged_wheel_api.py
 ```
 
@@ -290,7 +290,9 @@ mssanitizer --tool=memcheck -- python -m pytest -q -s tests/xxx.py
 NPU CI 维护说明见 [`docs/Fla-npu仓CI部署教程.md`](docs/Fla-npu仓CI部署教程.md)。
 
 ## 🔍目录结构
+
 关键目录如下：
+
 ```
 ├── cmake                              # 项目工程编译目录
 ├── common                             # 项目公共头文件和公共源码
