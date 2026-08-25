@@ -17,7 +17,7 @@
 
 `fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/tests/pta/golden.py`；`fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/README.md`
 
-CPU 标杆、输入构造、`run_cpu`、`run_npu` 和 `FunctionApi` 均在本目录的 `executor_recurrent_gated_delta_rule.py` 中实现；公共文件只提供基础工具函数。CPU 标杆按 batch 分段执行递推，覆盖 GQA 头映射、`g/gk` 衰减、接受 token 对初始状态索引的选择，以及逐 token 状态写回。高精度标杆使用 FP64 计算，同精度标杆保留原始输入量化和输出 dtype。
+CPU 标杆、输入构造、`run_cpu`、`run_npu` 和 `FunctionApi` 均在本目录的 `executor_recurrent_gated_delta_rule.py` 中实现；公共文件只提供基础工具函数。CPU golden 按 batch 分段执行高精度递推，覆盖 GQA 头映射、`g/gk` 衰减、接受 token 对初始状态索引的选择，以及逐 token 状态写回。
 
 ATK 比较以下两个结果：
 

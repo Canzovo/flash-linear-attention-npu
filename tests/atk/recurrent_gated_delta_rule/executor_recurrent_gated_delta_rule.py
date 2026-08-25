@@ -297,8 +297,7 @@ class FunctionApi(BaseApi):
 
     def __init__(self, task_result: TaskResult):
         super().__init__(task_result)
-        self.is_benchmark_task = bool(task_result.is_benchmark_task)
-        self.high_precision = self.device == "cpu" and self.is_benchmark_task
+        self.high_precision = self.device == "cpu"
 
     def __call__(self, input_data: InputDataset, with_output: bool = False):
         del with_output
@@ -312,7 +311,7 @@ class FunctionApi(BaseApi):
                 f"{OP_NAME} requires an NPU DUT node and a CPU reference node, "
                 f"got {self.device!r}."
             )
-        return _finite_tuple(outputs)
+        return _finite_tuple(outputs, golden=self.device == "cpu")
 
     def export_custom_data(self, input_data: InputDataset):
         spec = _case_spec(input_data, OP_NAME)

@@ -236,7 +236,10 @@ bash tests/atk/run_test_cpu.sh -op=causal_conv1d -npu_device_id=0 -scope=determi
 bash tests/atk/run_test_cpu.sh -op=causal_conv1d -npu_device_id=0 -scope=mssanitizer
 ```
 
-默认 `-scope=all` 会执行 CPU 双标杆精度、性能、确定性和 mssanitizer。未设置 `CASE_START/CASE_END` 时不向 ATK 传入 `-s/-e`，会执行JSON中的全部用例；需要只跑指定顺序范围时使用：
+默认 `-scope=all` 会执行混合容差精度、确定性和 mssanitizer；性能测试需显式指定
+`-scope=performance`。精度任务以 CPU 高精度结果作为唯一 golden，以 NPU 输出作为 DUT。
+未设置 `CASE_START/CASE_END` 时不向 ATK 传入 `-s/-e`，会执行 JSON 中的全部用例；
+需要只跑指定顺序范围时使用：
 
 ```sh
 CASE_START=0 CASE_END=1 \

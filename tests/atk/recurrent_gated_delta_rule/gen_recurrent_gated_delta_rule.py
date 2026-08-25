@@ -34,16 +34,7 @@ else:
 
 OP_NAME = "recurrent_gated_delta_rule"
 SEED_BASE = 20260823
-STANDARD = {
-    "acc": {
-        "cv_fused_double_benchmark": {
-            "max_re_ratio": 10,
-            "avg_re_ratio": 3,
-            "root_mean_squared_ratio": 3,
-        }
-    },
-    "perf": "not_key",
-}
+STANDARD = {"acc": "mixed_tolerance_bm", "perf": "not_key"}
 
 PROFILES = [
     {
