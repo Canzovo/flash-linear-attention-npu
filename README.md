@@ -136,7 +136,7 @@ wheel 内嵌 OPP；wheel 通过绝对路径加载 `libcust_opapi.so`，不会再
 只有用 `FLA_NPU_BUILD_LEGACY_EXTENSION=1` 额外编出 legacy 扩展时，才可显式调用
 `fla_npu.load_legacy_torch_ops()` 兼容旧 `torch.ops.npu.*`。
 
-`fla_npu.ops.ascendc` 调用会优先使用 wheel 内嵌 OPP，找不到时会继续从 `FLA_NPU_OPP_PATH`、`ASCEND_CUSTOM_OPP_PATH` 和 `ASCEND_OPP_PATH` 查找已安装 OPP。外部 OPP 的 `op_api/lib` 目录同样不得包含自定义 `libopapi.so`；runtime 会先尝试删除旧版本遗留的别名，目录不可写时再明确报错并要求手工清理。
+`fla_npu.ops.ascendc` 只使用当前 wheel 内嵌的 custom OPP，不从 `FLA_NPU_OPP_PATH`、`ASCEND_CUSTOM_OPP_PATH`、`ASCEND_OPP_PATH` 或 CANN 的 `vendors` 目录回退查找其他 `libcust_opapi.so`。外部 OPP 仅用于 CANN 侧的 host、tiling 与 kernel 发现，不再作为 Python runtime 加载 `libcust_opapi.so` 的来源。单独构建的 run 包应使用默认 `--install` / `--full` 流程覆盖当前 wheel 内的 OPP（见[开发者指南](docs/开发者指南.md) 场景 1）。
 
 > 已安装完整 wheel 后，如需用单算子 run 包快速替换部分算子的 Ascend C 产物（含安装器
 > 的算子状态说明），见[开发者指南](docs/开发者指南.md) 场景 1。

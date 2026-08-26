@@ -14,7 +14,7 @@ out = ascendc_ops.npu_chunk_fwd_o(...)
 from fla_npu.ops.ascendc import chunk_fwd_o
 ```
 
-默认路径通过 Python `ctypes` 直调已安装 OPP 里的 `libcust_opapi.so`，不依赖 PyTorch dispatcher 注册，也不会默认编译或加载 `torch_npu` 自定义扩展。旧的 `torch.ops.npu.*` / `torch_npu.ops.*` 兼容路径仍可做，但只作为迁移期可选能力，不推荐新增代码使用，也不会默认使能。
+默认路径通过 Python `ctypes` 直调当前 `fla_npu` 包内 OPP 的 `libcust_opapi.so`，不依赖 PyTorch dispatcher 注册，也不会默认编译或加载 `torch_npu` 自定义扩展。旧的 `torch.ops.npu.*` / `torch_npu.ops.*` 兼容路径仍可做，但只作为迁移期可选能力，不推荐新增代码使用，也不会默认使能。
 
 ## 导入契约
 
@@ -26,7 +26,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| 导入失败，`fla_npu/opp/vendors/fla_npu_transformer` 下找不到 `libcust_opapi.so` | 安装的是 standalone wheel（不内嵌 OPP）：需先安装算子 run 包，或通过环境变量 `FLA_NPU_OPP_PATH` 指向外部 OPP 目录 |
+| 导入失败，`fla_npu/opp/vendors/fla_npu_transformer` 下找不到 `libcust_opapi.so` | 安装的是 standalone wheel（不内嵌 OPP）：需先用 run 包默认安装流程（`--install` / `--full`）补齐 wheel 内嵌 OPP（见[开发者指南](../../docs/开发者指南.md) 场景 1） |
 | `dlopen` 报错、找不到依赖库 | 未 source CANN `set_env.sh`，或新开 shell 后环境变量丢失，需要重新 source |
 | 安装 run 包后调用接口报 ABI / 行为异常 | 已加载的 `libcust_opapi.so` 不会在同一 Python 进程内热替换，请重启 Python 进程 |
 
@@ -44,7 +44,7 @@ python3 setup.py bdist_wheel
 
 会生成纯 Python wheel，核心内容包括：
 
-- `fla_npu/__init__.py`：定位并加载内嵌或外部 OPP。
+- `fla_npu/__init__.py`：定位并加载当前包内嵌 OPP（package-only，不对外部 OPP 回退）。
 - `fla_npu/ops/ascendc/__init__.py`：稳定 Python 调用入口、短名导出和正反向自动绑定。
 - `fla_npu/ops/ascendc/_aclnn_ctypes.py`：具体算子的 Python wrapper，只描述输入输出、标量转换和算子级 ABI 特例。
 - `fla_npu/ops/ascendc/_runtime.py`：公共 ctypes runtime，封装 aclTensor/aclIntArray 描述符、workspace、stream 和异步 launch 生命周期。
