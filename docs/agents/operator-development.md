@@ -190,7 +190,7 @@ KDA 前向需要优化 `A5 + chunk_size=64 + K=V=128` 场景，同时保持算�
 先区分结构性错误和数值误差：
 
 - 结构性错误：固定行、固定 chunk、固定 head、块状/条纹状误差、维度映射错误、NaN/Inf、固定输入多跑不一致。必须回到 kernel、layout、offset、mask、同步或 workspace 修复。
-- 数值误差：误差随机分散、双标杆显示 test 和 benchmark 同数量级、没有固定结构模式。再评估迭代次数、fp32 workspace、阈值语义和性能取舍。
+- 数值误差：误差随机分散、NPU DUT 与 CPU 高精度 golden 的误差没有固定结构模式。再评估迭代次数、fp32 workspace、混合容差语义和性能取舍。
 
 如果最终输出爆 NaN/Inf，先追第一处非有限值或第一处极大值。很多问题的第一现场在 gate、layout、padding、tail row 或中间 workspace，不一定在最终 GEMM。
 

@@ -36,7 +36,7 @@ ATK 运行产生的 `atk_output/`、`result/`、profiling、sanitizer 日志、X
 
 | 文件                                   | 职责                                                                                     |
 | -------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `run_test_cpu.sh`                    | 统一入口，覆盖 CPU 双标杆精度、性能、确定性、mssanitizer 和用例生成                      |
+| `run_test_cpu.sh`                    | 统一入口，覆盖混合容差精度、性能、确定性、mssanitizer 和用例生成                         |
 | `common/_ascendc_common_executor.py` | executor 共用的基础工具函数，例如 dtype 转换、case_spec 解析、确定性数据生成、有限值检查 |
 | `<op>/executor_<op>.py`              | 本算子的输入构造、CPU 标杆、NPU DUT 调用和 ATK`FunctionApi`                            |
 | `<op>/gen_<op>.py`                   | 本算子的 ATK 泛化用例生成器                                                              |
@@ -66,7 +66,7 @@ npu-smi info
 如果环境需要仓内 Python 包路径，请在调用脚本前自行设置。`run_test_cpu.sh` 不会修改
 `PYTHONPATH`。
 
-脚本启动时会校验 ATK 版本不低于 `26.7.8`（由 `REQUIRED_ATK_VERSION` 控制），低于该版本
+脚本启动时会校验 ATK 版本不低于 `26.8.8`（由 `REQUIRED_ATK_VERSION` 控制），低于该版本
 直接退出；请确保 `atk --version` 输出的版本号满足要求。
 
 可选环境变量：
@@ -78,7 +78,7 @@ npu-smi info
 | `FLA_NPU_ENV`          | `fla_npu_transformer` 的 `set_env.bash` 路径；设置后脚本会 source                  |
 | `ATK_OUTPUT_ROOT`      | ATK 输出根目录，默认是算子目录下的`./atk_output`                                     |
 | `ATK_GM_INIT_MODE`     | GM 数据初始化模式，默认`on`；可设 `on/off`                                        |
-| `REQUIRED_ATK_VERSION` | ATK 最低版本要求，默认`26.7.8`；一般无需修改                                         |
+| `REQUIRED_ATK_VERSION` | ATK 最低版本要求，默认`26.8.8`；一般无需修改                                         |
 | `ATK_TIMEOUT`          | 精度阶段超时时间，默认`14400`                                                        |
 | `DC_LOOP_NUMS`         | 确定性循环次数，默认`50`                                                             |
 | `DC_TIMEOUT`           | 确定性阶段超时时间，默认`3600`                                                       |
@@ -141,7 +141,8 @@ bash tests/atk/run_test_cpu.sh -op=causal_conv1d
 
 ## 测试动作
 
-精度与 NaN 检测使用本机 NPU DUT 和本机 CPU reference 两个 ATK node：
+精度与 NaN 检测显式启动本机 NPU DUT 节点和 CPU 高精度 golden 节点；CPU 节点不再
+提供同精度参考，精度标准统一为 `mixed_tolerance_bm`：
 
 ```bash
 bash tests/atk/run_test_cpu.sh -op=<op_name> -scope=accuracy

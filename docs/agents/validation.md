@@ -64,8 +64,8 @@
 仓内单算子 NPU 看护使用 `tests/atk/run_test_cpu.sh` 调度 CPU 标杆流程。脚本不按算子名写
 特殊分支，只要求 `tests/atk/<op>` 下存在 `atk_<op>.json` 和 `executor_<op>.py`。所有测试
 动作都通过 ATK 发起；mssanitizer 阶段也只是在外层包裹同一条 ATK `task` 命令。该流程
-不需要远端标杆服务：ATK 的 `--bm_device cpu` 负责 CPU 高精度真值，普通
-`node --backend cpu` 负责 CPU 同精度对照。
+不需要远端标杆服务：显式 CPU 节点只负责高精度 golden，显式 NPU 节点只负责 DUT，
+由 `mixed_tolerance_bm` 完成混合容差比较。
 
 ### 前置准备
 
@@ -122,7 +122,7 @@ bash tests/atk/run_test_cpu.sh \
   -npu_device_id=<physical_npu_device>
 ```
 
-默认执行 `all`，顺序为 CPU 双标杆精度、性能、确定性和 mssanitizer。需要单独跑某一项时使用
+默认执行 `all`，顺序为混合容差精度、确定性和 mssanitizer；性能测试需显式指定。需要单独跑某一项时使用
 `-scope=accuracy`、`-scope=performance`、`-scope=determinism` 或
 `-scope=mssanitizer`。`gen_cases` 不属于 `all`，必须显式传入 `-scope=gen_cases`
 才会触发。常用覆盖参数：
@@ -176,14 +176,14 @@ bash tests/atk/run_test_cpu.sh -op=<op> -scope=gen_cases
 atk case -f ./<op>.yaml -p ./gen_<op>.py -dt 100 -en 0 -s 20260813
 ```
 
-精度检查使用 CPU 高精度真值和 CPU 同精度对照。统一脚本会探测当前 ATK 的
+精度检查使用 CPU 高精度 golden 和 NPU DUT。统一脚本会探测当前 ATK 的
 `task --help`，仅在支持时加入 `--gm_init_flag` 和 `-sp`：
 
 ```bash
 atk node --name npu_dut --backend npu --devices <npu_device_id> \
-    --output_path ./atk_output/cpu_dual_reference \
-  node --name cpu_reference --backend cpu \
-    --output_path ./atk_output/cpu_dual_reference \
+    --output_path ./atk_output/accuracy \
+  node --name cpu_golden --backend cpu \
+    --output_path ./atk_output/accuracy \
   task -c ./atk_<op>.json --task accuracy --bm_device cpu -p ./executor_<op>.py \
   -s <accuracy_start> -e <accuracy_end> [--gm_init_flag] [-sp] -mt 1 -to 14400
 ```
