@@ -23,9 +23,12 @@ public:
         const std::initializer_list<ge::DataType> stateTypes = {ge::DT_BF16, ge::DT_FLOAT};
         const std::initializer_list<ge::Format> formats = {ge::FORMAT_ND, ge::FORMAT_ND};
 
-        this->Input("query").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("key").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Input("value").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Input("query").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats)
+            .IgnoreContiguous();
+        this->Input("key").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats)
+            .IgnoreContiguous();
+        this->Input("value").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats)
+            .IgnoreContiguous();
         this->Input("gate").ParamType(REQUIRED)
             .DataTypeList({ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND});
         this->Input("beta").ParamType(REQUIRED)
