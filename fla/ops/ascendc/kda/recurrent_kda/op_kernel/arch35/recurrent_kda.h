@@ -162,7 +162,8 @@ public:
         uint32_t singleVSize = vStep_ * sizeof(float);
         uint32_t vSize = MAX_MTP * alignV_ * sizeof(float);
         uint32_t kSize = MAX_MTP * alignK_ * sizeof(float);
-        uint32_t betaUbSize = MAX_MTP * FP32_NUM_PER_BLOCK * sizeof(float);
+        // FP16/BF16 beta rows expand to 16 FP32 values after Cast.
+        uint32_t betaUbSize = MAX_MTP * BF16_NUM_PER_BLOCK * sizeof(float);
         pipe_->InitBuffer(qInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
         pipe_->InitBuffer(kInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
         pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
