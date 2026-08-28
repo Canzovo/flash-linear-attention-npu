@@ -47,11 +47,7 @@ inputs:
       values: [non_param]
     ranges:
       valid:
-<<<<<<< HEAD
         values: ["{\"name\":\"bf16_bsnd\",\"dtype\":\"bf16\",\"B\":1,\"H\":1,\"T\":64,\"chunk_size\":64,\"layout\":\"bsnd\",\"op\":\"solve_tri\",\"case_id\":0,\"seed\":20260817,\"route\":\"ascendc\",\"soc\":\"ascend910b\"}"]
-=======
-        values: ["{\"name\":\"bf16_bsnd\",\"dtype\":\"bf16\",\"B\":1,\"H\":1,\"T\":64,\"chunk_size\":64,\"layout\":\"bsnd\",\"op\":\"solve_tri\",\"case_id\":0,\"seed\":20260826,\"route\":\"ascendc\",\"soc\":\"ascend950\"}"]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: dtype
@@ -71,11 +67,7 @@ inputs:
       values: [int]
     ranges:
       valid:
-<<<<<<< HEAD
         values: [1, 2, 4, 8, 16]
-=======
-        values: [2, 4, 8]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: H
@@ -85,11 +77,7 @@ inputs:
       values: [int]
     ranges:
       valid:
-<<<<<<< HEAD
         values: [1, 2, 4, 8, 16, 32]
-=======
-        values: [4, 8, 16]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: T
@@ -99,11 +87,7 @@ inputs:
       values: [int]
     ranges:
       valid:
-<<<<<<< HEAD
         values: [64, 128, 256, 512, 1024, 2048, 4096]
-=======
-        values: [128, 192, 256, 384, 512, 640, 768]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: chunk_size
@@ -113,11 +97,7 @@ inputs:
       values: [int]
     ranges:
       valid:
-<<<<<<< HEAD
         values: [64, 128]
-=======
-        values: [16, 32, 64, 128]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: layout
@@ -127,11 +107,7 @@ inputs:
       values: [string]
     ranges:
       valid:
-<<<<<<< HEAD
         values: ["bsnd", "tnd"]
-=======
-        values: ["bsnd", "bnsd", "tnd", "ntd"]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: num_seqs
@@ -141,11 +117,7 @@ inputs:
       values: [int]
     ranges:
       valid:
-<<<<<<< HEAD
         values: [1, 2, 4, 8]
-=======
-        values: [2, 3, 4]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: case_id
@@ -165,7 +137,7 @@ inputs:
       values: [int]
     ranges:
       valid:
-        values: [20260826]
+        values: [20260817]
       invalid:
         values: []
   - name: soc
@@ -175,11 +147,7 @@ inputs:
       values: [string]
     ranges:
       valid:
-<<<<<<< HEAD
         values: ["ascend910b"]
-=======
-        values: ["ascend950"]
->>>>>>> b83e57e9 (fix)
       invalid:
         values: []
   - name: route

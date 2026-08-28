@@ -13,21 +13,8 @@ import os
 from pathlib import Path
 from typing import Any, List, Tuple
 
-<<<<<<< HEAD
 import numpy as np
 import torch
-=======
-# ATK 会 fork 多个 CPU worker 跑 numpy golden；限制 BLAS 线程避免过订阅/futex 卡死
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-
-import numpy as np
-import torch
-torch.set_num_threads(1)
->>>>>>> b83e57e9 (fix)
 
 # 添加父目录到 sys.path 以导入公共模块
 _PARENT_DIR = str(Path(__file__).resolve().parents[1])
@@ -103,13 +90,8 @@ def _calc_dtype(name: str, high_precision: bool):
     return _orig_dtype(name)
 
 
-<<<<<<< HEAD
 def _finite_tuple(outputs, *, golden: bool = False):
     """过滤 None 输出，检查有限值，并规范 CPU golden 的比较精度。"""
-=======
-def _finite_tuple(outputs):
-    """过滤 None 输出，并在 ATK 读取前检查浮点输出是否有限。"""
->>>>>>> b83e57e9 (fix)
     if isinstance(outputs, torch.Tensor):
         outputs = (outputs,)
     visible = []
@@ -119,14 +101,11 @@ def _finite_tuple(outputs):
         check = output.detach()
         if check.is_floating_point() and not torch.isfinite(check.float()).all().item():
             raise RuntimeError("输出包含 NaN 或 Inf")
-<<<<<<< HEAD
         if golden:
             if output.dtype == torch.float64:
                 output = output.to(torch.float32)
             elif output.dtype == torch.complex128:
                 output = output.to(torch.complex64)
-=======
->>>>>>> b83e57e9 (fix)
         visible.append(output)
     return tuple(visible)
 
@@ -257,40 +236,13 @@ def build_inputs_tnd(spec: dict[str, Any], device: torch.device, high_precision:
     return {"x": x, "cu_seqlens": cu_seqlens, "chunk_indices": chunk_indices, "layout": "tnd"}
 
 
-<<<<<<< HEAD
-=======
-def build_inputs_bnsd(spec: dict[str, Any], device: torch.device, high_precision: bool = False) -> dict[str, Any]:
-    """构造 BNSD 格式输入：[B, H, T, chunk_size]，由 BSND 转置得到。"""
-    inputs = build_inputs_bsnd(spec, torch.device("cpu"), high_precision)
-    inputs["x"] = inputs["x"].permute(0, 2, 1, 3).contiguous().to(device)
-    inputs["layout"] = "bnsd"
-    return inputs
-
-
-def build_inputs_ntd(spec: dict[str, Any], device: torch.device, high_precision: bool = False) -> dict[str, Any]:
-    """构造 NTD 格式输入：[H, total_T, chunk_size]，由 TND 转置得到。"""
-    inputs = build_inputs_tnd(spec, torch.device("cpu"), high_precision)
-    inputs["x"] = inputs["x"].permute(1, 0, 2).contiguous().to(device)
-    inputs["layout"] = "ntd"
-    return inputs
-
-
->>>>>>> b83e57e9 (fix)
 def build_inputs(spec: dict[str, Any], device: torch.device, high_precision: bool = False) -> dict[str, Any]:
     """根据 layout 构造输入。"""
     layout = str(spec.get("layout", "bsnd")).lower()
     if layout == "tnd":
         return build_inputs_tnd(spec, device, high_precision)
-<<<<<<< HEAD
     else:
         return build_inputs_bsnd(spec, device, high_precision)
-=======
-    if layout == "ntd":
-        return build_inputs_ntd(spec, device, high_precision)
-    if layout == "bnsd":
-        return build_inputs_bnsd(spec, device, high_precision)
-    return build_inputs_bsnd(spec, device, high_precision)
->>>>>>> b83e57e9 (fix)
 
 
 # ============================================================================
@@ -462,24 +414,15 @@ def _inverse_block_mch_mbh(block: np.ndarray, matrix_size: int,
 def _solve_tri_ref_bsnd(x: torch.Tensor, chunk_size: int, high_precision: bool) -> torch.Tensor:
     """BSND 格式的 MCH+MBH 标杆。
     
-<<<<<<< HEAD
     chunk_size=64 时 NPU 走全 FP32 路径（无中间截断），其他 chunk_size 走低精度路径。
-=======
-    chunk_size=32/64 时 NPU 走全 FP32 路径（无中间截断），其他 chunk_size 走低精度路径。
->>>>>>> b83e57e9 (fix)
     """
     x_np = x.detach().cpu().float().numpy()
     B, T, H, _ = x_np.shape
     
     use_bf16 = (x.dtype == torch.bfloat16)
-<<<<<<< HEAD
     # chunk_size=64 时 NPU 全程 fp32，CPU golden 也用 fp32
     # 其他 chunk_size 时 NPU 走低精度路径，CPU golden 模拟低精度
     use_fp32 = (chunk_size == 64) or high_precision
-=======
-    # chunk 32/64：NPU 全程 fp32，CPU 同精度 golden 也用 fp32，与双标杆分母对齐
-    use_fp32 = (chunk_size in (32, 64)) or high_precision
->>>>>>> b83e57e9 (fix)
     
     result = np.zeros_like(x_np, dtype=np.float32)
     num_chunks = (T + chunk_size - 1) // chunk_size
@@ -502,21 +445,13 @@ def _solve_tri_ref_bsnd(x: torch.Tensor, chunk_size: int, high_precision: bool) 
 def _solve_tri_ref_tnd(x: torch.Tensor, cu_seqlens: List[int], chunk_size: int, high_precision: bool) -> torch.Tensor:
     """TND 格式的 MCH+MBH 标杆。
     
-<<<<<<< HEAD
     chunk_size=64 时 NPU 走全 FP32 路径（无中间截断），其他 chunk_size 走低精度路径。
-=======
-    chunk_size=32/64 时 NPU 走全 FP32 路径（无中间截断），其他 chunk_size 走低精度路径。
->>>>>>> b83e57e9 (fix)
     """
     x_np = x.detach().cpu().float().numpy()
     total_T, H, _ = x_np.shape
     
     use_bf16 = (x.dtype == torch.bfloat16)
-<<<<<<< HEAD
     use_fp32 = (chunk_size == 64) or high_precision
-=======
-    use_fp32 = (chunk_size in (32, 64)) or high_precision
->>>>>>> b83e57e9 (fix)
     
     result = np.zeros_like(x_np, dtype=np.float32)
     num_seqs = len(cu_seqlens) - 1
@@ -550,20 +485,8 @@ def run_cpu(spec: dict[str, Any], high_precision: bool = False):
     
     if layout == "tnd":
         return _solve_tri_ref_tnd(x, inputs["cu_seqlens"], chunk_size, high_precision)
-<<<<<<< HEAD
     else:
         return _solve_tri_ref_bsnd(x, chunk_size, high_precision)
-=======
-    if layout == "ntd":
-        x_tnd = x.permute(1, 0, 2).contiguous()
-        out_tnd = _solve_tri_ref_tnd(x_tnd, inputs["cu_seqlens"], chunk_size, high_precision)
-        return out_tnd.permute(1, 0, 2).contiguous()
-    if layout == "bnsd":
-        x_bsnd = x.permute(0, 2, 1, 3).contiguous()
-        out_bsnd = _solve_tri_ref_bsnd(x_bsnd, chunk_size, high_precision)
-        return out_bsnd.permute(0, 2, 1, 3).contiguous()
-    return _solve_tri_ref_bsnd(x, chunk_size, high_precision)
->>>>>>> b83e57e9 (fix)
 
 
 def _mask_output(out: torch.Tensor, inputs: dict, chunk_size: int) -> torch.Tensor:
@@ -582,18 +505,7 @@ def _mask_output(out: torch.Tensor, inputs: dict, chunk_size: int) -> torch.Tens
         if last_actual < chunk_size:
             s = (num_chunks - 1) * chunk_size
             out[:, s:, :, last_actual:] = 0
-<<<<<<< HEAD
     elif layout == "tnd" and cu_seqlens is not None:
-=======
-    elif layout == "bnsd":
-        B, H, T, _ = out.shape
-        num_chunks = (T + chunk_size - 1) // chunk_size
-        last_actual = T - (num_chunks - 1) * chunk_size
-        if last_actual < chunk_size:
-            s = (num_chunks - 1) * chunk_size
-            out[:, :, s:, last_actual:] = 0
-    elif layout in {"tnd", "ntd"} and cu_seqlens is not None:
->>>>>>> b83e57e9 (fix)
         num_seqs = len(cu_seqlens) - 1
         for seq_idx in range(num_seqs):
             bos = cu_seqlens[seq_idx]
@@ -603,14 +515,7 @@ def _mask_output(out: torch.Tensor, inputs: dict, chunk_size: int) -> torch.Tens
             last_chunk_start = bos + (num_chunks - 1) * chunk_size
             last_actual = eos - last_chunk_start
             if last_actual < chunk_size:
-<<<<<<< HEAD
                 out[last_chunk_start:eos, :, last_actual:] = 0
-=======
-                if layout == "ntd":
-                    out[:, last_chunk_start:eos, last_actual:] = 0
-                else:
-                    out[last_chunk_start:eos, :, last_actual:] = 0
->>>>>>> b83e57e9 (fix)
     return out
 
 
