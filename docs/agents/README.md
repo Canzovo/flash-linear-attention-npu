@@ -2,7 +2,9 @@
 
 本目录按新接口开发的五个阶段组织，每个阶段只维护该阶段需要的输入、方法、输出和退出门禁。仓库级强制约束与任务路由以根目录 `AGENTS.md` 为准；构建、安装、runtime 架构、PR 和 CI 细节保存在各自负责的文档中。
 
-## 新接口开发入口
+## 工作流入口
+
+### 新接口开发
 
 用户必须先提供可定位版本的标杆。Agent 不直接开始写算子，而是按以下顺序分析标杆、生成 CPU 标杆，再完成设计、开发和测试：
 
@@ -14,6 +16,19 @@
   -> 算子开发
   -> 算子测试
 ```
+
+### 算子优化
+
+“优化、提速、降低时延、提升吞吐、减少 workspace”从当前实现进入 `03`，不默认重走 `01`/`02`：
+
+```text
+当前工作树的设计、实现、CPU 标杆、测试和 profiling
+  -> 03 现状与瓶颈分析，更新方案设计
+  -> 04 实施内部优化
+  -> 05 精度、泛化和性能回归
+```
+
+优化任务必须重新读取当前工作树中的阶段文件和算子文档，公开接口、数学语义、支持范围与 CPU 标杆保持不变。需要改变其中任一项时，停止优化并转入新接口或接口变更流程。
 
 ## 五阶段文件
 
@@ -31,6 +46,7 @@
 
 | 任务 | 必读文件 |
 | --- | --- |
+| 优化、提速、降低时延、提升吞吐或减少 workspace | 当前算子的 README/设计、实现和测试，以及 `03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
 | 修改既有接口、属性或支持范围 | `01-interface-confirmation.md`；语义变化时继续读取后四个阶段 |
 | 修改数据依赖、stage、workspace、同步、tiling 或性能策略 | `03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
 | 修改 op_host、kernel、op_api 或 Python 适配 | `04-operator-development.md`、`05-operator-testing.md` |

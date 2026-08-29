@@ -15,6 +15,7 @@
 | 任务类型 | 必读内容 |
 | --- | --- |
 | 新增算子或新公开接口 | 按顺序读取 `docs/agents/01-interface-confirmation.md`、`02-reference-generation.md`、`03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
+| 优化、提速、降低时延、提升吞吐或减少 workspace | 重新读取当前工作树中的 `docs/agents/03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md`，以及当前算子的设计、实现和测试 |
 | 修改既有接口或能力边界 | `docs/agents/01-interface-confirmation.md`；语义变化时继续读取 `02-reference-generation.md` 和后续阶段 |
 | 修改数据流、stage、workspace、同步、tiling 或性能策略 | `docs/agents/03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
 | 修改 op_host、InferShape、kernel、op_api 或 Python 适配 | `docs/agents/04-operator-development.md`、`05-operator-testing.md` 和相邻实现 |
@@ -45,6 +46,26 @@
 5. **算子测试**：以 CPU 标杆为精度依据，完成受影响算子的精度、边界、确定性、内存、性能及必要回归验证。
 
 每个阶段的输出是下一阶段的输入。上游结论变化时，必须回到对应阶段更新文档、CPU 标杆、设计、实现和测试，不能只修改末端代码。
+
+## 算子优化流程
+
+“优化某算子”默认是保持对外行为不变的内部实现优化，不重复执行已经稳定的接口确认和 CPU 标杆生成。每次优化任务必须从当前工作树重新读取 `03`、`04`、`05`、当前算子的 README/设计文档、实现和测试，不得用历史对话摘要代替最新内容。
+
+### 优化基线
+
+- 冻结公开接口和 ABI、数学语义、输入输出与属性、支持范围、CPU 标杆和精度标准。
+- 核对最新设计文档与当前实现是否一致；不一致时先还原真实实现并更新设计基线。
+- 使用当前代码、当前测试资产和当前构建产物完成精度基线，并用 profiling 建立目标 SoC/shape 的性能基线。
+- 先证明 Scalar、MTE、VEC、CUBE、同步等待或资源利用率中的实际瓶颈，再提出优化方案；不得只凭代码观感下结论。
+
+### 优化闭环
+
+1. 在当前算子设计文档中记录瓶颈证据、候选方案、预期收益、影响范围、风险和回退方式。
+2. 评审并选定方案后，按 `docs/agents/04-operator-development.md` 修改 tiling、任务划分、stage、workspace、同步、搬运、模板或流水等内部实现。
+3. 按 `docs/agents/05-operator-testing.md` 完成 CPU 标杆精度、边界、确定性、内存、目标性能和泛化性能回归。
+4. 性能收益必须使用同口径的优化前后 profiling 数据证明；精度未通过的版本不能形成性能结论。
+
+如果优化需要新增或修改公开参数、返回值、默认值、dtype/layout 语义、数学语义、支持范围或 CPU 标杆，应立即停止优化流程，将任务重新归类为接口变更或新功能，并从 `docs/agents/01-interface-confirmation.md` / `02-reference-generation.md` 开始处理。不得把这类变化包装为性能优化。
 
 ## 强制红线
 
