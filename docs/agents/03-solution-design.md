@@ -1,6 +1,6 @@
 # 方案设计
 
-本阶段把已确认接口和 CPU 标杆转换为可评审的 NPU 算子方案。设计必须说明数据如何流动、资源如何规划、各阶段如何同步，以及如何证明精度、泛化和性能。
+本阶段分为两个必须依次完成的步骤：先划分 Stage，再形成具体详设。Stage 划分回答“计算如何分组、数据放在哪里、资源是否装得下”；具体详设回答“每个 Stage 如何实现、调度、同步和验证”。两步都评审通过后才能进入算子开发。
 
 ## 阶段输入
 
@@ -13,102 +13,140 @@
 
 复用相邻算子的计算结构和工程模式，不直接复制其 tile、窗口、slot、同步计数或资源数字。
 
-## 设计文档要求
+## 进入两步设计前
 
-新增算子、新接口、特性修改、融合、较大重构或性能策略调整必须先完成设计文档，至少包含：
+特性修改只设计 [`01-interface-confirmation.md`](01-interface-confirmation.md) 已确认的差异，并显式列出保持不变的接口、语义、支持场景和 CPU 标杆结果。设计中还要给出修改前后的调用图和数据依赖、受影响代码层、兼容策略、新增或变化 case，以及既有场景的回归范围。如果分析发现必须改变尚未确认的接口、语义或支持范围，返回 `01`；如果必须改变 CPU 标杆或预期结果，返回 [`02-reference-generation.md`](02-reference-generation.md)。
 
-1. 本次要完成的内容、本次明确不做的内容、接口摘要和支持矩阵。
-2. 用户提供的参考资料或参考实现、CPU 标杆和关键数学定义。
-3. 修改前后的 L2/L0 调用图与数据依赖图。
-4. stage 划分、AIC/AIV 分工和生产者/消费者关系。
-5. L1、UB、workspace、slot、flag 和生命周期规划。
-6. host tiling、tiling data、TilingKey、模板和多 SoC 差异。
-7. 精度、边界、确定性、内存、性能和回归验证计划。
-8. 风险、兼容性、旧路径收敛和回退方式。
+优化任务不从预设技巧开始。每次都要重新读取当前工作树中的设计文档、实现、CPU 标杆和测试，先确认文档与代码一致，再用固定输入和 profiling 证据定位瓶颈。候选方案若改变 Stage 类型、依赖、数据落点、驻留或容量规划，必须重做第一步；即使 Stage 不变，也要先复核现有划分仍满足本文件规则，再更新第二步详设。
 
-设计中的资源数字必须针对当前算子、目标 shape 和 SoC 重新推导，并写出推导依据。
+优化方案默认冻结公开接口和 ABI、数学语义、输入输出与属性、支持范围、CPU 标杆和精度标准。候选方案需要改变这些内容时，停止优化评审，将任务重新归类为接口变更或特性修改。
 
-## 特性修改方案
+优化任务进入 Stage 划分前还要完成以下现状分析：
 
-特性修改只设计 `01` 已确认的差异，并显式列出保持不变的接口、语义、支持场景和 CPU 标杆结果。设计中说明修改前后的调用图、数据依赖、受影响代码层、兼容策略、新增或变化 case，以及既有场景的回归范围。
+- 对照实际代码还原当前 L2/L0、Stage、workspace、同步、tiling、模板和任务划分；文档过期时先更新现状。
+- 固定目标 SoC、shape、构建产物、测试输入和 profiling 方法，记录当前精度与性能基线。
+- 用 profiling 区分 Scalar、MTE、VEC、CUBE、AIC/AIV wait、资源占用和无效计算等瓶颈，并定位到具体 Stage 和代码路径。
+- 对每个候选方案说明改动点、瓶颈依据、预期收益、适用范围、资源代价、精度与同步风险和回退方式。
+- 比较候选方案后只实施有证据支撑的方案；无法证明瓶颈或收益时，记录当前结论，不为“必须优化”而修改代码。
 
-如果分析发现必须改变尚未确认的接口、语义或支持范围，返回 `01`；如果必须改变 CPU 标杆或预期结果，返回 `02`。公共组件、ABI、生成模板或 runtime 变化仍需展开全部受影响算子，不能只验证提出特性修改的算子。
+## 两步设计门禁
 
-## 优化任务的现状与瓶颈分析
+1. **Stage 划分**：先完成计算依赖图、Cube/Vector 分类、Stage 编号与依赖关系、跨 Stage 数据落点、L1/UB/GM 生命周期和容量证明。本步评审前，不展开 EventID、具体 API 或 kernel 代码。
+2. **具体详设**：以已确认的 Stage 划分为约束，补齐逐 Stage 地址布局、任务映射、数据搬运、同步、workspace、tiling、host、精度、性能和测试方案。
 
-优化任务不从预设技巧开始。每次都要重新读取当前工作树中的设计文档、实现、CPU 标杆和测试，先确认文档与代码一致，再判断现有方案是否还有优化空间。
+第二步发现第一步的依赖、数据落点或资源假设不成立时，必须返回第一步重新划分和评审，不能只在详设或代码中绕过。
 
-1. 对照实际代码还原当前 L2/L0、stage、workspace、同步、tiling、模板和任务划分；文档过期时先更新现状，不在错误基线上设计。
-2. 固定目标 SoC、shape、构建产物、测试输入和 profiling 方法，记录当前精度与性能基线。
-3. 用 profiling 区分 Scalar、MTE、VEC、CUBE、AIC/AIV wait、资源占用或无效计算等瓶颈，并定位到具体 stage 和代码路径。
-4. 对每个候选方案说明改动点、瓶颈依据、预期收益、适用范围、资源代价、精度/同步风险和回退方式。
-5. 比较候选方案后只实施有证据支撑的方案；无法证明瓶颈或收益时，应报告当前结论，不为“必须优化”而修改代码。
+## 第一步：Stage 划分
 
-优化方案默认冻结公开接口和 ABI、数学语义、输入输出与属性、支持范围、CPU 标杆和精度标准。若候选方案需要改变这些内容，停止优化评审，将任务重新归类为接口变更或新功能。
+### 建立完整计算依赖图
 
-## 数据依赖和分层
+先把计算展开为不可遗漏的节点和数据边。每个节点至少记录公式、输入、输出、shape、dtype、有效区、是否为算子最终输出，并标记为 Cube 或 Vector。每条数据边记录生产者、所有消费者、首次和最后使用 Stage，以及最终放在 L1、UB 还是 GM。
 
-先把计算分成三类：
+同时明确 batch、chunk、task、head 和 head ratio 的映射，并覆盖 fixed length、varlen、tail 和 padding。相同数学语义的不同 head 必须统一分析，不得只用单个 head 推导后留下不一致处理。
 
-- 无跨 chunk/task 依赖的大并行计算：优先按 batch、head、chunk、tile 切分，矩阵主路径使用 AIC cube/Catlass。
-- 有串行依赖的状态传播：单独设计阶段、调度和 workspace，明确 carry 的生产与消费顺序。
-- layout、cast、copy、mask 和边界适配：放在合适的 AIV、L0 或 L2 层，避免污染矩阵热路径。
+- **Cube 操作**：矩阵乘及其必要的矩阵累加路径。
+- **Vector 操作**：除矩阵乘以外的逐元素、归约、广播、layout、cast、copy、mask 等操作。
 
-PyTorch 层串联多个算子只能证明功能可组合，不能替代 Ascend C L2/L0 对 workspace、layout、dtype、同步和性能边界的控制。
+### Stage 划分强制规则
 
-## 多阶段协同和 workspace
+以下规则按编号逐条检查。第 14 条是资源冲突时的兜底方式，第 19 条只在其余规则都满足后用于优化 Stage 数量。
 
-多阶段算子必须为每条数据边明确生产者、消费者、owner 和生命周期：
+1. 每个 Stage 只能包含 Cube 操作或 Vector 操作，不能混合两类操作。
+2. Cube Stage 内的计算不能依赖本 Stage 新产生的 Cube 或 Vector 结果；Vector Stage 内的后续计算可以依赖本 Stage 前面产生的 Vector 结果。一个 Stage 完成后，其结果才可作为后继 Stage 的输入。
+3. 容量上限按 L1 `512 KB`、UB `248 KB` 设计。L1 只用于 Cube 路径，UB 只用于 Vector 路径。
+4. Cube 结果后续要被 Vector 使用且不是算子最终输出时，必须放入 UB 驻留区，并为该数据预留 `2` 份等大空间。
+5. Vector 结果后续还要被 Vector 使用且不是算子最终输出时，必须放入 UB 驻留区，并为该数据预留 `2` 份等大空间。
+6. Vector 结果后续要被 Cube 使用时，必须先写入 GM，后续 Cube Stage 再从 GM 读取。
+7. Cube 结果后续还要被 Cube 使用且不是算子最终输出时，必须放入 L1 驻留区，并为该数据预留 `4` 份等大空间。
+8. UB 必须同时容纳当前 Vector Stage 的全部输入、输出、中间量和驻留数据，不能只计算单个操作的容量。
+9. L1 可以常驻其他 tensor，也可以在不同 Stage 改变区域语义；任何常驻数据都必须按 `4` 份等大空间预留。
+10. 同一路径不得把同一份数据重复从 GM 搬入。若同一原始数据同时供 Cube 和 Vector 使用，允许分别从 GM 搬一次到 L1 和 UB。
+11. UB 地址区间的语义可以随 Stage 改变，但必须遵守生命周期，只有该区间中的旧数据全部完成最后一次消费后才能复用。
+12. 不允许通过拆 pass 或分 tile 搬运来降低单个 Stage 的资源需求。一个 Vector Stage 必须一次搬完本 Stage 所需的全部数据，并通过一次 VF 调用完成本 Stage 计算。
+13. 没有依赖关系的 Cube Stage 和 Vector Stage 没有执行顺序约束，容量分析必须按它们可能并行执行处理；两者仍在使用的驻留空间不能重叠。
+14. 只有在前述规则无法同时满足时，才允许通过把数据写回 GM、后续再从 GM 搬入来解除资源冲突；必须记录冲突证据、重复搬运的数据量和性能代价。
+15. 尽量避免连续出现多个 Cube Stage 或连续出现多个 Vector Stage。确实无法合并或交错时，连续同类 Stage 的数量及其中任务都应尽可能少，并说明不能进一步调整的原因。
+16. Vector 路径应尽量避免重复计算；确实需要多次使用的 Vector 结果，优先放入驻留区，并在容量表中记录生命周期。
+17. L1 和 UB 中仍然有效的数据不允许通过内部搬移来整理空间。地址规划必须保留足够大的连续区间，证明不会出现总空闲空间足够但因碎片不连续而无法分配的情况。
+18. 同一语义、不同 head 的数据必须执行相同操作并采用相同的数据落点；禁止一部分 head 驻留 UB、另一部分 head 写回 GM。
+19. 在不牺牲以上任何规则的前提下，Stage 数量应尽可能少。不能为了减少 Stage 数量放宽容量、依赖、搬运、生命周期或 head 一致性要求。
 
-- AIC 负责矩阵主路径和可复用矩阵结果。
-- AIV 负责 gate、scale、mask、cast、padding 和逐元素修饰。
-- workspace 是 producer-consumer 协议的一部分，不只是临时地址。
+如果采用第 14 条后仍无法满足其余规则，应将 Stage 划分标记为阻塞，明确无法同时满足的条件，不能进入具体详设。
 
-每个 workspace slot 都要说明由谁写、由谁读、何时可复用。ready/free flag 必须成对设计；空任务、tail chunk 和 varlen 无效区也要保持计数协议。生产者覆盖 slot 前必须确认消费者已释放。
+### 第一步必须产出
 
-## 维度、任务和 tiling
+1. **完整依赖图**：列出全部公式节点、Cube/Vector 类型、数据边及最终输出。
+2. **Stage 依赖表**：逐 Stage 列出编号、类型、包含的公式、前驱、可并行 Stage、输入来源、输出落点、Stage 内依赖、task/head 映射和任务数；用依赖关系表达偏序，不为无依赖 Stage 强加执行顺序。
+3. **跨 Stage 数据表**：列出 shape、dtype、生产 Stage、消费 Stage、最后消费者、存放位置，以及 UB `2` 份、L1 `4` 份或 GM 的选择依据。
+4. **L1/UB 地址图**：给出每个 Stage 的绝对 offset、大小、份数、owner、首次写入和最后消费；列出可能并行的活跃集合、峰值占用、最大连续空闲区和碎片证明。
+5. **GM/workspace 表**：列出必须写回 GM 的中间量、offset、大小、对齐、生命周期和复用条件；统计同一数据在 Cube/Vector 路径的 GM 读取次数，并单独标注第 14 条产生的重复搬运。
+6. **调度一致性说明**：说明无依赖 Stage 的并行关系、连续同类 Stage 的任务量，以及不同 head 的统一操作和统一数据落点。
+7. **19 条规则检查表**：每条规则给出“满足/不适用/使用第 14 条兜底”的结论和对应图表证据。
 
-- 显式推导 `H_out`/`H_do` 与 `H_qk` 的 head ratio，说明 Q/K head、输出 head 和 workspace slot 的映射。
-- 结合 `K`、`V`、`chunkSize` 推导模板、tile、UB/L1 预算和 workspace。
-- 分别设计 fixed length 与 varlen 的 loop index、batch、token 起点和有效长度映射。
-- host tiling 校验 `cu_seqlens`、`chunk_indices`、shape、属性和尾块约束；kernel 只消费已计算的任务描述。
+### 第一步评审门禁
+
+- 所有计算节点都已分配到且只分配到一个 Stage，Cube/Vector 类型没有混用。
+- 每条依赖边都能由已完成的前序 Stage 或合法的同 Stage Vector 结果提供。
+- 每个活跃集合的 L1 峰值不超过 `512 KB`，UB 峰值不超过 `248 KB`，地址区间连续且生命周期不重叠。
+- 所有驻留数据的份数、最终输出和 GM 中间量都有明确依据。
+- GM 重复搬运只用于第 14 条兜底，并有无法通过正常驻留解决的容量或依赖证明。
+- 已解释 Stage 数量为何不能继续减少，以及连续同类 Stage 为何不能进一步合并或交错。
+
+## 第二步：具体详设
+
+第一步评审通过后，以已确认的 Stage 表、数据落点和容量布局为固定输入形成具体详设。详设至少采用以下结构：
+
+1. 设计目标和范围：目标 SoC、dtype、layout、关键维度、支持场景、性能目标以及本次不处理的场景。
+2. 接口契约摘要：输入、输出、属性、异常和兼容性，保持与 `01` 一致。
+3. 完整数学语义：展开前向或反向公式、计算顺序、中间量和 CPU 标杆对应关系。
+4. Stage 总览：依赖图、Stage 编号与偏序、Cube/Vector 分工，以及修改前后的 L2/L0 调用图。
+5. 逐 Stage 详设：公式和执行顺序、输入输出 shape 与有效区、L1/UB 绝对地址、GM 搬运、task/head 映射、同步和边界处理。
+6. 全局资源设计：L1、UB、GM/workspace、L0、slot 和 flag 的完整地址表、生命周期、活跃集合和 task group 边界。
+7. Host tiling：模板、任务数、offset、TilingKey、多 SoC 差异、参数校验和 workspace 计算。
+8. Kernel 设计：AIC/AIV 分工、Cube/Catlass 配置、Vector API、搬运接口和输出写回。
+9. 同步和流水：producer/consumer、ready/free、event、slot 复用、空任务、tail 和异常路径。
+10. 精度、性能和测试计划：逐 Stage 可观察点、容差、profiling 指标、目标 shape、基线和回归范围。
+11. 风险和交付清单：兼容策略、旧路径收敛、回退条件、未决问题和验证证据。
+
+### 逐 Stage 详设要求
+
+每个 Stage 都必须单独写清：
+
+- 本 Stage 的公式、计算顺序、完整 shape、有效长度和 dtype。
+- 每个输入、中间量和输出的地址区间、大小、对齐、份数、owner、保留与释放时机。
+- 从 GM 搬入、写回 GM、跨 Stage 驻留和 workspace 复用的具体步骤。
+- task、batch、chunk、head 和 head ratio 的映射，以及不同 head 的一致处理方式。
+- fixed length、varlen、tail、padding、空任务和无效区处理。
+- 与前后 Stage 的依赖、同步事件、ready/free 协议和可并行关系。
+
+Cube Stage 还要写明物理 layout、转置方式、L1/L0A/L0B/L0C 规划、MMAD 累加过程和最终 Fixpipe 写出。Vector Stage 必须对应第一步的一次完整输入搬运和一次 VF 调用，不得在详设中重新拆成 pass 或 tile。
+
+### 全局资源、tiling 和同步要求
+
+- 同时给出逐 Stage 和全局活跃集合的 L1/UB 峰值、最大连续空闲区及碎片证明，不能只列 tensor 大小之和。
+- workspace 的每个区域都要说明 producer、consumer、offset、大小、对齐、生命周期、释放和复用条件。
+- 显式推导输出 head 与 Q/K head 的 ratio，以及 fixed length、varlen、tail 的任务映射。
+- host tiling 校验输入 shape、属性、`cu_seqlens`、`chunk_indices`、尾块和 workspace 上限；kernel 只消费已验证的任务描述。
 - 编译期模板承载 dtype、固定维度和改变核心路径的选项；运行时 tiling 承载规模、offset、layout、workspace 和任务划分。
-- 不为每个属性组合滥用 TilingKey，不把平台或模板选择泄漏为新的公开/L0 参数。
+- 不为每个属性组合滥用 TilingKey，不把平台或模板选择泄漏为新的公开接口或 L0 参数；必须枚举全部可达 TilingKey 及选择条件。
+- 搬运和计算采用批量路径，避免在热路径中逐元素标量访问。
+- tail 和 partial chunk 优先通过 padding、中性值和有效区 mask 保持已设计的 Cube/Vector 路径，不用标量或 Vector 计算替代矩阵主路径。
+- `PipeBarrier<PIPE_V>()` 不能替代跨 pipe、跨核或 producer-consumer 同步；每个 event 和 flag 必须有成对的生产、消费和复用协议。
+- PyTorch 层串联多个算子只能证明功能可组合，不能替代 Ascend C L2/L0 对 workspace、layout、dtype、同步和性能边界的控制。
+- 公共组件、ABI、生成模板或 runtime 发生变化时，必须列出并测试所有受影响算子。
 
-建议将 fixed/varlen offset 逻辑封装为统一 strategy，并在设计中枚举全部可达 TilingKey 及其选择条件。
+精度计划不能只检查最终输出。需要为关键中间量、Stage、chunk、head、状态和最终输出定义可观察点；写明累加 dtype、workspace dtype、计算顺序、cast 时机、容差和阈值依据，并区分结构性错误、数值误差、padding/无效区和非确定性问题的定位方式。
 
-## 搬运和同步方案
+性能计划先判断预期 bound，再定义目标 shape、当前基线、目标值、泛化矩阵和模板适用范围。Scalar、MTE、VEC、CUBE 和 AIC/AIV wait 都要指定对应的 profiling 证据；候选优化没有达到预期时，仍须保持既有功能范围和正确实现路径。
 
-- 热路径尽量整行或整 tile 连续搬运，避免内层循环的小搬运和逐元素标量访问。
-- double buffer 必须让 MTE 与 VEC/CUBE 实际重叠，并说明各 buffer 的 owner 切换时机。
-- UB slot 更换 owner 前闭合跨 pipe 生命周期；`PipeBarrier<PIPE_V>()` 不能替代 MTE/V、MTE/CUBE 或 MTE3 事件。
-- 尾块优先使用 padding 和中性值继续走批量 cube/vector 路径，不用 scalar/vector 替代矩阵主路径。
-- 明确 cross-core flag、pipe event、MTE3 写回、workspace 复用和异常/空任务路径的同步关系。
+### 第二步评审门禁
 
-## 精度和性能计划
+- 详设与第一步确认的 Stage 类型、依赖、数据落点、驻留份数和容量布局一致。
+- 接口契约、CPU 标杆、数学公式、依赖图和逐 Stage 公式一致。
+- 每个 L1/UB/GM 区域、workspace、slot、flag 和 event 都有唯一 owner 和完整生命周期。
+- 所有支持维度、边界、SoC、TilingKey 和可达分支都有实现及测试计划。
+- 特性修改覆盖已确认差异，并为保持不变的既有行为定义回归范围。
+- 优化任务记录当前基线、瓶颈证据、Stage 复核结论、优化前后比较口径和预期收益。
+- 风险、兼容策略、旧路径删除条件、回退方案和未决问题明确。
 
-精度计划应说明如何用 CPU 标杆逐阶段对比，而不只检查最终输出：
-
-- 为关键中间量、chunk、head、状态和最终输出定义可观察点。
-- 区分结构性错误、数值误差、padding/无效区和非确定性问题的定位路径。
-- 明确累加 dtype、workspace dtype、算法迭代、混合容差和阈值依据。
-
-性能计划应先判断预期 bound，再定义目标：
-
-- Scalar、MTE、VEC、CUBE 和 AIC/AIV wait 分别使用什么 profiling 证据。
-- 目标 shape、基线、目标值、泛化矩阵和模板优势域。
-- 性能优化失败时如何保持既有功能范围和 correctness 路径。
-
-## 阶段输出
-
-设计评审前确认：
-
-- 接口、CPU 标杆、调用图和数据依赖一致。
-- 每个 stage、workspace、slot、flag 和同步事件都有唯一职责。
-- 所有支持维度、边界、SoC 和可达 TilingKey 有实现及测试计划。
-- 公共组件或 ABI 改动已展开所有受影响算子和回归范围。
-- 风险、兼容策略、旧路径删除条件和回退方案明确。
-- 特性修改已覆盖确认的差异，并为未受影响的既有行为定义回归范围。
-- 优化任务已记录当前基线、瓶颈证据、优化前后比较口径和预期收益。
-
-设计评审通过后，进入 [`04-operator-development.md`](04-operator-development.md)。未经确认的设计不得通过实现细节固化。
+两步均评审通过后，进入 [`04-operator-development.md`](04-operator-development.md)。未经确认的 Stage 划分和具体详设不得通过实现细节固化。

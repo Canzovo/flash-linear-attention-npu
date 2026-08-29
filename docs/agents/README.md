@@ -16,7 +16,7 @@
        -> 只有 NPU 服务器：独立运行 Triton Ascend 参考实现
        -> 用户直接提供 CPU 标杆：验收并补全
   -> 完成 CPU 标杆对齐或验收
-  -> 方案设计
+  -> 方案设计：Stage 划分 -> 具体详设
   -> 算子开发
   -> 算子测试
 ```
@@ -30,9 +30,9 @@ GPU 和 Triton Ascend 路径都使用相同输入与 CPU 标杆比较。用户�
 ```text
 当前算子 + 本次特性要求
   -> 接口、语义、支持范围或 CPU 标杆需要变化
-       -> 01 差异确认 -> 02 标杆更新或验收 -> 03 -> 04 -> 05
+       -> 01 差异确认 -> 02 标杆更新或验收 -> 03 Stage 划分和具体详设 -> 04 -> 05
   -> 接口和 CPU 标杆不变，只修复已支持场景
-       -> 03 修复方案 -> 04 实施 -> 05 新旧场景回归
+       -> 03 Stage 复核或重新划分，并形成修复详设 -> 04 实施 -> 05 新旧场景回归
   -> 仅内部性能变化
        -> 转入算子优化流程
 ```
@@ -45,7 +45,7 @@ GPU 和 Triton Ascend 路径都使用相同输入与 CPU 标杆比较。用户�
 
 ```text
 当前工作树的设计、实现、CPU 标杆、测试和 profiling
-  -> 03 现状与瓶颈分析，更新方案设计
+  -> 03 现状与瓶颈分析，复核或重做 Stage 划分，再更新具体详设
   -> 04 实施内部优化
   -> 05 精度、泛化和性能回归
 ```
@@ -58,8 +58,8 @@ GPU 和 Triton Ascend 路径都使用相同输入与 CPU 标杆比较。用户�
 | --- | --- | --- | --- | --- |
 | 1. 接口确认 | [`01-interface-confirmation.md`](01-interface-confirmation.md) | 用户提供的参考资料、需求和支持范围 | 接口契约、能力边界、待确认问题 | 用户确认接口和语义 |
 | 2. 标杆生成 | [`02-reference-generation.md`](02-reference-generation.md) | 已确认接口、用户提供的参考实现或 CPU 标杆 | 参考实现分析、独立 CPU 标杆、基础对齐 case | CPU 标杆完成对齐或验收，差异已闭环 |
-| 3. 方案设计 | [`03-solution-design.md`](03-solution-design.md) | 接口契约、CPU 标杆、目标 SoC/性能要求 | 算子设计文档和验证计划 | 设计评审通过 |
-| 4. 算子开发 | [`04-operator-development.md`](04-operator-development.md) | 已确认设计、CPU 标杆、相邻实现 | op_host、tiling、kernel、op_api 和适配代码 | 实现与前三阶段产物一致，基础精度可运行 |
+| 3. 方案设计 | [`03-solution-design.md`](03-solution-design.md) | 接口契约、CPU 标杆、目标 SoC/性能要求 | Stage 划分方案、具体详设和验证计划 | Stage 划分与具体详设分别评审通过 |
+| 4. 算子开发 | [`04-operator-development.md`](04-operator-development.md) | 已确认的 Stage 划分和具体详设、CPU 标杆、相邻实现 | op_host、tiling、kernel、op_api 和适配代码 | 实现与前三阶段产物一致，基础精度可运行 |
 | 5. 算子测试 | [`05-operator-testing.md`](05-operator-testing.md) | 当前实现、CPU 标杆、接口与设计 | 精度、边界、确定性、内存、性能和回归结论 | 所有必测项闭环，未执行项已说明 |
 
 上游产物发生变化时，从对应阶段重新向后检查，不能只修改某个下游文件。
