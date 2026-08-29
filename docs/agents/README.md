@@ -19,11 +19,11 @@
 
 | 阶段 | 文件 | 主要输入 | 阶段输出 | 退出门禁 |
 | --- | --- | --- | --- | --- |
-| 1. 接口确认 | [`interface-confirmation.md`](interface-confirmation.md) | 用户标杆、需求和支持范围 | 接口契约、能力边界、待确认问题 | 用户确认接口和语义 |
-| 2. 标杆生成 | [`reference-generation.md`](reference-generation.md) | 已确认接口、用户标杆 | 标杆分析、独立 CPU 标杆、基础对齐 case | CPU 标杆与用户标杆对齐，差异已闭环 |
-| 3. 方案设计 | [`solution-design.md`](solution-design.md) | 接口契约、CPU 标杆、目标 SoC/性能要求 | 算子设计文档和验证计划 | 设计评审通过 |
-| 4. 算子开发 | [`operator-development.md`](operator-development.md) | 已确认设计、CPU 标杆、相邻实现 | op_host、tiling、kernel、op_api 和适配代码 | 实现与前三阶段产物一致，基础精度可运行 |
-| 5. 算子测试 | [`operator-testing.md`](operator-testing.md) | 当前实现、CPU 标杆、接口与设计 | 精度、边界、确定性、内存、性能和回归结论 | 所有必测项闭环，未执行项已说明 |
+| 1. 接口确认 | [`01-interface-confirmation.md`](01-interface-confirmation.md) | 用户标杆、需求和支持范围 | 接口契约、能力边界、待确认问题 | 用户确认接口和语义 |
+| 2. 标杆生成 | [`02-reference-generation.md`](02-reference-generation.md) | 已确认接口、用户标杆 | 标杆分析、独立 CPU 标杆、基础对齐 case | CPU 标杆与用户标杆对齐，差异已闭环 |
+| 3. 方案设计 | [`03-solution-design.md`](03-solution-design.md) | 接口契约、CPU 标杆、目标 SoC/性能要求 | 算子设计文档和验证计划 | 设计评审通过 |
+| 4. 算子开发 | [`04-operator-development.md`](04-operator-development.md) | 已确认设计、CPU 标杆、相邻实现 | op_host、tiling、kernel、op_api 和适配代码 | 实现与前三阶段产物一致，基础精度可运行 |
+| 5. 算子测试 | [`05-operator-testing.md`](05-operator-testing.md) | 当前实现、CPU 标杆、接口与设计 | 精度、边界、确定性、内存、性能和回归结论 | 所有必测项闭环，未执行项已说明 |
 
 上游产物发生变化时，从对应阶段重新向后检查，不能只修改某个下游文件。
 
@@ -31,10 +31,10 @@
 
 | 任务 | 必读文件 |
 | --- | --- |
-| 修改既有接口、属性或支持范围 | `interface-confirmation.md`；语义变化时继续读取后四个阶段 |
-| 修改数据依赖、stage、workspace、同步、tiling 或性能策略 | `solution-design.md`、`operator-development.md`、`operator-testing.md` |
-| 修改 op_host、kernel、op_api 或 Python 适配 | `operator-development.md`、`operator-testing.md` |
-| 修改 ATK、精度、性能或回归用例 | `operator-testing.md`、[`../../tests/atk/README.md`](../../tests/atk/README.md) 和当前算子的 ATK README |
+| 修改既有接口、属性或支持范围 | `01-interface-confirmation.md`；语义变化时继续读取后四个阶段 |
+| 修改数据依赖、stage、workspace、同步、tiling 或性能策略 | `03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
+| 修改 op_host、kernel、op_api 或 Python 适配 | `04-operator-development.md`、`05-operator-testing.md` |
+| 修改 ATK、精度、性能或回归用例 | `05-operator-testing.md`、[`../../tests/atk/README.md`](../../tests/atk/README.md) 和当前算子的 ATK README |
 | 修改公共组件、ABI、代码生成模板或 runtime | [`../architecture/torch-npu-decoupled-architecture.md`](../architecture/torch-npu-decoupled-architecture.md) 和所有受影响算子的阶段文档 |
 
 ## 内容边界

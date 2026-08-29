@@ -4,9 +4,9 @@
 
 ## 阶段输入
 
-- [`interface-confirmation.md`](interface-confirmation.md) 输出的接口契约。
-- [`reference-generation.md`](reference-generation.md) 输出的 CPU 标杆和对齐 case。
-- [`solution-design.md`](solution-design.md) 输出的评审通过设计。
+- [`01-interface-confirmation.md`](01-interface-confirmation.md) 输出的接口契约。
+- [`02-reference-generation.md`](02-reference-generation.md) 输出的 CPU 标杆和对齐 case。
+- [`03-solution-design.md`](03-solution-design.md) 输出的评审通过设计。
 - 当前算子的相邻实现、生成输入、构建入口和代码规范。
 
 任一输入缺失或互相冲突时，返回对应阶段修正，不在代码中增加隐藏限制或临时语义。
@@ -88,4 +88,4 @@
 - 没有把构建产物、调试输出、profiling 数据、缓存或临时脚本加入提交。
 - 实现中发现的新限制、风险或设计变化已回写上游阶段文档。
 
-完成开发期自检后，按 [`operator-testing.md`](operator-testing.md) 执行正式验证。
+完成开发期自检后，按 [`05-operator-testing.md`](05-operator-testing.md) 执行正式验证。

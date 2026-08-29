@@ -14,11 +14,11 @@
 
 | 任务类型 | 必读内容 |
 | --- | --- |
-| 新增算子或新公开接口 | 按顺序读取 `docs/agents/interface-confirmation.md`、`reference-generation.md`、`solution-design.md`、`operator-development.md`、`operator-testing.md` |
-| 修改既有接口或能力边界 | `docs/agents/interface-confirmation.md`；语义变化时继续读取 `reference-generation.md` 和后续阶段 |
-| 修改数据流、stage、workspace、同步、tiling 或性能策略 | `docs/agents/solution-design.md`、`operator-development.md`、`operator-testing.md` |
-| 修改 op_host、InferShape、kernel、op_api 或 Python 适配 | `docs/agents/operator-development.md`、`operator-testing.md` 和相邻实现 |
-| 修改或新增 ATK 用例 | `docs/agents/operator-testing.md`、`tests/atk/README.md` 和当前算子的 ATK README |
+| 新增算子或新公开接口 | 按顺序读取 `docs/agents/01-interface-confirmation.md`、`02-reference-generation.md`、`03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
+| 修改既有接口或能力边界 | `docs/agents/01-interface-confirmation.md`；语义变化时继续读取 `02-reference-generation.md` 和后续阶段 |
+| 修改数据流、stage、workspace、同步、tiling 或性能策略 | `docs/agents/03-solution-design.md`、`04-operator-development.md`、`05-operator-testing.md` |
+| 修改 op_host、InferShape、kernel、op_api 或 Python 适配 | `docs/agents/04-operator-development.md`、`05-operator-testing.md` 和相邻实现 |
+| 修改或新增 ATK 用例 | `docs/agents/05-operator-testing.md`、`tests/atk/README.md` 和当前算子的 ATK README |
 | 修改公共组件、ABI、代码生成模板或 Python runtime | `docs/architecture/torch-npu-decoupled-architecture.md`，并识别全部受影响算子 |
 | 修改 wheel、OPP、构建或安装流程 | `docs/开发者指南.md` 和相关构建脚本 |
 | 修改 PR、分支、CODEOWNERS 或 CI 规则 | `docs/repository-rules.md`、`.github/pull_request_template.md` 和现有 workflow |

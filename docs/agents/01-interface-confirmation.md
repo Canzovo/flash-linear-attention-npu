@@ -60,4 +60,4 @@
 5. 边界、异常及兼容性规则。
 6. 尚未解决的问题和需要用户选择的差异。
 
-只有接口和语义获得用户确认，且没有阻塞性歧义，才进入 [`reference-generation.md`](reference-generation.md)。
+只有接口和语义获得用户确认，且没有阻塞性歧义，才进入 [`02-reference-generation.md`](02-reference-generation.md)。

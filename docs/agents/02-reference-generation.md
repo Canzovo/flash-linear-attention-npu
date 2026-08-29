@@ -4,7 +4,7 @@
 
 ## 阶段输入
 
-- [`interface-confirmation.md`](interface-confirmation.md) 输出的已确认接口契约。
+- [`01-interface-confirmation.md`](01-interface-confirmation.md) 输出的已确认接口契约。
 - 用户提供的固定版本标杆、测试和示例。
 - 用户确认的支持范围、性能目标及非目标。
 
@@ -69,4 +69,4 @@ CPU 标杆只作为 golden 和语义说明，不作为生产路径的 correctnes
 5. 用户标杆与 CPU 标杆的对齐结果。
 6. 已知差异、限制和剩余风险。
 
-CPU 标杆与用户标杆在代表性 case 上对齐，且语义差异全部闭环后，进入 [`solution-design.md`](solution-design.md)。
+CPU 标杆与用户标杆在代表性 case 上对齐，且语义差异全部闭环后，进入 [`03-solution-design.md`](03-solution-design.md)。

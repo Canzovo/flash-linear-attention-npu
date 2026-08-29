@@ -89,4 +89,4 @@ PyTorch 层串联多个算子只能证明功能可组合，不能替代 Ascend C
 - 公共组件或 ABI 改动已展开所有受影响算子和回归范围。
 - 风险、兼容策略、旧路径删除条件和回退方案明确。
 
-设计评审通过后，进入 [`operator-development.md`](operator-development.md)。未经确认的设计不得通过实现细节固化。
+设计评审通过后，进入 [`04-operator-development.md`](04-operator-development.md)。未经确认的设计不得通过实现细节固化。
