@@ -9,10 +9,21 @@
 
 #include <cstdint>
 
-#include "chunk_fwd_h_tiling_key.h"
 #include "kernel_operator.h"
 
 namespace GDN {
+
+enum class FwdHGateMode : uint8_t {
+    SCALAR_G = 0,
+    KEY_GK = 1,
+};
+
+template <FwdHGateMode GATE_MODE_, bool USE_EXP2_, bool STATE_FP32_>
+struct FwdHCompilePolicy {
+    static constexpr FwdHGateMode GATE_MODE = GATE_MODE_;
+    static constexpr bool USE_EXP2 = USE_EXP2_;
+    static constexpr bool STATE_FP32 = STATE_FP32_;
+};
 
 constexpr uint32_t FWD_H_CHUNK = 64;
 constexpr uint32_t FWD_H_K = 128;
@@ -142,14 +153,7 @@ struct FwdHRuntimeTiling {
     uint64_t hWorkspaceOffset = 0;
     bool useInitialState = false;
     bool storeFinalState = false;
-    uint8_t dataType = 0;
-    uint8_t gDataType = 0;
-    uint8_t stateDataType = 0;
     bool isVariedLen = false;
-    bool useG = false;
-    bool useGk = false;
-    bool useExp2 = false;
-    bool stateVFirst = false;
 };
 
 struct FwdHKernelArgs {

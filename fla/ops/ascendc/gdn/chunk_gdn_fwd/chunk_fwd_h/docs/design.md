@@ -166,15 +166,9 @@ head round 的展开数组。kernel 在进入 chunk 循环前，按 `kNumHead/vN
 | `chunkSize` | 当前固定为 64 |
 | `useInitialState` | 是否读取 initial_state |
 | `storeFinalState` | 是否生成并写 final_state |
-| `dataType` | k/w/u dtype 枚举，当前为 BF16 |
-| `gDataType` | g 或 gk 的 dtype 枚举 |
-| `stateDataType` | rolling/final state dtype 枚举；无初态且无 final_state 时为 FP32 |
 | `isVariedLen` | 是否启用 varlen 调度 |
 | `shapeBatch` | dense 的物理 batch；varlen 固定为 1 |
 | `tokenBatch` | varlen 的 sequence 数；dense 固定为 1 |
-| `useG` / `useGk` | gate 模式，二者严格一真一假 |
-| `useExp2` | gate 指数函数是否使用 exp2 |
-| `stateVFirst` | state 物理布局为 `[V,K]` 还是 `[K,V]` |
 | `vWorkspaceOffset` | A2/A3 P 的 GM scratch，按 FP32 slot stride 预留 `[blockDim,4,64,128]`；实际元素为 PType |
 | `vUpdateWorkspaceOffset` | Stage1 BF16 right 的 GM workspace，形状为 `[blockDim,4,64,128]` |
 | `kDecayWorkspaceOffset` | FP32 rolling state 的 GM workspace，形状为 `[blockDim,4,128,128]`；A5 每 AIV 单 head 的常驻路径不访问该段，3/4-head fallback 仍使用 |
@@ -184,3 +178,27 @@ workspace 的 core 维使用实际 `blockDim`，各段按 512 Byte 对齐，并�
 之后额外保留运行时安全区。
 A5 的 P/D 走 L0C->AIV UB，不消费对应的 P/D GM scratch；为保持跨架构统一 tiling，offset
 仍由 host 生成，但 A5 kernel 不访问这些地址。
+
+## 9. 模板参数与 TilingKey
+
+`ChunkFwdH` 的 kernel 全局入口按以下顺序声明六个编译期模板参数：
+
+1. `D_T_G`：g/gk dtype，支持 BF16、FP32；
+2. `V_DIM`：value head dim，当前仅注册 128；
+3. `USE_GK`：scalar-g 或 key-gk；
+4. `USE_EXP2`：exp 或 exp2；
+5. `STATE_FP32`：rolling/final state 为 BF16 或 FP32；
+6. `STATE_V_FIRST`：state 布局为 `[K,V]` 或 `[V,K]`。
+
+模板声明共注册 `2 x 1 x 2 x 2 x 2 x 2 = 32` 个可达实例。host 在完成 dtype、shape、
+gate 模式和 state 输出校验后，以完全相同的参数顺序调用 `GET_TPL_TILING_KEY`；kernel 直接由
+对应实例构造 `GateT`、`FwdHCompilePolicy` 和 state offset，不再读取 tiling 数据做 gate mode、
+指数函数、state dtype 或 state layout 的运行时分派。
+
+state dtype 的模板选择保持运行语义优先级：存在 `initial_state` 时取 initial dtype；无 initial
+但写 final state 时取 final output dtype；二者都不存在时 rolling state 固定选择 FP32。
+`STATE_V_FIRST` 同时用于编译期 state 地址映射，避免热路径中的 layout 条件分支。
+
+代码不维护手写数值 key，也不在 kernel 内使用 `TILING_KEY_IS` 做二次分派。TilingKey 数值由
+目标 CANN 根据模板声明编码，只用于 host、binary metadata 和 runtime 之间的选择闭环，不作为
+公开接口或跨版本稳定语义。
