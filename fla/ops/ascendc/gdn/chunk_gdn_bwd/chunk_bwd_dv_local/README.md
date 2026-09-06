@@ -181,6 +181,15 @@ B = 1
 
 ---
 
+### 4.5 核间同步与 QK 流水
+
+- Cube 通过 3 个 GM ring slot 预填 QK，并为每个 QK head 向两个 Vector 子核发送一次 ready。
+- 两个 Vector 子核消费 ready 后立即共同返回一个 QK free credit；Cube 在淘汰对应的旧 head 时消费该 credit。因此未消费的 QK ready 最多为 3 个，不会触及硬件 flag 计数上限。
+- QK free credit 只负责限制 ready 的在途数量；gated-ready 握手仍保证所有 `hRatio` 个 gated workspace 写回完成后，Cube 才复用对应的 QK slot。
+- QK 与 gated-ready 不使用相同的批量反向确认节奏，避免高 `hRatio` 下两条同步链在计数边界相互等待。
+
+---
+
 ## 5. Torch 测试调用示例
 
 ### 5.1 定长场景（Padding-mode）
