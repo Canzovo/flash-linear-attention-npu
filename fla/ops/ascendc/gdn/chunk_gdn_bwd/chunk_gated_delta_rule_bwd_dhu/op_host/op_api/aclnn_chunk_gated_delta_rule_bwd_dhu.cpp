@@ -86,9 +86,6 @@ static aclnnStatus CheckDtype(ChunkGatedDeltaRuleBwdDhuParams params)
 
 static aclnnStatus DataContiguous(const aclTensor *&tensor, aclOpExecutor *executor)
 {
-    if (IsContiguous(tensor)) {
-        return ACLNN_SUCCESS;
-    }
     tensor = l0op::Contiguous(tensor, executor);
     CHECK_RET(tensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
     return ACLNN_SUCCESS;
