@@ -19,6 +19,7 @@ signature here.
 from __future__ import annotations
 
 import ctypes
+import numbers
 import sys
 
 from ._kda_policy import (
@@ -1819,6 +1820,7 @@ def npu_recurrent_gated_delta_rule(
 
     op_name = "npu_recurrent_gated_delta_rule"
     required_dim = 128
+
     if g is None and gk is None:
         raise RuntimeError(f"{op_name}: either g or gk must be provided.")
 
@@ -1971,9 +1973,16 @@ def npu_recurrent_gated_delta_rule(
             f"{op_name}: Nv must be an integer multiple of Nk, got Nv={value_heads}, Nk={key_heads}."
         )
 
+    if scale is not None and (
+        not isinstance(scale, numbers.Real) or isinstance(scale, numbers.Integral)
+    ):
+        raise RuntimeError(
+            f"{op_name}: scale must be a floating-point number, got {type(scale)!r}."
+        )
+
     scale = _optional_float(scale, 1.0)
     if not math.isfinite(scale):
-        raise ValueError(f"{op_name}: scale must be finite, got {scale}.")
+        raise RuntimeError(f"{op_name}: scale must be finite, got {scale}.")
 
     def nd_tensor(ctx, tensor, name):
         if tensor is None:
