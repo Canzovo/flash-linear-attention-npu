@@ -10,7 +10,7 @@
 
 - q/k/v：四维，FP16/BF16；q/k shape 相同。
 - BNSD/NTD：q/k 为 [B,Hk,T,K]，v 为 [B,Hv,T,V]；A2/A3/A5 支持。
-- BSND/TND：q/k 为 [B,T,Hk,K]，v 为 [B,T,Hv,V]；A2/A3 原生支持，A5 本路径暂不支持。
+- BSND/TND：q/k 为 [B,T,Hk,K]，v 为 [B,T,Hv,V]；A2 原生支持，其他产品本路径暂不支持。
 - g/beta：固定 [B,T,Hv]，FP32 或与 q 同 dtype；内部转为 FP32 后计算。
 - initial_state：可选 [N,Hv,K,V]，FP32 或与 q 同 dtype。
 - cu_seqlens/chunk_indices：同时提供或同时省略；变长输入物理 B=1，累计长度从0开始、以T结束，chunk索引按 sequence-major 顺序。
