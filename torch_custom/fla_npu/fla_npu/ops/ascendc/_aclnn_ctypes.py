@@ -19,6 +19,7 @@ signature here.
 from __future__ import annotations
 
 import ctypes
+import sys
 
 from ._kda_policy import kda_fwd_optional_output_mask
 from ._runtime import (
