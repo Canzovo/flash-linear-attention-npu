@@ -23,8 +23,30 @@ const std::array<const aclTensor *, 1> ChunkFwdO(
     const aclIntArray *chunkOffsetsOptional,
     double scale,
     int64_t chunkSize,
+    bool useExp2,
+    bool stateVFirst,
+    const char *outputLayout,
     const aclTensor *oOut,
     aclOpExecutor *executor);
+
+
+// 保留v26.9.0的L0调用合同；融合prepare路径使用上方扩展签名。
+inline const std::array<const aclTensor *, 1> ChunkFwdO(
+    const aclTensor *q,
+    const aclTensor *k,
+    const aclTensor *v,
+    const aclTensor *h,
+    const aclTensor *g,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkOffsetsOptional,
+    double scale,
+    int64_t chunkSize,
+    const aclTensor *oOut,
+    aclOpExecutor *executor)
+{
+    return ChunkFwdO(q, k, v, h, g, cuSeqlensOptional, chunkOffsetsOptional,
+                     scale, chunkSize, false, false, "BNSD", oOut, executor);
+}
 }
 
 #endif
