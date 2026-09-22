@@ -23,7 +23,11 @@ import sys
 
 from ._kda_policy import kda_fwd_optional_output_mask
 from ._runtime import (
+    ACL_FORMAT_NCDHW,
+    ACL_FORMAT_NCHW,
+    ACL_FORMAT_NCL,
     ACL_FORMAT_ND,
+    acl_format as _acl_format,
     call_aclnn as _runtime_call_aclnn,
     chunk_num as _chunk_num,
     empty as _empty,
