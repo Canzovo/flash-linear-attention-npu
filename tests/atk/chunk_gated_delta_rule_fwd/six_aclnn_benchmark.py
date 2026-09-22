@@ -137,8 +137,6 @@ def run_six_aclnn_core(
         chunk_size=chunk_size,
         transpose_state_layout=False,
     )
-    # v26.9.0保留独立FwdO的BHTV输出合同，转换到融合算子的公开BTHV布局。
-    o = o.transpose(1, 2).contiguous()
     if not output_final_state:
         final_state = None
     return o, final_state, g_head_first.transpose(1, 2).contiguous(), a
