@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * the BSD 3-Clause License (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- */
+ * Copyright (c) 2026 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
 
-#ifndef CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_MULTI_HPP
-#define CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_MULTI_HPP
+#ifndef CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_GDN_FWD_O_HPP
+#define CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_GDN_FWD_O_HPP
 
 #include "catlass/catlass.hpp"
 #include "catlass/arch/resource.hpp"
@@ -24,9 +24,10 @@
 namespace Catlass::Gemm {
 
 template <class ArchTag_, bool ENABLE_UNIT_FLAG_ = false, bool USE_HF32_MODE_ = false, uint32_t L0C_STAGES_ = 1,
-    bool ENABLE_L1_RESIDENT_ = false, uint32_t L1A_STAGES_ = 2, uint32_t L1B_STAGES_ = 2, uint32_t L0A_STAGES_ = 2,
+    bool ENABLE_L1_RESIDENT_ = false, bool SHARE_L1A_ = false,
+    uint32_t L1A_STAGES_ = 2, uint32_t L1B_STAGES_ = 2, uint32_t L0A_STAGES_ = 2,
     uint32_t L0B_STAGES_ = 2>
-struct MmadPingpongTlaMulti : public MmadBase<ArchTag_, false> {
+struct MmadPingpongTlaGdnFwdO : public MmadBase<ArchTag_, false> {
     static constexpr uint32_t L1A_STAGES = L1A_STAGES_;
     static constexpr uint32_t L1B_STAGES = L1B_STAGES_;
     static constexpr uint32_t L0A_STAGES = L0A_STAGES_;
@@ -35,6 +36,7 @@ struct MmadPingpongTlaMulti : public MmadBase<ArchTag_, false> {
     static constexpr bool ENABLE_UNIT_FLAG = ENABLE_UNIT_FLAG_;
     static constexpr bool USE_HF32_MODE = USE_HF32_MODE_;
     static constexpr bool ENABLE_L1_RESIDENT = ENABLE_L1_RESIDENT_;
+    static constexpr bool SHARE_L1A = SHARE_L1A_;
 };
 
 }  // namespace Catlass::Gemm
@@ -47,6 +49,7 @@ template <
     bool USE_HF32_MODE_,
     uint32_t L0C_STAGES_,
     bool ENABLE_L1_RESIDENT_,
+    bool SHARE_L1A_,
     uint32_t L1A_STAGES_,
     uint32_t L1B_STAGES_,
     uint32_t L0A_STAGES_,
@@ -61,8 +64,8 @@ template <
     class TileMmad_
 >
 struct BlockMmadTla <
-    MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, L1A_STAGES_,
-        L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>,
+    MmadPingpongTlaGdnFwdO<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_, SHARE_L1A_,
+        L1A_STAGES_, L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>,
     L1TileShape_,
     L0TileShape_,
     ElementA_,
@@ -74,8 +77,8 @@ struct BlockMmadTla <
 > {
 public:
     // Type Aliases
-    using DispatchPolicy = MmadPingpongTlaMulti<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_,
-        L1A_STAGES_, L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>;
+    using DispatchPolicy = MmadPingpongTlaGdnFwdO<ArchTag_, ENABLE_UNIT_FLAG_, USE_HF32_MODE_, L0C_STAGES_, ENABLE_L1_RESIDENT_,
+        SHARE_L1A_, L1A_STAGES_, L1B_STAGES_, L0A_STAGES_, L0B_STAGES_>;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using TileCopy = TileCopy_;
     using L1TileShape = L1TileShape_;
@@ -114,6 +117,7 @@ public:
     static constexpr bool ENABLE_UNIT_FLAG = DispatchPolicy::ENABLE_UNIT_FLAG;
     static constexpr bool USE_HF32_MODE = DispatchPolicy::USE_HF32_MODE;
     static constexpr bool ENABLE_L1_RESIDENT = DispatchPolicy::ENABLE_L1_RESIDENT;
+    static constexpr bool SHARE_L1A = DispatchPolicy::SHARE_L1A;
     static constexpr uint32_t L1A_STAGES = DispatchPolicy::L1A_STAGES;
     static constexpr uint32_t L1B_STAGES = DispatchPolicy::L1B_STAGES;
     static constexpr uint32_t L0A_STAGES = DispatchPolicy::L0A_STAGES;
@@ -237,7 +241,6 @@ public:
                     l0CEventList[i] = i;
                 }
             } else {
-                l0CEventList[0] = 0;
                 l0CTensorList[0] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(0);
             }
             if constexpr (HAS_BIAS) {
@@ -329,7 +332,7 @@ public:
     /// Perform a block-scoped matrix multiply-accumulate
     template <class TensorA, class TensorB, class TensorC, class TensorBias = EmptyClass>
     CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape,
-        TensorBias const &tensorBias = {}, bool clearL1Padding = false)
+        TensorBias const &tensorBias = {})
     {
         // Check L1TileShape
         if constexpr (HAS_BIAS) {
@@ -374,24 +377,18 @@ public:
         uint32_t kL1Actual = min(kBlockActual, L1_TILE_K);
         // load first matrix A tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListId]);
-        if (clearL1Padding) {
-            AscendC::InitConstValueParams<ElementA> clearParams(
-                1, static_cast<uint16_t>(L1A_TILE_SIZE / 32), 0,
-                static_cast<ElementA>(0));
-            AscendC::InitConstValue(l1ATensorList[l1AListId], clearParams);
-        }
         auto tensorL1A = tla::MakeTensor(l1ATensorList[l1AListId], L1A_LAYOUT, Arch::PositionL1{});
         auto tensorTileA = GetTileA(tensorA, 0, 0, mBlockActual, kL1Actual);
-        if constexpr (ENABLE_L1_RESIDENT) {
+        if constexpr (SHARE_L1A) {
+            // L1A is shared from another BlockMmad instance; skip GM->L1A copy.
+        } else if constexpr (ENABLE_L1_RESIDENT) {
             // If the currently loaded GM pointer and block coordinates are the same as the last loaded ones,
             // skip this loading.
             if (lastAddrA[l1AListId] != tensorTileA.data().GetPhyAddr()
                 || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListId].row()
                 || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListId].column()) {
                 copyGmToL1A(tensorL1A, tensorTileA);
-                lastCoordA[l1AListId] = MatrixCoord{
-                    static_cast<uint32_t>(tla::get<0>(tensorTileA.coord())),
-                    static_cast<uint32_t>(tla::get<1>(tensorTileA.coord()))};
+                lastCoordA[l1AListId] = MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
                 lastAddrA[l1AListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
                     tensorTileA.data().GetPhyAddr()
                 );
@@ -403,12 +400,6 @@ public:
 
         // load first matrix B tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
-        if (clearL1Padding) {
-            AscendC::InitConstValueParams<ElementB> clearParams(
-                1, static_cast<uint16_t>(L1B_TILE_SIZE / 32), 0,
-                static_cast<ElementB>(0));
-            AscendC::InitConstValue(l1BTensorList[l1BListId], clearParams);
-        }
         auto tensorL1B = tla::MakeTensor(l1BTensorList[l1BListId], L1B_LAYOUT, Arch::PositionL1{});
         auto tensorTileB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(kL1Actual, nBlockActual));
         if constexpr (ENABLE_L1_RESIDENT) {
@@ -416,9 +407,7 @@ public:
                 || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListId].row()
                 || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListId].column()) {
                 copyGmToL1B(tensorL1B, tensorTileB);
-                lastCoordB[l1BListId] = MatrixCoord{
-                    static_cast<uint32_t>(tla::get<0>(tensorTileB.coord())),
-                    static_cast<uint32_t>(tla::get<1>(tensorTileB.coord()))};
+                lastCoordB[l1BListId] = MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
                 lastAddrB[l1BListId] = const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
                     tensorTileB.data().GetPhyAddr()
                 );
@@ -468,20 +457,15 @@ public:
 
                 // load next matrix A tile from GM to L1
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListIdNext]);
-                if (clearL1Padding) {
-                    AscendC::InitConstValueParams<ElementA> clearParams(
-                        1, static_cast<uint16_t>(L1A_TILE_SIZE / 32), 0,
-                        static_cast<ElementA>(0));
-                    AscendC::InitConstValue(l1ATensorList[l1AListIdNext], clearParams);
-                }
-                if constexpr (ENABLE_L1_RESIDENT) {
+                if constexpr (SHARE_L1A) {
+                    // L1A is shared from another BlockMmad instance; skip GM->L1A copy.
+                } else if constexpr (ENABLE_L1_RESIDENT) {
                     if (lastAddrA[l1AListIdNext] != tensorTileA.data().GetPhyAddr()
                         || tla::get<0>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].row()
                         || tla::get<1>(tensorTileA.coord()) != lastCoordA[l1AListIdNext].column()) {
                         copyGmToL1A(tensorL1A, tensorTileA);
-                        lastCoordA[l1AListIdNext] = MatrixCoord{
-                            static_cast<uint32_t>(tla::get<0>(tensorTileA.coord())),
-                            static_cast<uint32_t>(tla::get<1>(tensorTileA.coord()))};
+                        lastCoordA[l1AListIdNext] =
+                            MatrixCoord{tla::get<0>(tensorTileA.coord()), tla::get<1>(tensorTileA.coord())};
                         lastAddrA[l1AListIdNext] =
                             const_cast<__gm__ typename AscendC::GlobalTensor<ElementA>::PrimType *>(
                                 tensorTileA.data().GetPhyAddr()
@@ -494,20 +478,13 @@ public:
 
                 // load next matrix B tile from GM to L1
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListIdNext]);
-                if (clearL1Padding) {
-                    AscendC::InitConstValueParams<ElementB> clearParams(
-                        1, static_cast<uint16_t>(L1B_TILE_SIZE / 32), 0,
-                        static_cast<ElementB>(0));
-                    AscendC::InitConstValue(l1BTensorList[l1BListIdNext], clearParams);
-                }
                 if constexpr (ENABLE_L1_RESIDENT) {
                     if (lastAddrB[l1BListIdNext] != tensorTileB.data().GetPhyAddr()
                         || tla::get<0>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].row()
                         || tla::get<1>(tensorTileB.coord()) != lastCoordB[l1BListIdNext].column()) {
                         copyGmToL1B(tensorL1B, tensorTileB);
-                        lastCoordB[l1BListIdNext] = MatrixCoord{
-                            static_cast<uint32_t>(tla::get<0>(tensorTileB.coord())),
-                            static_cast<uint32_t>(tla::get<1>(tensorTileB.coord()))};
+                        lastCoordB[l1BListIdNext] =
+                            MatrixCoord{tla::get<0>(tensorTileB.coord()), tla::get<1>(tensorTileB.coord())};
                         lastAddrB[l1BListIdNext] =
                             const_cast<__gm__ typename AscendC::GlobalTensor<ElementB>::PrimType *>(
                                 tensorTileB.data().GetPhyAddr()
@@ -708,4 +685,4 @@ protected:
 
 } // namespace Catlass::Gemm::Block
 
-#endif // CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_MULTI_HPP
+#endif // CATLASS_GEMM_BLOCK_BLOCK_MMAD_PINGPONG_TLA_GDN_FWD_O_HPP
