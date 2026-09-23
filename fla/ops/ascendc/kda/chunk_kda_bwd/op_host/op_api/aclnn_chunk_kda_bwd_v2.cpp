@@ -104,8 +104,6 @@ extern "C" aclnnStatus aclnnChunkKdaBwdV2GetWorkspaceSize(
     // Recompute copies A_log in groups of eight into a 256-float buffer.
     CHECK_COND(disableRecompute || (H <= 256 && H % 8 == 0), ACLNN_ERR_PARAM_INVALID,
         "Recompute currently requires H<=256 and H divisible by 8.");
-    CHECK_COND(disableRecompute || packed || T % 64 == 0, ACLNN_ERR_PARAM_INVALID,
-        "Recompute tails are disabled pending upstream repeatability repair; use saved caches.");
     const auto token = packed ? MakeShape({H,T,128}) : MakeShape({B,H,T,128});
     const auto scalar = packed ? MakeShape({H,T}) : MakeShape({B,H,T});
     const auto matrix = packed ? MakeShape({H,T,64}) : MakeShape({B,H,T,64});
@@ -136,8 +134,6 @@ extern "C" aclnnStatus aclnnChunkKdaBwdV2GetWorkspaceSize(
             CHECK_COND((*cu)[s] >= 0 && (*cu)[s] < (*cu)[s+1] && (*cu)[s+1] <= T,
                 ACLNN_ERR_PARAM_INVALID, "V2 expects nonempty sequences; wrapper compacts empty entries.");
             const int64_t count = ((*cu)[s+1]-(*cu)[s]+63)/64;
-            CHECK_COND(disableRecompute || ((*cu)[s+1]-(*cu)[s]) % 64 == 0,
-                ACLNN_ERR_PARAM_INVALID, "Recompute requires each sequence length divisible by 64.");
             for (int64_t c = 0; c < count; ++c, ++nc) {
                 CHECK_COND(static_cast<size_t>(2*nc+1) < indices->Size() &&
                     (*indices)[2*nc] == static_cast<int64_t>(s) && (*indices)[2*nc+1] == c,

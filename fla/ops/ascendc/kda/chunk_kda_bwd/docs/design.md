@@ -32,7 +32,6 @@ Finalize 对 h、dh 分别寻址，Dhu 及其 head-major dh 不变。
 - q_rstd/k_rstd 成对提供时，在 Finalize 内完成归一化反向，不增加第四个 kernel。
 
 Python 层统一处理参数校验、空序列压缩和规范 chunk 元数据。
-重计算尾块的重复运行稳定性尚未解决，当前仅支持序列长度为 64 的倍数。
 
 Finalize 的输入输出及源码入口见
 [算子说明](../../chunk_kda_bwd_finalize/README.md)。
