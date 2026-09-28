@@ -19,6 +19,8 @@ signature here.
 from __future__ import annotations
 
 import ctypes
+import numbers
+import sys
 
 from ._chunk_scaled_dot_kkt_contract import validate as _validate_chunk_scaled_dot_kkt
 from ._kda_policy import kda_fwd_optional_output_mask

@@ -145,7 +145,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
       <td>actualSeqLengths</td>
       <td>输入</td>
       <td>无效前缀长度及不同 batch 的有效序列长度。</td>
-      <td><ul><li>不支持空Tensor。</li><li>首元素为无效前缀长度，其余 B 个元素为各 batch 的有效序列长度，全部元素之和等于 T。</li></ul></td>
+      <td><ul><li>不支持空Tensor。</li><li>首元素为不小于0的无效前缀长度，其余 B 个元素为各 batch 的有效序列长度，取值范围为[0, 8]，全部元素之和等于 T。</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
       <td>(B+1,)</td>
@@ -155,7 +155,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
       <td>ssmStateIndices</td>
       <td>输入</td>
       <td>输入序列到状态矩阵的映射索引。</td>
-      <td><ul><li>不支持空Tensor。</li><li>state[ssmStateIndices[i]]表示第i个token的状态矩阵。</li></td>
+      <td><ul><li>不支持空Tensor。</li><li>state[ssmStateIndices[i]]表示第i个token的状态矩阵。</li><li>取值范围为[0, BlockNum)，且所有元素互不重复。</li></td>
       <td>INT32</td>
       <td>ND</td>
       <td>(T,)</td>
@@ -185,7 +185,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
       <td>numAcceptedTokens</td>
       <td>输入</td>
       <td>每个序列接受的token数量。</td>
-      <td><ul><li>不支持空Tensor。</li></td>
+      <td><ul><li>不支持空Tensor。</li><li>每项取值范围为[1, actualSeqLengths[i+1]]。</li></td>
       <td>INT32</td>
       <td>ND</td>
       <td>(B,)</td>
@@ -195,8 +195,8 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
       <td>scaleValue</td>
       <td>输入</td>
       <td>query的缩放因子，对应公式中的 1/sqrt(d_k)。</td>
-      <td>-</td>
-      <td>-</td>
+      <td>必须为有限浮点数。</td>
+      <td>FLOAT</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -245,8 +245,8 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
   </thead>
   <tbody>
     <tr>
-      <td rowspan="4">ACLNN_ERR_PARAM_INVALID</td>
-      <td rowspan="4">161002</td>
+      <td rowspan="5">ACLNN_ERR_PARAM_INVALID</td>
+      <td rowspan="5">161002</td>
       <td>query、key、value、beta、stateRef、actualSeqLengths、ssmStateIndices 或 out 存在空指针。</td>
     </tr>
     <tr>
@@ -256,7 +256,10 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
       <td>输入Tensor的数据格式不在支持范围内。</td>
     </tr>
     <tr>
-      <td>输入Tensor的shape不在支持范围内。</td>
+      <td>输入Tensor的shape不在支持范围内，或 Dk、Dv 不等于 128。</td>
+    </tr>
+    <tr>
+      <td>actualSeqLengths、ssmStateIndices、numAcceptedTokens 或 scaleValue 的值不满足约束。</td>
     </tr>
   </tbody>
   </table>
@@ -308,7 +311,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 ## 约束说明
 - 确定性计算：
   - aclnnRecurrentGatedDeltaRule默认确定性实现。
-- 输入 shape 大小需满足约束： $L_i \le 8$， $N_k \le 256$， $N_v \le 256$， $D_k \le 512$， $D_v \le 512$，且 $N_v$ 是 $N_k$ 的整数倍。
+- 输入 shape 大小需满足约束： $L_i \le 8$， $N_k \le 256$， $N_v \le 256$，$D_k = 128$，$D_v = 128$，且 $N_v$ 是 $N_k$ 的整数倍。
 
 
 ## 调用示例
