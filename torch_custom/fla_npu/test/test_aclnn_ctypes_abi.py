@@ -89,6 +89,7 @@ class AclnnCtypesAbiTest(unittest.TestCase):
         function = ACLNN_CTYPES.npu_chunk_gated_delta_rule_fwd
         self.assertIs(inspect.signature(function).parameters["disable_recompute"].default, True)
         fake_torch = types.ModuleType("torch")
+        fake_torch.float16 = object()
         fake_torch.float32 = object()
         fake_torch.bfloat16 = object()
         q = FakeTensor((1, 2, 65, 128), fake_torch.bfloat16)
@@ -152,6 +153,7 @@ class AclnnCtypesAbiTest(unittest.TestCase):
 
     def test_gdn_norm_outputs_and_input_aliases(self):
         fake_torch = types.ModuleType("torch")
+        fake_torch.float16 = object()
         fake_torch.float32 = object()
         fake_torch.bfloat16 = object()
         captured = {}
@@ -206,8 +208,11 @@ class AclnnCtypesAbiTest(unittest.TestCase):
 
     def test_gdn_reserved_gate_arguments_rejected_before_launch(self):
         fake_torch = types.ModuleType("torch")
-        q = FakeTensor((1, 2, 65, 128))
-        g = FakeTensor((1, 65, 2))
+        fake_torch.float16 = object()
+        fake_torch.float32 = object()
+        fake_torch.bfloat16 = object()
+        q = FakeTensor((1, 2, 65, 128), fake_torch.bfloat16)
+        g = FakeTensor((1, 65, 2), fake_torch.float32)
         with mock.patch.dict(sys.modules, {"torch": fake_torch}), \
                 mock.patch.object(ACLNN_CTYPES, "_call_aclnn") as launch:
             for options in ({"a_log": g}, {"dt_bias": g}, {"use_gate_in_kernel": True}):

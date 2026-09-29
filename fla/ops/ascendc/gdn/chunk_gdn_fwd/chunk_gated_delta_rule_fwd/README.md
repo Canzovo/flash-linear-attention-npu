@@ -88,6 +88,12 @@ Python 接受 `a_log=None, dt_bias=None` 预留参数；当前仅支持
 
 当前未实现的扩展组合会返回参数错误，不会静默忽略。
 
+Python ctypes 入口在分配输出和发射 ACLNN 前执行以下异常检查：q/k/v 必须使用相同的
+FP16 或 BF16 dtype，g/beta 必须为 FP32 或与 q/k/v 相同，initial_state 必须为 FP32
+或与 q/k/v 相同且 shape 与逻辑序列数、Hv 和 stateVFirst 一致；scale 必须是有限浮点数，
+不接受整数、布尔值、NaN 或 Inf。NTD/TND 的物理 batch 固定为 1，任何带 cuSeqlens 的
+rank-4 变长输入同样要求物理 batch 为 1。
+
 ## 支持范围
 
 - A2（`ascend910b`）、A3（`ascend910_93`）、A5（`ascend950`）。
@@ -106,6 +112,12 @@ ACLNN ABI 合同可通过以下命令检查：
 
 ```bash
 python3 tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py
+```
+
+Python wrapper 的异常输入合同不依赖 ATK，安装本轮 wheel 后执行：
+
+```bash
+python3 torch_custom/fla_npu/test/validate_chunk_gated_delta_rule_fwd_invalid_inputs.py
 ```
 
 ## 归一化结果导出与反向复用

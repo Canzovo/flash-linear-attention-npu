@@ -2823,6 +2823,7 @@ def npu_chunk_gated_delta_rule_fwd(
     layout="BNSD",
 ):
     """调用融合 GDN 前向；训练默认导出 gCumsum/A，推理显式设为 False。"""
+    import math
     import torch
 
     q_shape = _shape(q)
@@ -2837,6 +2838,17 @@ def npu_chunk_gated_delta_rule_fwd(
         )
     if len(q_shape) != 4 or len(k_shape) != 4 or len(v_shape) != 4:
         raise RuntimeError("npu_chunk_gated_delta_rule_fwd: q, k and v must be rank-4 tensors.")
+    qkv_dtype = q.dtype
+    if qkv_dtype not in (torch.float16, torch.bfloat16) or k.dtype != qkv_dtype or v.dtype != qkv_dtype:
+        raise RuntimeError(
+            "npu_chunk_gated_delta_rule_fwd: q, k and v must use the same "
+            "torch.float16 or torch.bfloat16 dtype."
+        )
+    if g.dtype not in (torch.float32, qkv_dtype) or beta.dtype not in (torch.float32, qkv_dtype):
+        raise RuntimeError(
+            "npu_chunk_gated_delta_rule_fwd: g and beta must use torch.float32 "
+            "or match q/k/v dtype."
+        )
     if q_shape[3] != 128 or k_shape[3] != 128:
         raise RuntimeError("npu_chunk_gated_delta_rule_fwd: the composite implementation requires K=128.")
     if v_shape[3] not in (128, 256):
@@ -2849,6 +2861,12 @@ def npu_chunk_gated_delta_rule_fwd(
     else:
         batch, k_heads, tokens, k_dim = q_shape
         _, v_heads, v_tokens, v_dim = v_shape
+    if batch <= 0 or k_heads <= 0 or v_heads <= 0 or tokens <= 0:
+        raise RuntimeError("npu_chunk_gated_delta_rule_fwd: B, Hk, Hv and T must be positive.")
+    if layout in ("NTD", "TND") and batch != 1:
+        raise RuntimeError(
+            "npu_chunk_gated_delta_rule_fwd: NTD/TND input requires physical B=1."
+        )
     if v_tokens != tokens or v_shape[0] != batch:
         raise RuntimeError("npu_chunk_gated_delta_rule_fwd: v must match q/k in B and T.")
     if v_heads % k_heads != 0:
@@ -2890,7 +2908,32 @@ def npu_chunk_gated_delta_rule_fwd(
         raise ValueError("use_gate_in_kernel=True is not supported.")
     if a_log is not None or dt_bias is not None:
         raise ValueError("a_log and dt_bias must be None while gate-in-kernel is unsupported.")
+    seq_num = len(cu_seqlens) - 1 if cu_seqlens is not None else batch
+    state_tail = (v_dim, k_dim) if state_v_first else (k_dim, v_dim)
+    state_shape = (seq_num, v_heads, *state_tail)
+    if initial_state is not None:
+        if initial_state.dtype not in (torch.float32, qkv_dtype):
+            raise RuntimeError(
+                "npu_chunk_gated_delta_rule_fwd: initial_state must use torch.float32 "
+                "or match q/k/v dtype."
+            )
+        if _shape(initial_state) != state_shape:
+            raise RuntimeError(
+                "npu_chunk_gated_delta_rule_fwd: initial_state must have shape "
+                f"{state_shape} when state_v_first={state_v_first}."
+            )
+    if scale is not None and (
+        not isinstance(scale, numbers.Real) or isinstance(scale, numbers.Integral)
+    ):
+        raise RuntimeError(
+            "npu_chunk_gated_delta_rule_fwd: scale must be a floating-point number, "
+            f"got {type(scale)!r}."
+        )
     scale = _optional_float(scale, float(k_dim) ** -0.5)
+    if not math.isfinite(scale):
+        raise RuntimeError(
+            f"npu_chunk_gated_delta_rule_fwd: scale must be finite, got {scale}."
+        )
     o = _empty((batch, tokens, v_heads, v_dim), v)
     g_cumsum = (
         _empty((batch, tokens, v_heads), g, dtype=torch.float32)
@@ -2909,13 +2952,11 @@ def npu_chunk_gated_delta_rule_fwd(
     )
     final_state = None
     if output_final_state:
-        seq_num = len(cu_seqlens) - 1 if cu_seqlens is not None else batch
         if initial_state is None:
             state_dtype = torch.float32
         else:
             state_dtype = initial_state.dtype
-        state_tail = (v_dim, k_dim) if state_v_first else (k_dim, v_dim)
-        final_state = _empty((seq_num, v_heads, *state_tail), q, dtype=state_dtype)
+        final_state = _empty(state_shape, q, dtype=state_dtype)
     h = None
     if return_intermediate_states:
         chunks = (
