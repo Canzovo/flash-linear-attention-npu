@@ -93,11 +93,14 @@ def main():
             runtime._recent_error_message()
             result = get_workspace(*arguments, ctypes.byref(workspace), ctypes.byref(executor))
             message = runtime._recent_error_message()
+            passed = (result == status and error_code in message and parameter in message
+                      and not executor.value)
+            print(f"{'PASS' if passed else 'FAIL'} {name}: {result} (expected {status} {error_code})", flush=True)
+            print(message if message else "<no ACL error message>", flush=True)
             if result != status or error_code not in message or parameter not in message:
                 raise AssertionError(f"{name}: expected {status}/{error_code}/{parameter}, got {result}: {message}")
             if executor.value:
                 raise AssertionError(f"{name}: invalid call returned an executor")
-            print(f"PASS {name}: {status} {error_code}", flush=True)
         finally:
             context.destroy()
     print(f"PASS {len(cases)} direct ACLNN negative cases", flush=True)
