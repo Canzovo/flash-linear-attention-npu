@@ -2,6 +2,7 @@
 #include "chunk_kda_bwd_prepare.h"
 
 #include <cmath>
+#include "../chunk_kda_bwd_prepare_validation.h"
 
 #include "aclnn_kernels/common/op_error_check.h"
 #include "opdev/common_types.h"
@@ -75,7 +76,7 @@ aclnnStatus ValidateMetadata(
 
 aclnnStatus Check(
     const aclTensor *aqk, const aclTensor *vNew, const aclTensor *dO, const aclTensor *h,
-    const aclIntArray *cu, const aclIntArray *indices, double scale, int64_t chunkSize,
+    const aclIntArray *cu, const aclIntArray *indices, const char *layout, double scale, int64_t chunkSize,
     const aclTensor *dAqkOut, const aclTensor *dvOut, const aclTensor *dqRawOut)
 {
     CHECK_RET(CheckTensor(aqk, DataType::DT_BF16, "aqk") == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
@@ -85,12 +86,15 @@ aclnnStatus Check(
     CHECK_RET(CheckTensor(dAqkOut, DataType::DT_FLOAT, "d_aqk") == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckTensor(dvOut, DataType::DT_BF16, "dv") == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckTensor(dqRawOut, DataType::DT_FLOAT, "dq_raw") == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
-    CHECK_COND(std::isfinite(scale), ACLNN_ERR_PARAM_INVALID, "scale must be finite");
+    CHECK_COND(std::isfinite(scale) && std::isfinite(static_cast<float>(scale)), ACLNN_ERR_PARAM_INVALID, "scale must be finite");
     CHECK_COND(chunkSize == 64, ACLNN_ERR_PARAM_INVALID, "chunk_size must be 64");
     CHECK_COND((cu == nullptr) == (indices == nullptr), ACLNN_ERR_PARAM_INVALID,
                "cu_seqlens and chunk_indices must be provided together");
 
-    const bool variable = cu != nullptr;
+    uint32_t inputLayout;
+    CHECK_COND(KDA::ParseLayout(layout, inputLayout), ACLNN_ERR_PARAM_INVALID, "invalid layout");
+    const bool variable = KDA::VariableLayout(inputLayout);
+    CHECK_COND(variable == (cu != nullptr), ACLNN_ERR_PARAM_INVALID, "layout and metadata mismatch");
     const auto a = aqk->GetViewShape();
     const auto v = vNew->GetViewShape();
     const auto o = dO->GetViewShape();
@@ -100,21 +104,16 @@ aclnnStatus Check(
                ACLNN_ERR_PARAM_INVALID, "token tensor rank is invalid");
     CHECK_COND(state.GetDimNum() == rank + 1, ACLNN_ERR_PARAM_INVALID, "h rank is invalid");
 
-    const int64_t B = variable ? 1 : a.GetDim(0);
-    const int64_t NV = variable ? a.GetDim(0) : a.GetDim(1);
-    const int64_t T = variable ? a.GetDim(1) : a.GetDim(2);
-    const int64_t C = variable ? a.GetDim(2) : a.GetDim(3);
-    const int64_t vHead = variable ? v.GetDim(0) : v.GetDim(1);
-    const int64_t vT = variable ? v.GetDim(1) : v.GetDim(2);
-    const int64_t V = variable ? v.GetDim(2) : v.GetDim(3);
-    const int64_t oHead = variable ? o.GetDim(0) : o.GetDim(1);
-    const int64_t oT = variable ? o.GetDim(1) : o.GetDim(2);
-    const int64_t oV = variable ? o.GetDim(2) : o.GetDim(3);
-    CHECK_COND(B > 0 && NV > 0 && T > 0 && C == 64 && V == 128 && oV == 128,
-               ACLNN_ERR_PARAM_INVALID, "KernelA supports C=64 and K=V=128 only");
-    CHECK_COND(vHead == NV && oHead == NV && vT == T && oT == T,
-               ACLNN_ERR_PARAM_INVALID, "aqk/v_new/d_o head or token dimensions mismatch");
-
+    KDA::TokenShape aShape, vShape, oShape;
+    CHECK_COND(KDA::ParseTokenShape(a, inputLayout, aShape) &&
+                   KDA::ParseTokenShape(v, inputLayout, vShape) &&
+                   KDA::ParseTokenShape(o, inputLayout, oShape),
+               ACLNN_ERR_PARAM_INVALID, "invalid token shape");
+    const int64_t B = aShape.B, NV = aShape.H, T = aShape.T;
+    CHECK_COND(aShape.D == 64 && vShape.D == 128 && oShape.D == 128 &&
+                   aShape.B == vShape.B && aShape.B == oShape.B &&
+                   NV == vShape.H && NV == oShape.H && T == vShape.T && T == oShape.T,
+               ACLNN_ERR_PARAM_INVALID, "token semantic dimensions mismatch");
     const int64_t chunkCount = variable ? state.GetDim(0) : state.GetDim(1);
     const bool stateShapeValid = variable
         ? state.GetDim(1) == NV && state.GetDim(2) == 128 && state.GetDim(3) == 128
@@ -128,10 +127,10 @@ aclnnStatus Check(
         CHECK_COND(chunkCount == (T + chunkSize - 1) / chunkSize,
                    ACLNN_ERR_PARAM_INVALID, "dense h chunk dimension is invalid");
     }
-    CHECK_COND(SameShape(aqk, dAqkOut), ACLNN_ERR_PARAM_INVALID,
-               "d_aqk output shape must match aqk");
-    CHECK_COND(SameShape(vNew, dvOut) && SameShape(dO, dqRawOut), ACLNN_ERR_PARAM_INVALID,
-               "dv/dq_raw output shape mismatch");
+    CHECK_COND(KDA::HeadOutputShape(dAqkOut->GetViewShape(), aShape, 64, variable) &&
+                   KDA::HeadOutputShape(dvOut->GetViewShape(), aShape, 128, variable) &&
+                   KDA::HeadOutputShape(dqRawOut->GetViewShape(), aShape, 128, variable),
+               ACLNN_ERR_PARAM_INVALID, "outputs must use head-major layout");
     return ACLNN_SUCCESS;
 }
 
@@ -139,25 +138,25 @@ aclnnStatus Check(
 
 extern "C" aclnnStatus aclnnChunkKdaBwdPrepareGetWorkspaceSize(
     const aclTensor *aqk, const aclTensor *vNew, const aclTensor *dO, const aclTensor *h,
-    const aclIntArray *cuSeqlensOptional, const aclIntArray *chunkIndicesOptional,
+    const aclIntArray *cuSeqlensOptional, const aclIntArray *chunkIndicesOptional, const char *layout,
     double scale, int64_t chunkSize, bool stateVFirst,
     const aclTensor *dAqkOut, const aclTensor *dvOut, const aclTensor *dqRawOut,
     uint64_t *workspaceSize, aclOpExecutor **executor)
 {
     L2_DFX_PHASE_1(aclnnChunkKdaBwdPrepare,
                    DFX_IN(aqk, vNew, dO, h, cuSeqlensOptional, chunkIndicesOptional,
-                          scale, chunkSize, stateVFirst),
+                          layout, scale, chunkSize, stateVFirst),
                    DFX_OUT(dAqkOut, dvOut, dqRawOut));
     CHECK_COND(workspaceSize != nullptr && executor != nullptr,
                ACLNN_ERR_PARAM_NULLPTR, "workspaceSize and executor must not be nullptr");
     CHECK_RET(Check(aqk, vNew, dO, h, cuSeqlensOptional, chunkIndicesOptional,
-                    scale, chunkSize, dAqkOut, dvOut, dqRawOut) == ACLNN_SUCCESS,
+                    layout, scale, chunkSize, dAqkOut, dvOut, dqRawOut) == ACLNN_SUCCESS,
               ACLNN_ERR_PARAM_INVALID);
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     auto result = l0op::ChunkKdaBwdPrepare(
         aqk, vNew, dO, h, cuSeqlensOptional, chunkIndicesOptional,
-        scale, chunkSize, stateVFirst, dAqkOut, dvOut, dqRawOut,
+        layout, scale, chunkSize, stateVFirst, dAqkOut, dvOut, dqRawOut,
         uniqueExecutor.get());
     for (const aclTensor *tensor : result) {
         CHECK_RET(tensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
