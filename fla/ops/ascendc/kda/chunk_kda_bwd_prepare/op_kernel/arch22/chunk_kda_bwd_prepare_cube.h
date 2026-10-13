@@ -16,6 +16,14 @@ public:
         dv_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(dv));
         dq_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(dq));
         raw_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(scratch));
+        // Match arch35's streaming policy: each input tile is loaded once
+        // from GM and reused in L1. Keep the small GM handoff cached.
+        aqk_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        vNew_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        dO_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        h_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        dv_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        dq_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
         cu_ = cu; indices_ = indices; t_ = tiling; pipe_ = pipe;
         pipe_->InitBuffer(l1_, 4 * HEAD_OWNER_BYTES);
         pipe_->InitBuffer(l0a_, 2 * L0_SLOT_BYTES);
@@ -76,7 +84,7 @@ private:
     { return l1_.Get<bfloat16_t>()[(owner * HEAD_OWNER_BYTES + offset) / sizeof(bfloat16_t)]; }
     __aicore__ inline void Load(AscendC::LocalTensor<bfloat16_t> dst,
         AscendC::GlobalTensor<bfloat16_t> src, uint32_t rows, uint32_t cols,
-        int64_t stride, uint32_t pitch)
+        int64_t stride, uint32_t pitch, uint32_t headCount, int64_t headStride)
     {
         AscendC::Nd2NzParams p;
         p.ndNum = 1; p.nValue = rows; p.dValue = cols;
@@ -84,31 +92,50 @@ private:
         p.dstNzC0Stride = pitch; p.dstNzNStride = 1;
         if (stride <= 65535) {
             p.srcDValue = static_cast<uint16_t>(stride);
-            AscendC::DataCopy(dst, src, p);
+            // Match arch35's pair copy when both arch22 16-bit source strides
+            // fit. Each head still owns its independent 72 KiB L1 region.
+            if (headCount == 2 && headStride <= 65535) {
+                p.ndNum = 2;
+                p.srcNdMatrixStride = static_cast<uint16_t>(headStride);
+                p.dstNzMatrixStride = HEAD_OWNER_BYTES / sizeof(bfloat16_t);
+                AscendC::DataCopy(dst, src, p);
+            } else {
+                for (uint32_t head = 0; head < headCount; ++head)
+                    AscendC::DataCopy(dst[head * HEAD_OWNER_BYTES / sizeof(bfloat16_t)],
+                                     src[head * headStride], p);
+            }
         } else {
+            // Large BSND/TND head counts cannot encode the token row stride.
+            // Retain the row copy fallback without truncating either stride.
             p.nValue = 1; p.srcDValue = 0;
-            for (uint32_t row = 0; row < rows; ++row)
-                AscendC::DataCopy(dst[row * 16], src[row * stride], p);
+            for (uint32_t head = 0; head < headCount; ++head)
+                for (uint32_t row = 0; row < rows; ++row)
+                    AscendC::DataCopy(dst[head * HEAD_OWNER_BYTES / sizeof(bfloat16_t) + row * 16],
+                                     src[head * headStride + row * stride], p);
         }
     }
     __aicore__ inline void Preload(const ChunkInfo &chunk, int64_t begin, int64_t end, uint32_t rows)
     {
         for (uint32_t pair = 0; begin + 2 * pair < end; ++pair) {
             const uint32_t first = pair * 2, count = KdaMin(2, end - begin - first);
-            for (uint32_t i = first; i < first + count; ++i) {
+            for (uint32_t i = first; i < first + count; ++i)
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(ownerFree_[i]);
-                const int64_t off = TokenInputOffset<INPUT_LAYOUT>(*t_, chunk, begin + i, 128);
-                const int64_t stride = TokenInputRowStride<INPUT_LAYOUT>(*t_, 128);
-                Load(Owner(i, 0), dO_[off], rows, 128, stride, 64);
-                Load(Owner(i, 16 * 1024), vNew_[off], rows, 128, stride, 64);
-            }
+            const int64_t head = begin + first;
+            const int64_t off = TokenInputOffset<INPUT_LAYOUT>(*t_, chunk, head, 128);
+            const int64_t stride = TokenInputRowStride<INPUT_LAYOUT>(*t_, 128);
+            const int64_t headStride = count == 2
+                ? TokenInputOffset<INPUT_LAYOUT>(*t_, chunk, head + 1, 128) - off : 0;
+            Load(Owner(first, 0), dO_[off], rows, 128, stride, 64, count, headStride);
+            Load(Owner(first, 16 * 1024), vNew_[off], rows, 128, stride, 64, count, headStride);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(pairReady_[pair * 3]);
-            for (uint32_t i = first; i < first + count; ++i)
-                Load(Owner(i, 32 * 1024), h_[StateOffset(*t_, chunk, begin + i)], 128, 128, 128, 128);
+            Load(Owner(first, 32 * 1024), h_[StateOffset(*t_, chunk, head)],
+                 128, 128, 128, 128, count, 128 * 128);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(pairReady_[pair * 3 + 1]);
-            for (uint32_t i = first; i < first + count; ++i)
-                Load(Owner(i, 64 * 1024), aqk_[TokenInputOffset<INPUT_LAYOUT>(*t_, chunk, begin + i, 64)],
-                     rows, rows, TokenInputRowStride<INPUT_LAYOUT>(*t_, 64), 64);
+            const int64_t aqkOff = TokenInputOffset<INPUT_LAYOUT>(*t_, chunk, head, 64);
+            const int64_t aqkHeadStride = count == 2
+                ? TokenInputOffset<INPUT_LAYOUT>(*t_, chunk, head + 1, 64) - aqkOff : 0;
+            Load(Owner(first, 64 * 1024), aqk_[aqkOff], rows, rows,
+                 TokenInputRowStride<INPUT_LAYOUT>(*t_, 64), 64, count, aqkHeadStride);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(pairReady_[pair * 3 + 2]);
         }
     }
@@ -118,28 +145,43 @@ private:
         AscendC::LocalTensor<bfloat16_t> src, uint32_t m, uint32_t k, uint32_t pitch)
     {
         AscendC::LoadData2DParams p;
-        p.repeatTimes = 1; p.srcStride = 1; p.ifTranspose = TRANSPOSE;
+        p.ifTranspose = TRANSPOSE;
         const uint32_t mb = Align16(m) / 16, kb = Align16(k) / 16;
-        for (uint32_t row = 0; row < mb; ++row)
-            for (uint32_t reduce = 0; reduce < kb; ++reduce) {
-                const uint32_t off = TRANSPOSE ? row * pitch * 16 + reduce * 256
-                                               : reduce * pitch * 16 + row * 256;
-                AscendC::LoadData(dst[(row * kb + reduce) * 256], src[off], p);
-            }
+        p.repeatTimes = static_cast<uint8_t>(kb);
+        p.srcStride = TRANSPOSE ? 1 : pitch / 16;
+        // One instruction emits the complete K strip into consecutive L0A
+        // fractals, rather than issuing one instruction per 16x16 fractal.
+        for (uint32_t row = 0; row < mb; ++row) {
+            const uint32_t off = TRANSPOSE ? row * pitch * 16 : row * 256;
+            AscendC::LoadData(dst[row * kb * 256], src[off], p);
+        }
     }
     template <bool TRANSPOSE>
     __aicore__ inline void LoadB(AscendC::LocalTensor<bfloat16_t> dst,
         AscendC::LocalTensor<bfloat16_t> src, uint32_t k, uint32_t n, uint32_t pitch)
     {
         AscendC::LoadData2DParams p;
-        p.repeatTimes = 1; p.srcStride = 1; p.ifTranspose = !TRANSPOSE;
+        p.ifTranspose = !TRANSPOSE;
         const uint32_t nb = Align16(n) / 16, kb = Align16(k) / 16;
-        for (uint32_t col = 0; col < nb; ++col)
-            for (uint32_t reduce = 0; reduce < kb; ++reduce) {
-                const uint32_t off = TRANSPOSE ? reduce * pitch * 16 + col * 256
-                                               : col * pitch * 16 + reduce * 256;
-                AscendC::LoadData(dst[(reduce * nb + col) * 256], src[off], p);
+        if constexpr (TRANSPOSE) {
+            if (pitch / 16 == nb) {
+                // The complete NZ tile already has the required ZN order.
+                // Flatten its K/N fractals into one contiguous instruction.
+                p.repeatTimes = static_cast<uint8_t>(kb * nb);
+                p.srcStride = 1;
+                AscendC::LoadData(dst, src, p);
+                return;
             }
+        }
+        p.repeatTimes = static_cast<uint8_t>(kb);
+        p.srcStride = TRANSPOSE ? pitch / 16 : 1;
+        p.dstGap = static_cast<uint16_t>(nb - 1);
+        // Interleave each K strip with dstGap so the resulting ZN layout is
+        // identical to the former nested loop, including transposed H.
+        for (uint32_t col = 0; col < nb; ++col) {
+            const uint32_t off = TRANSPOSE ? col * 256 : col * pitch * 16;
+            AscendC::LoadData(dst[col * 256], src[off], p);
+        }
     }
     template <uint32_t FORMULA>
     __aicore__ inline void Compute(uint32_t owner, bool leader, uint32_t ready,

@@ -80,7 +80,7 @@ state 均不改变。`scripts/compare_layouts.py --output-dir <output>` 生成 `
 `performance_device --save_data profile -sp` 采集，基线取三次实际转换与算子 task duration 之和。
 基线 CPU 精度对齐继续使用原 FP64 标杆。
 
-## 验收记录
+## 初版验收记录
 
 本轮从 main 的 `90176b44` 实现并验证。A2 正式 wheel、A3 run 包及 sanitizer run 包均构建通过；
 A3 包单独保留。本轮设备验证采用 A2，A3 尚未进行实机验证。
@@ -129,3 +129,34 @@ A3 包单独保留。本轮设备验证采用 A2，A3 尚未进行实机验证�
 最终 wheel 的 kernel、opapi、proto 和 Python native runtime 与正式验收包逐字节一致。
 补回原有版权注释后，tiling 库仅有五处日志行号常量各增加 4 及 ELF build-id 变化，
 计算和分发逻辑不变。最终安装使用无 sanitizer、无 debug 编译参数的正式包。
+
+## 搬运优化版本验收记录
+
+优化参考 arch35 的 pair 预载、批量 L1→L0 和流式 cache 策略，保留 A3 的
+L0C→GM→UB 路径。完整 chunk 改为 packed bit mask Select 与批量 Muls，尾块保留有效区
+读取及清零。所有原有 owner、L0、UB 和跨核广播确认的同步闭环保持完整。
+
+| 测试项 | 结果 |
+| --- | --- |
+| A2 wheel / scoped run 构建 | 通过，正式 wheel 已安装 |
+| A3 scoped run 构建 | 通过，安装包单独保留，尚未进行 A3 实机验证 |
+| 安装一致性 | wheel 与实际 wrapper、OPP、opapi、kernel 的 SHA256 一致 |
+| 原生混合容差精度 | 最终范围 id 0..19，20/20 通过，执行失败 0、精度失败 0 |
+| 模型性能 | 仅 case 198、199，成功生成包含有效 pipe 字段的 msprof CSV |
+
+最终精度范围按原生 ATK 逐条结果确认；本节不沿用初版的全量、确定性或内存检测结论。
+输入值域、种子、精度标准与原始用例相同，数学公式、公开接口和资源容量均未改变。
+
+性能前后使用同一设备、相同输入和属性。每条预热 5 次，正式采集 1 次，
+按 task 顺序取该 case 的最后一条 `ChunkKdaBwdPrepare` 的 `Task Duration(us)`；
+降低比例为 `(优化前 - 优化后) / 优化前`。结果来自 A2，不作为 A3 实机性能或通用目标达标结论。
+
+| case_id | B / T / H / K / V / dtype | 布局 / state_v_first | 优化前(us) | 优化后(us) | 耗时降低 |
+| --- | --- | --- | --- | --- | --- |
+| 198 | 1 / 8192 / 96 / 128 / 128 / BF16 | BNSD / false | 1511.260 | 1350.160 | 10.66% |
+| 199 | 1 / 16384 / 96 / 128 / 128 / BF16 | BSND / true | 3260.580 | 2984.760 | 8.46% |
+
+Vector 计算耗时分别由 157.770/315.125 us 降至 35.176/70.333 us，
+Fixpipe 由 541.486/1094.990 us 降至 463.862/942.834 us；
+优化后 AIC MTE2 仍为 1309.618/2904.760 us，是剩余开销的主要观察项。
+各 pipe 存在重叠，不相加，也不替代算子 task duration。

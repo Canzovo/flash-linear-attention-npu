@@ -964,3 +964,25 @@ flash-linear-attention-npu/                                  [仓库根目录]
 | 后续 A5 | 使用同一接口和布局契约适配 arch35 |
 
 本文件冻结接口和实现方案；实际编译、设备验证及性能结果以 ATK README 的验收记录为准。
+
+## 第五部分：搬运与同步优化实施补充
+
+在不改变接口、四 head 工作项、数学公式及资源容量的前提下，进一步采用 arch35 的
+批量预载、批量 L1→L0 搬运和流式 cache 策略。平台差异继续按本设计处理：A 的结果
+只从 L0C Fixpipe 到 GM，再由目标 AIV 搬入 UB；Q/D 各一次 Fixpipe 写公开输出。
+
+1. ND2NZ 的源行距及相邻 head 间距均能用 16 位字段表达时，ndNum=2 将两个 head
+   搬到独立 L1 owner；矩阵间距超限时逐 head，行距超限时逐 token 行。三组 pair READY
+   均在两份对应输入完成后发布，不增加事件或破坏 owner 的消费后释放协议。
+2. L0A 按 M 分形行批量搬 K 条带；L0B 按 N 分形列搬 K 条带并通过 dstGap 交错写入。
+   转置视图在物理 row pitch 与 N 分形范围一致时，完整 NZ tile 可一次连续搬到 ZN。
+   各分形地址及转置与原逐分形路径相同，非对齐 K/N 和尾块沿用原数学尺寸。
+3. 完整 chunk 的三角处理改为 packed bit mask Select，再批量 Muls 缩放；启动时通过
+   S_V 配对事件保证 mask 的 Scalar 写入先于 Vector 读取。Select 保证被屏蔽的 NaN/Inf
+   不泄漏，尾块仍只读取已写入的有效下三角。UB 预留容量仍为 80 KiB。
+4. 输入和公开输出沿用 arch35 的 CACHE_MODE_DISABLE，输入复用由 L1 承担；GM 中转
+   record 保留默认 cache。FREE/READY 的双 AIV 广播确认、raw/output UB 双缓冲和
+   L1/L0 的最后消费者事件均保留，不将 A5 的 mode 0x4/+16 或直接 UB 投递移植到 A3。
+
+本次最终精度回归范围由用户指定为原始 ATK 用例 0..19，输入值域、种子及原生混合容差
+不变。历史全量、确定性及内存检测结果只对应初版实现；优化版本结果另见验收记录。
