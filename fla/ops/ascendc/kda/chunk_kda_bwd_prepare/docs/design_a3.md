@@ -986,3 +986,41 @@ flash-linear-attention-npu/                                  [仓库根目录]
 
 本次最终精度回归范围由用户指定为原始 ATK 用例 0..19，输入值域、种子及原生混合容差
 不变。历史全量、确定性及内存检测结果只对应初版实现；优化版本结果另见验收记录。
+
+## 第六部分：相邻 head 宽行 ND2NZ 优化（2026-10-15）
+
+本轮依据 MTE2 profiling 和逐输入流量核查，先单独评估 BSND/TND 的宽行搬运。
+保持公式、tiling key、四 head 工作项、分核、GM workspace、UB/L0 容量和全部事件数量。
+BNSD/NTD 仍使用逐 head/pair 的原有合法 stride 回退。
+
+BSND/TND 每对 head 使用 144 KiB 的 SoA 区，两个 pair 共 288 KiB：
+
+| pair 内字节区间 | 数据 | 每 head 大小 / 生命周期 |
+| --- | --- | --- |
+| [0,32768) | dO[2]，BF16 NZ，pitch=64 | 16 KiB；MTE2 首次写，D 的 MTE1 末次读 |
+| [32768,65536) | v_new[2]，BF16 NZ，pitch=64 | 16 KiB；MTE2 首次写，A 的 MTE1 末次读 |
+| [65536,131072) | H[2]，BF16 NZ，pitch=128 | 32 KiB；MTE2 首次写，Q 的 MTE1 末次读 |
+| [131072,147456) | Aqk[2]，BF16 NZ，pitch=64 | 8 KiB；MTE2 首次写，D 的 MTE1 末次读 |
+
+pair 0 基址为 0，pair 1 为 147456；同一 tensor 的 head 1 紧随 head 0。
+dO/v_new 从 [rows,2*128] 一次 ND2NZ，完整 chunk 的 Aqk 从 [64,2*64]
+一次 ND2NZ；head 维对应 NZ 的连续 D 分块，L1→L0 仍取各 head 的独立视图。
+只有一个 head 时使用单 head 宽度。Aqk 尾块保留原有效 rows×rows 读取，
+不跨越相邻 head 的物理列间隙，不增加无效输入读取。H 使用 ndNum=2，
+源、目的矩阵间距均为 16384 BF16 元素。超 16 位行距仍逐行 ND2NZ。
+
+每对 head 首次写入前仍等待两份 ownerFree；A/Q/D 的三组 pairReady 在对应
+输入搬运后发布，leader 各等待一次。D 的最后一次 MTE1 读取完成后才释放各 owner；
+下一次 pair 整体覆盖必须再次得到两份释放，故 SoA 不引入提前覆盖。
+A/Q 继续共享同一份 L0A，A raw 只 Fixpipe 一次到 GM，再由目标 AIV 读 UB。
+
+理论候选收益为增加 token-major 单行搬运宽度及减少窄矩阵转换开销，逻辑输入字节不变。
+正式验证由用户指定为双标杆 L1 case 0..19；性能仅 case 198/199，每条预热 5 次、
+正式采样 1 次，以相同空闲 A2 设备的修改前后 msprof Task Duration 比较。
+不将本轮局部回归描述为全量、确定性或内存检测验收。
+
+本轮最终采用宽行 ND2NZ，前 20 条双标杆 L1 精度通过；同条件 A2 单次采样中，
+case 198 为 1337.560 us（基线 1342.300 us，差异 0.35%，视为基本持平），
+case 199 为 2808.020 us（基线 2967.380 us，耗时降低 5.37%）。
+四槽提前回填另行实验后未采用：case 198/199 为 1340.120/2821.920 us，
+MTE2 占比虽升至 0.992/0.996，整体没有进一步收益，正式代码保留原预载时机。
