@@ -32,6 +32,7 @@ public:
         this->Attr("scale").AttrType(REQUIRED).Float();
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
         this->Attr("state_v_first").AttrType(OPTIONAL).Bool(false);
+        this->Attr("layout").AttrType(REQUIRED).String();
 
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true)
@@ -44,6 +45,8 @@ public:
             .ExtendCfgInfo("coreType.value", "AiCore")
             .ExtendCfgInfo("opFile.value", "chunk_kda_bwd_prepare")
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");
+        this->AICore().AddConfig("ascend910b", config);
+        this->AICore().AddConfig("ascend910_93", config);
         this->AICore().AddConfig("ascend950", config);
     }
 };
