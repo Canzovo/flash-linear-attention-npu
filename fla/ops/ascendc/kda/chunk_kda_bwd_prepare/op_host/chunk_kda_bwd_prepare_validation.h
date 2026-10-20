@@ -18,7 +18,7 @@ inline bool ParseLayout(const char *name, uint32_t &layout)
 template <typename Shape>
 inline bool ParseTokenShape(const Shape &s, uint32_t layout, TokenShape &out)
 {
-    const bool packed = VariableLayout(layout), seq = SequenceMajorLayout(layout);
+    const bool packed = Rank3Layout(layout), seq = SequenceMajorLayout(layout);
     if (s.GetDimNum() != (packed ? 3 : 4)) return false;
     const size_t base = packed ? 0 : 1;
     out = {packed ? 1 : s.GetDim(0), s.GetDim(base + (seq ? 1 : 0)),
