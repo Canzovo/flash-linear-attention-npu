@@ -9,6 +9,8 @@ ASCENDC_TPL_ARGS_DECL(ChunkKdaBwdPrepare,
                          ASCENDC_TPL_UINT_SEL(INPUT_LAYOUT, ASCENDC_TPL_UI_LIST, L), \
                          ASCENDC_TPL_BOOL_SEL(IS_VARIABLE, V))
 ASCENDC_TPL_SEL(KDA_PREPARE_SEL(0, 0), KDA_PREPARE_SEL(1, 0),
-                KDA_PREPARE_SEL(2, 1), KDA_PREPARE_SEL(3, 1));
+                KDA_PREPARE_SEL(2, 1), KDA_PREPARE_SEL(3, 1),
+                KDA_PREPARE_SEL(0, 1), KDA_PREPARE_SEL(1, 1),
+                KDA_PREPARE_SEL(2, 0), KDA_PREPARE_SEL(3, 0));
 #undef KDA_PREPARE_SEL
 #endif

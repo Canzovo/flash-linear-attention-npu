@@ -67,6 +67,7 @@ def main():
     torch.npu.set_device(args.device)
     empty = lambda shape, dtype=torch.bfloat16: torch.empty(shape, dtype=dtype, device="npu")
     cases = [
+        ("fp16_removed", {"aqk": empty((1, 2, 3, 64), torch.float16)}, "EZ0019", "aqk"),
         ("state_shape", {"h": empty((1, 1, 2, 64, 128))}, "EZ0008", "h"),
         ("state_rank", {"h": empty((1, 2, 128, 128))}, "EZ0008", "h"),
         ("input_dtype", {"aqk": empty((1, 2, 3, 64), torch.float32)}, "EZ0019", "aqk"),
@@ -81,11 +82,14 @@ def main():
         ("scale_inf", {"scale": float("inf")}, "EZ0024", "scale"),
         ("scale_fp32_overflow", {"scale": 1e100}, "EZ0024", "scale"),
         ("layout", {"layout": "BAD"}, "EZ0024", "layout"),
-        ("dense_metadata", {"cu": [0, 3], "indices": [0, 0]}, "EZ0037", "cu_seqlens/chunk_indices"),
-        ("metadata_pair", {"cu": [0, 3]}, "EZ0037", "cu_seqlens/chunk_indices"),
-        ("packed_missing_metadata", {"layout": "NTD"}, "EZ0037", "cu_seqlens/chunk_indices"),
+        ("metadata_pair", {"indices": [0, 0]}, "EZ0024", "chunk_indices"),
+        ("variable_batch", {
+            "aqk": empty((2, 2, 3, 64)), "v_new": empty((2, 2, 3, 128)),
+            "d_o": empty((2, 2, 3, 128)), "cu": [0, 3], "indices": [0, 0]},
+         "EZ0024", "B"),
+        ("layout_rank_mismatch", {"layout": "NTD"}, "EZ0008", "aqk"),
         ("state_chunks", {"h": empty((1, 2, 2, 128, 128))}, "EZ0024", "h.chunks"),
-        ("strided_input", {"d_o": empty((1, 2, 3, 256))[..., ::2]}, "EZ0037", "d_o"),
+        ("strided_input", {"d_o": empty((1, 2, 3, 256))[..., ::2]}, "EZ0024", "d_o"),
     ]
     for case in cases:
         check_raw(*case)
@@ -94,10 +98,10 @@ def main():
                   d_aqk=empty((2, 3, 64), torch.float32), dv=empty((2, 3, 128)),
                   dq_raw=empty((2, 3, 128), torch.float32), layout="NTD", cu=[0, 3], indices=[0, 0])
     metadata = [("cu_size", {"cu": [0]}, "EZ0024", "cu_seqlens.size"),
-                ("cu_endpoint", {"cu": [1, 3]}, "EZ0037", "cu_seqlens"),
-                ("cu_order", {"cu": [0, 2, 1, 3]}, "EZ0037", "cu_seqlens"),
+                ("cu_endpoint", {"cu": [1, 3]}, "EZ0024", "cu_seqlens"),
+                ("cu_order", {"cu": [0, 2, 1, 3]}, "EZ0024", "cu_seqlens"),
                 ("index_size", {"indices": [0]}, "EZ0024", "chunk_indices.size"),
-                ("index_order", {"indices": [0, 1]}, "EZ0037", "chunk_indices"),
+                ("index_order", {"indices": [0, 1]}, "EZ0024", "chunk_indices"),
                 ("packed_chunks", {"h": empty((2, 2, 128, 128))}, "EZ0024", "h.total_chunks")]
     for name, updates, code, parameter in metadata:
         check_raw(name, {**packed, **updates}, code, parameter)

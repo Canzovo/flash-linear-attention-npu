@@ -4905,8 +4905,8 @@ def npu_chunk_kda_bwd_prepare(
         raise RuntimeError("chunk_kda_bwd_prepare: invalid layout")
     packed = layout in {"NTD", "TND"}
     seq = layout in {"BSND", "TND"}
-    if (cu_seqlens is not None) != packed or (chunk_indices is not None) != packed:
-        raise RuntimeError("chunk_kda_bwd_prepare: layout and metadata mismatch")
+    if cu_seqlens is None and chunk_indices is not None:
+        raise RuntimeError("chunk_kda_bwd_prepare: chunk_indices requires cu_seqlens")
     if int(chunk_size) != 64 or not math.isfinite(float(scale)):
         raise RuntimeError("chunk_kda_bwd_prepare: chunk_size must be 64 and scale finite")
     rank = 3 if packed else 4
@@ -4915,6 +4915,8 @@ def npu_chunk_kda_bwd_prepare(
         raise RuntimeError("chunk_kda_bwd_prepare: inputs must be contiguous BF16 with matching rank")
     base = 0 if packed else 1
     B = 1 if packed else int(aqk.shape[0])
+    if cu_seqlens is not None and B != 1:
+        raise RuntimeError("chunk_kda_bwd_prepare: variable lengths require B=1")
     H = int(aqk.shape[base + int(seq)])
     T = int(aqk.shape[base + int(not seq)])
     if min(B, H, T) <= 0 or aqk.shape[-1] != 64:

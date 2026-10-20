@@ -3,7 +3,7 @@
 #include <cstdint>
 namespace KDA {
 enum InputLayout : uint32_t { BNSD = 0, BSND = 1, NTD = 2, TND = 3 };
-inline constexpr bool VariableLayout(uint32_t layout) { return layout == NTD || layout == TND; }
+inline constexpr bool Rank3Layout(uint32_t layout) { return layout == NTD || layout == TND; }
 inline constexpr bool SequenceMajorLayout(uint32_t layout) { return layout == BSND || layout == TND; }
 }
 #endif

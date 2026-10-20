@@ -9,7 +9,7 @@ static ge::graphStatus InferShapeChunkKdaBwdPrepare(gert::InferShapeContext *con
     KDA::TokenShape shape;
     if (!attrs || !input || !KDA::ParseLayout(attrs->GetStr(3), layout) ||
         !KDA::ParseTokenShape(*input, layout, shape)) return ge::GRAPH_FAILED;
-    const bool packed = KDA::VariableLayout(layout);
+    const bool packed = KDA::Rank3Layout(layout);
     for (size_t i = 0; i < 3; ++i) {
         auto *out = context->GetOutputShape(i);
         if (!out) return ge::GRAPH_FAILED;
@@ -24,6 +24,7 @@ static ge::graphStatus InferShapeChunkKdaBwdPrepare(gert::InferShapeContext *con
 static ge::graphStatus InferDataTypeChunkKdaBwdPrepare(gert::InferDataTypeContext *context)
 {
     context->SetOutputDataType(0, ge::DT_FLOAT);
+    // The optimized prepare accepts BF16 inputs only.
     context->SetOutputDataType(1, ge::DT_BF16);
     context->SetOutputDataType(2, ge::DT_FLOAT);
     return ge::GRAPH_SUCCESS;

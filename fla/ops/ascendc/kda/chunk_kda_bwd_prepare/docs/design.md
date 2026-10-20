@@ -2,6 +2,48 @@
 
 当前规则版本：`V2`。采用四 head 工作项及整 head 的 AIV 映射。
 
+## A5 四布局适配设计
+
+基线为主线 `67dc99d7` 的 arch35 实现，公开接口对齐 `8c630459`。
+本次只调整输入地址、GM tensor 的物理行距、平台路由与调用参数。
+继续沿用现有整 head AIV 分工，不在接口适配中重排流水或变更缓冲所有权。
+
+Stage 0（Cube）仍按每工作项最多四个 head，依次计算
+`A = dO @ v_new.T`、`Q = dO @ h.T`（state_v_first 时为 `dO @ h`）、
+`D = Aqk.T @ dO`。输入 BF16、累加 FP32；A/Q 以 FP32，D 以 BF16
+经一次 Fixpipe 进入对应 AIV 的 UB。A/Q 复用 dO 的 L0A。
+输入起点在 BNSD/NTD 为 `((b*H+h)*T+t)*D`，在 BSND/TND 为
+`((b*T+t)*H+h)*D`；相邻 token 行距分别为 D 和 H*D。
+packed 的 b 恒为 0；h 仍用原 chunk-major 寻址。
+GM tensor 的 stride 与逻辑 tile 大小分开，L1/L0 的紧密布局不变。
+每 pair 的两个 head 仍分别落入原有 L1 owner；不增加 NPU transpose。
+超过批量搬运字段范围的 head 间距改用两次单矩阵搬运，ready 在两次完成后发布。
+固定依赖 CATLASS `41bf90da` 的 A5 TileCopy 接收 uint32_t 行距和矩阵间距；
+矩阵间距使用上述拆分，超限的 token 行距在 host 明确拒绝，不做窄化截断。
+
+Stage 1（Vector）保持原 head 交错分工与两份 A raw/output slot；
+先用下三角有效 mask 排除无效位置，再缩放 A，保证非有限上三角和尾列也为零。
+Q/D 只做 MTE3 写回。三路输出始终按原 head-major offset 写出。
+
+每 head L1 区间为 `[0,16)` KiB dO、`[16,32)` v_new、`[32,64)` h、
+`[64,72)` Aqk；四份共 288 KiB。L0A/B/C 各两份 32 KiB，共各 64 KiB。
+每 AIV 的 A raw `[0,32)`、A output `[32,64)`、mask `[64,80)`、
+Q `[80,112)`、D `[112,128)` KiB，共 128 KiB，保持原 192 KiB UB 上限。
+所有 MTE2_MTE1 pair-ready、MTE1_MTE2 owner-free、M_MTE1、M_FIX/FIX_M
+及跨核 mode 4 ready/free 不变，奇数 head 仍只发布实际 head 的通知。
+A5 不使用 A2/A3 的 GM 中转 scratch，仅申请 SDK 系统 workspace。
+
+共享 host 按 `layout + 4 * isVariable` 生成 key 0..7，编译架构选择 arch22 或 arch35。
+layout 决定 rank，cu_seqlens 决定变长；四维变长要求 B=1，三维定长按单序列处理。
+h 始终 chunk-major，rank 随 Token rank；变长缺省 chunk_indices 由 L0 生成。
+删除 standalone 的旧 Phase A 及 FP16 fallback，统一使用优化 BF16 实现。
+A5 暂只开放定长 BNSD、变长 NTD，新增组合明确拒绝。
+旧 A5 单体 backward 仍引用的共享 Phase A 源码不在本次删除范围。
+旧完整 backward 和 V2 都显式传入 BNSD/NTD，保持其输出消费方式。
+
+本次无新增性能目标；需对四布局、两种状态方向、tail、奇数 head、多 batch、
+packed 空序列及同核多任务做回归。原有路径性能、设备精度与 sanitizer 仍需跑卡验证。
+
 实现采用 arch22 的 A2/A3 GM 中转路径。
 接口由 [api.md](api.md) 固定；验收用例及结果记录在
 [ATK README](../../../../../../tests/atk/chunk_kda_bwd_prepare_a3/README.md)。
@@ -77,7 +119,7 @@ L1 填充指令及其 sanitizer 插桩路径。填充与后续 ND2NZ 均在 MTE2
 packed 元数据在 host 侧传递。ctypes 保留为参考与显式回退路径。
 ACLNN 参数检查使用 opbase 的 Error Message 宏；Stable-ABI 读取失败线程上的
 最近错误详情并将其附加到异常中，保留原始 ACLNN 返回码。
-950 注册继续保留，既有 arch35 实现与新接口的兼容性不属于当前 A2/A3 验证结论。
+950 注册继续保留；A5 适配设计见本文前节，其验证不属于原 A2/A3 结果。
 
 调用层与错误上报回归：32 组正常输入的 96 路输出逐位通过，Stable 后端无回退；
 29 项 ACLNN 非法输入检查及公开 Stable 入口的错误详情检查通过。

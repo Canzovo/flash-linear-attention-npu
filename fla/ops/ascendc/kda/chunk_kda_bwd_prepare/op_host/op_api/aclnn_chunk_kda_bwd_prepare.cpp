@@ -49,7 +49,7 @@ aclnnStatus InvalidValue(const char *name, const std::string &actual, const std:
 
 aclnnStatus InvalidArgument(const char *name, const std::string &reason)
 {
-    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(OP_NAME, name, reason);
+    OP_LOGE_FOR_INVALID_VALUE(OP_NAME, name, "invalid", reason);
     return ACLNN_ERR_PARAM_INVALID;
 }
 
@@ -99,6 +99,7 @@ aclnnStatus ValidateMetadata(
     if (totalChunks != expectedChunks || totalChunks <= 0) {
         return InvalidValue("h.total_chunks", std::to_string(expectedChunks), std::to_string(totalChunks));
     }
+    if (indices == nullptr) return ACLNN_SUCCESS;
     if (indices->Size() != static_cast<size_t>(2 * totalChunks)) {
         return InvalidValue("chunk_indices.size", std::to_string(indices->Size()), std::to_string(2 * totalChunks));
     }
@@ -139,25 +140,22 @@ aclnnStatus Check(
     if (!KDA::ParseLayout(layout, inputLayout)) {
         return InvalidValue("layout", layout, "BNSD, BSND, NTD or TND");
     }
-    const bool variable = KDA::VariableLayout(inputLayout);
-    if ((cu == nullptr) != (indices == nullptr)) {
-        return InvalidArgument("cu_seqlens/chunk_indices", "must be provided together");
-    }
-    if (variable != (cu != nullptr)) {
-        return InvalidArgument("cu_seqlens/chunk_indices",
-            variable ? "both are required for packed layouts" : "both must be absent for dense layouts");
+    const bool rank3 = KDA::Rank3Layout(inputLayout);
+    const bool variable = cu != nullptr;
+    if (!variable && indices != nullptr) {
+        return InvalidArgument("chunk_indices", "requires cu_seqlens");
     }
     const auto a = aqk->GetViewShape(), v = vNew->GetViewShape(), o = dO->GetViewShape();
     const auto state = h->GetViewShape();
-    const size_t rank = variable ? 3 : 4;
-    const char *tokenPattern = variable ? "rank 3, positive H/T/D" : "rank 4, positive B/H/T/D";
+    const size_t rank = rank3 ? 3 : 4;
+    const char *tokenPattern = rank3 ? "rank 3, positive H/T/D" : "rank 4, positive B/H/T/D";
     for (size_t i = 0; i < 3; ++i) {
         if (tensors[i]->GetViewShape().GetDimNum() != rank) {
             return InvalidShape(tensors[i], names[i], tokenPattern);
         }
     }
     if (state.GetDimNum() != rank + 1) {
-        return InvalidShape(h, "h", variable ? "[total_chunks,H,128,128]" : "[B,ceil(T/64),H,128,128]");
+        return InvalidShape(h, "h", rank3 ? "[Nc,H,128,128]" : "[B,Nc,H,128,128]");
     }
     KDA::TokenShape aShape, vShape, oShape;
     if (!KDA::ParseTokenShape(a, inputLayout, aShape)) return InvalidShape(aqk, "aqk", tokenPattern);
@@ -173,16 +171,16 @@ aclnnStatus Check(
         }
     }
     const int64_t B = aShape.B, NV = aShape.H, T = aShape.T;
-    const int64_t chunkCount = variable ? state.GetDim(0) : state.GetDim(1);
-    const bool stateValid = variable
+    if (variable && B != 1) return InvalidValue("B", std::to_string(B), "1 for variable lengths");
+    const int64_t chunkCount = rank3 ? state.GetDim(0) : state.GetDim(1);
+    const bool stateValid = rank3
         ? state.GetDim(1) == NV && state.GetDim(2) == 128 && state.GetDim(3) == 128
         : state.GetDim(0) == B && state.GetDim(2) == NV &&
               state.GetDim(3) == 128 && state.GetDim(4) == 128;
     if (!stateValid) {
-        return InvalidShape(h, "h", variable
-            ? "[total_chunks," + std::to_string(NV) + ",128,128]"
-            : "[" + std::to_string(B) + "," + std::to_string((T + 63) / 64) + "," +
-              std::to_string(NV) + ",128,128]");
+        return InvalidShape(h, "h",
+            (rank3 ? "[" : "[" + std::to_string(B) + ",") +
+            "Nc," + std::to_string(NV) + ",128,128]");
     }
     if (variable) {
         const auto status = ValidateMetadata(cu, indices, T, chunkSize, chunkCount);
@@ -192,9 +190,9 @@ aclnnStatus Check(
     }
     for (size_t i = 4; i < 7; ++i) {
         const int64_t width = i == 4 ? 64 : 128;
-        if (!KDA::HeadOutputShape(tensors[i]->GetViewShape(), aShape, width, variable)) {
+        if (!KDA::HeadOutputShape(tensors[i]->GetViewShape(), aShape, width, rank3)) {
             return InvalidShape(tensors[i], names[i],
-                (variable ? "[" : "[" + std::to_string(B) + ",") + std::to_string(NV) + "," +
+                (rank3 ? "[" : "[" + std::to_string(B) + ",") + std::to_string(NV) + "," +
                 std::to_string(T) + "," + std::to_string(width) + "]");
         }
     }

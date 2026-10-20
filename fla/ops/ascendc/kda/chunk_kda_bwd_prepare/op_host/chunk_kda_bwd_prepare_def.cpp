@@ -11,14 +11,10 @@ class ChunkKdaBwdPrepare : public OpDef {
 public:
     explicit ChunkKdaBwdPrepare(const char *name) : OpDef(name)
     {
-#ifdef KDA_BWD_STAGES_ARCH22
-        const std::initializer_list<ge::DataType> bf16 = {ge::DT_BF16, ge::DT_FLOAT16};
-#else
-        const std::initializer_list<ge::DataType> bf16 = {ge::DT_BF16, ge::DT_BF16};
-#endif
-        const std::initializer_list<ge::DataType> fp32 = {ge::DT_FLOAT, ge::DT_FLOAT};
-        const std::initializer_list<ge::DataType> int64 = {ge::DT_INT64, ge::DT_INT64};
-        const std::initializer_list<ge::Format> nd = {ge::FORMAT_ND, ge::FORMAT_ND};
+        const std::initializer_list<ge::DataType> bf16 = {ge::DT_BF16};
+        const std::initializer_list<ge::DataType> fp32 = {ge::DT_FLOAT};
+        const std::initializer_list<ge::DataType> int64 = {ge::DT_INT64};
+        const std::initializer_list<ge::Format> nd = {ge::FORMAT_ND};
 
         this->Input("aqk").ParamType(REQUIRED).DataType(bf16).Format(nd).UnknownShapeFormat(nd);
         this->Input("v_new").ParamType(REQUIRED).DataType(bf16).Format(nd).UnknownShapeFormat(nd);
@@ -52,8 +48,6 @@ public:
         this->AICore().AddConfig("ascend910b", config);
         this->AICore().AddConfig("ascend910_93", config);
         this->AICore().AddConfig("ascend950", config);
-        this->AICore().AddConfig("ascend910b", config);
-        this->AICore().AddConfig("ascend910_93", config);
     }
 };
 

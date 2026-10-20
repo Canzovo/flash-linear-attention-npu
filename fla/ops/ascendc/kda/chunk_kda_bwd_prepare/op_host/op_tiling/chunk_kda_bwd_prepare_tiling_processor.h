@@ -25,6 +25,7 @@ struct ChunkKdaBwdPrepareTilingContext {
     const char *layout;
     uint32_t aicCoreNum;
     size_t sysWorkspaceSize;
+    bool isA5 = false;
 };
 class ChunkKdaBwdPrepareTilingProcessor {
 public:
@@ -39,7 +40,8 @@ public:
             ctx_.chunkSize != 64 || !std::isfinite(ctx_.scale) ||
             !std::isfinite(static_cast<float>(ctx_.scale)) ||
             !KDA::ParseLayout(ctx_.layout, tiling_.inputLayout)) return Fail("dtype/layout/attributes");
-        const bool variable = KDA::VariableLayout(tiling_.inputLayout);
+        const bool rank3 = KDA::Rank3Layout(tiling_.inputLayout);
+        const bool variable = ctx_.cuSeqlensShape != nullptr;
         if ((ctx_.cuSeqlensShape != nullptr) != variable ||
             (ctx_.chunkIndicesShape != nullptr) != variable) return Fail("metadata presence");
         KDA::TokenShape a, v, o;
@@ -48,18 +50,25 @@ public:
             !KDA::ParseTokenShape(ctx_.dOShape->GetStorageShape(), tiling_.inputLayout, o) ||
             a.D != 64 || v.D != 128 || o.D != 128 || a.B != v.B || a.B != o.B ||
             a.H != v.H || a.H != o.H || a.T != v.T || a.T != o.T) return Fail("token shapes");
+        if (variable && a.B != 1) return Fail("variable lengths require B=1");
+        if (ctx_.isA5 && (KDA::SequenceMajorLayout(tiling_.inputLayout) || variable != rank3))
+            return Fail("A5 currently supports fixed BNSD and variable NTD only");
+        // CATLASS A5 TileCopy currently narrows the GM row stride to uint32_t.
+        if (ctx_.isA5 && KDA::SequenceMajorLayout(tiling_.inputLayout) &&
+            a.H > std::numeric_limits<uint32_t>::max() / 128) return Fail("A5 token row stride");
         auto h = ctx_.hShape->GetStorageShape();
-        if (h.GetDimNum() != (variable ? 4 : 5)) return Fail("state rank");
+        if (h.GetDimNum() != (rank3 ? 4 : 5)) return Fail("state rank");
         tiling_.B = a.B; tiling_.NV = a.H; tiling_.T = a.T;
         tiling_.K = 128; tiling_.V = 128; tiling_.chunkSize = 64;
         tiling_.isVariable = variable; tiling_.stateVFirst = ctx_.stateVFirst;
         tiling_.scale = static_cast<float>(ctx_.scale);
         tiling_.denseChunkNum = variable ? 0 : (a.T + 63) / 64;
-        const int64_t chunks = variable ? h.GetDim(0) : tiling_.denseChunkNum;
-        const size_t stateBase = variable ? 1 : 2;
+        const int64_t chunks = h.GetDim(rank3 ? 0 : 1);
+        const size_t stateBase = rank3 ? 1 : 2;
         if (chunks <= 0 || h.GetDim(stateBase) != a.H ||
             h.GetDim(stateBase + 1) != 128 || h.GetDim(stateBase + 2) != 128 ||
-            (!variable && (h.GetDim(0) != a.B || h.GetDim(1) != chunks))) return Fail("state shapes");
+            (!rank3 && h.GetDim(0) != a.B) ||
+            (!variable && chunks != tiling_.denseChunkNum)) return Fail("state shapes");
         if (chunks > std::numeric_limits<int64_t>::max() / a.B) return Fail("chunk overflow");
         tiling_.totalChunkNum = chunks * a.B;
         tiling_.seqNum = a.B;
@@ -80,10 +89,11 @@ public:
         if (ctx_.aicCoreNum == 0) return Fail("no AIC cores");
         blockDim_ = static_cast<uint32_t>(std::min<int64_t>(ctx_.aicCoreNum, tiling_.workTaskNum));
         tilingKey_ = GET_TPL_TILING_KEY(tiling_.inputLayout, tiling_.isVariable);
-        workspaceSize_ = ctx_.sysWorkspaceSize + static_cast<size_t>(blockDim_) * 65536;
+        const size_t scratchSize = ctx_.isA5 ? 0 : static_cast<size_t>(blockDim_) * 65536;
+        workspaceSize_ = ctx_.sysWorkspaceSize + scratchSize;
         OP_LOGD(ctx_.nodeName, "layout=%u variable=%u stateVFirst=%u key=%lu blocks=%u userScratch=%lu",
                 tiling_.inputLayout, tiling_.isVariable, tiling_.stateVFirst, tilingKey_,
-                blockDim_, static_cast<size_t>(blockDim_) * 65536);
+                blockDim_, scratchSize);
         return ge::GRAPH_SUCCESS;
     }
     uint32_t GetBlockDim() const { return blockDim_; }
