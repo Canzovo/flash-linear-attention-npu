@@ -28,6 +28,7 @@
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
 #include "opdev/tensor_view_utils.h"
+#include "recurrent_gated_delta_rule_v2_check.h"
 
 using namespace op;
 
@@ -188,7 +189,8 @@ aclnnStatus aclnnRecurrentGatedDeltaRuleGetWorkspaceSize(const aclTensor *query,
     // 调用l0接口
     auto outRet =
         l0op::RecurrentGatedDeltaRule(query_, key_, value_, beta_, stateRef, actualSeqLengths_, ssmStateIndices_, g, gk,
-                                      numAcceptedTokens, scaleValue, uniqueExecutor.get());
+                                      numAcceptedTokens, nullptr, nullptr, scaleValue, false, false, false, false,
+                                      uniqueExecutor.get());
     if (outRet == nullptr) {
         return ACLNN_ERR_INNER_NULLPTR;
     }
@@ -208,6 +210,77 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(void *workspace, uint64_t workspaceSize
                                          aclrtStream stream)
 {
     L2_DFX_PHASE_2(aclnnRecurrentGatedDeltaRule);
+    return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+}
+
+aclnnStatus aclnnRecurrentGatedDeltaRuleV2GetWorkspaceSize(
+    const aclTensor *query, const aclTensor *key, const aclTensor *value, const aclTensor *beta,
+    aclTensor *stateRef, const aclTensor *actualSeqLengths, const aclTensor *ssmStateIndices,
+    const aclTensor *g, const aclTensor *gk, const aclTensor *numAcceptedTokens,
+    const aclTensor *aLog, const aclTensor *dtBias, float scaleValue,
+    bool useQkL2NormInKernel, bool useGateInKernel, bool useBetaSigmoidInKernel,
+    bool allowNegEigval, aclTensor *out, uint64_t *workspaceSize, aclOpExecutor **executor)
+{
+    L2_DFX_PHASE_1(aclnnRecurrentGatedDeltaRuleV2,
+                  DFX_IN(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices,
+                         g, gk, numAcceptedTokens, aLog, dtBias, scaleValue,
+                         useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval),
+                  DFX_OUT(stateRef, out));
+    CHECK_RET(workspaceSize != nullptr && executor != nullptr, ACLNN_ERR_PARAM_INVALID);
+    const rgdn_v2::Params params{query, key, value, beta, stateRef, actualSeqLengths,
+        ssmStateIndices, g, gk, numAcceptedTokens, aLog, dtBias, scaleValue,
+        useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval, out};
+    CHECK_RET(rgdn_v2::Check(params), ACLNN_ERR_PARAM_INVALID);
+
+    auto uniqueExecutor = CREATE_EXECUTOR();
+    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
+    for (auto tensor : {query, key, value, beta, static_cast<const aclTensor *>(stateRef),
+                        actualSeqLengths, ssmStateIndices, g, numAcceptedTokens, aLog, dtBias,
+                        static_cast<const aclTensor *>(out)}) {
+        if (tensor) tensor->SetOriginalShape(tensor->GetViewShape());
+    }
+
+    // Q/K/V and the writable State are genuine strided views. Never silently
+    // materialize them: both their storage offset and their strides are ABI data.
+    const auto preserveView = [&](const aclTensor *tensor) -> const aclTensor * {
+        return uniqueExecutor->CreateView(tensor, tensor->GetViewShape(), tensor->GetStorageShape(),
+                                          tensor->GetViewStrides(), tensor->GetViewOffset());
+    };
+    const auto queryView = preserveView(query);
+    const auto keyView = preserveView(key);
+    const auto valueView = preserveView(value);
+    auto stateView = uniqueExecutor->CreateView(stateRef, stateRef->GetViewShape(), stateRef->GetStorageShape(),
+                                               stateRef->GetViewStrides(), stateRef->GetViewOffset());
+    CHECK_RET(queryView && keyView && valueView && stateView, ACLNN_ERR_INNER_NULLPTR);
+
+    const auto contiguous = [&](const aclTensor *tensor) -> const aclTensor * {
+        return tensor ? l0op::Contiguous(tensor, uniqueExecutor.get()) : nullptr;
+    };
+    const auto betaContiguous = contiguous(beta);
+    const auto lengthsContiguous = contiguous(actualSeqLengths);
+    const auto indicesContiguous = contiguous(ssmStateIndices);
+    const auto gContiguous = contiguous(g);
+    const auto acceptedContiguous = contiguous(numAcceptedTokens);
+    const auto aLogContiguous = useGateInKernel ? contiguous(aLog) : nullptr;
+    const auto biasContiguous = useGateInKernel ? contiguous(dtBias) : nullptr;
+    CHECK_RET(betaContiguous && lengthsContiguous && indicesContiguous && (!g || gContiguous) &&
+              (!numAcceptedTokens || acceptedContiguous) && (!useGateInKernel || aLogContiguous) &&
+              (!useGateInKernel || !dtBias || biasContiguous), ACLNN_ERR_INNER_NULLPTR);
+    const auto outRet = l0op::RecurrentGatedDeltaRule(
+        queryView, keyView, valueView, betaContiguous, stateView, lengthsContiguous, indicesContiguous,
+        gContiguous, nullptr, acceptedContiguous, aLogContiguous, biasContiguous, scaleValue,
+        useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval, uniqueExecutor.get());
+    CHECK_RET(outRet != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    CHECK_RET(l0op::ViewCopy(outRet, out, uniqueExecutor.get()) != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    *workspaceSize = uniqueExecutor->GetWorkspaceSize();
+    uniqueExecutor.ReleaseTo(executor);
+    return ACLNN_SUCCESS;
+}
+
+aclnnStatus aclnnRecurrentGatedDeltaRuleV2(void *workspace, uint64_t workspaceSize,
+                                           aclOpExecutor *executor, aclrtStream stream)
+{
+    L2_DFX_PHASE_2(aclnnRecurrentGatedDeltaRuleV2);
     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }
 

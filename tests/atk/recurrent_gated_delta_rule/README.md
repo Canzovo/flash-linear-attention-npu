@@ -1,85 +1,131 @@
-# RecurrentGatedDeltaRule ATK 工程
+# RecurrentGDN A2/A3 ATK 交付件
 
-本目录提供 `recurrent_gated_delta_rule` 的 ATK 单算子工程，包含 `executor_recurrent_gated_delta_rule.py`、`gen_recurrent_gated_delta_rule.py`、`recurrent_gated_delta_rule.yaml`、`atk_recurrent_gated_delta_rule.json`。测试通过稳定入口 `fla_npu.ops.ascendc.recurrent_gated_delta_rule` 调用算子。
+本工程对齐本任务的 A2/A3 V2 设计和 2026-10-30 CPU 双标杆。测试通过公开入口 `fla_npu.ops.ascendc.recurrent_gated_delta_rule` 调用 Stable ABI；每次 NPU 正向执行后强制核验 `ascendc.BACKENDS['npu_recurrent_gated_delta_rule']=='stable'`，缺失或回退到 ctypes 均报 ERROR。CPU 标杆独立计算，不调用 DUT 或 kernel 辅助函数。本文说明测试资产和复现方法，硬件通过结论以本轮实际报告为准。
 
-## 输入约束
+## 接口与输入
 
-- `query/key` 的 shape 为 `(T, Nk, Dk)`，`value/out` 的 shape 为 `(T, Nv, Dv)`。
-- `beta` 的 shape 为 `(T, Nv)`；`stateRef` 为原地输入输出，shape 为 `(BlockNum, Nv, Dv, Dk)`。
-- `query/key/value/beta/out` 为 BF16；`stateRef` 支持 BF16 和 FP32。
-- `actualSeqLengths` 为 `(B+1,)` 的 INT32 张量，首元素是不参与计算的无效前缀长度，所有元素之和等于 `T`。
-- `ssmStateIndices` 为 `(T,)` 的 INT32 张量，取值范围为 `[0, BlockNum)`，且所有元素互不重复。
-- `g` 如提供，shape 为 `(T, Nv)`；`gk` 如提供，shape 为 `(T, Nv, Dk)`。两者均为 FP32，且至少提供一个。
-- `numAcceptedTokens` 如提供，shape 为 `(B,)`，每项取值范围为 `[1, actualSeqLengths[i+1]]`。
-- `Nv` 必须是 `Nk` 的整数倍；`Nk <= 256`、`Nv <= 256`、`Dk=128`、`Dv=128`；每条有效序列长度不超过 8。
-- 泛化矩阵覆盖连续 state、transpose 非连续 state、head padding、block padding、复合 padding 和 storage offset；同时覆盖 Q/K/V/gate/metadata 的合法非连续视图。
+- Q/K 为 `[T,HK,128]` BF16，V/out 为 `[T,HV,128]` BF16；`HV%HK=0`，ratio 为 1～16，head 总数不限制为 256。
+- State 为 `[Cstate,HV,128,128]` BF16/FP32，原地更新；比较完整 State pool，包括未写槽。State padding 和 storage offset 前后的 guard 另外检查不变。
+- Beta 和 scalar g 分别独立支持 BF16/FP32。g 可空；gk 保留但非空应拒绝。raw gate 模式要求 g/A_log，dt_bias 可空；A_log/dt_bias 为 `[HV]` FP32。
+- Q/K L2Norm、raw gate 和 Beta sigmoid 三个开关独立生效；`allow_neg_eigval` 仅在 sigmoid 开启时将结果乘 2。归一化后的 Q/K 保持 FP32，不重新量化到 BF16。
+- lengths 为 INT32 `[prefix,L0,...]`，总和为 T；checkpoint 为 `[T]` 或 `[B,W]`。二维要求 `W>0` 且 `W>=max(L_b)`，全空请求也不接受零宽表，与原 CPU 标杆一致。二维 accepted 可大于当前长度且不超过 W；空请求跳过 accepted。同请求重复槽合法，不同请求不得发生写/写或初始读/写竞争。
+- QKV 保留末轴 stride=1 的外轴 padding、transpose、混合 QKV slice、offset 和合法只读重叠。State 保留行/head/slot padding、置换和 offset。末轴 stride=2 的 QKV 是反向用例，不冒充合法布局。
+- out 的无效 prefix 在测试比较前统一置零；kernel 不因此承担 prefix 清零要求。State 没有无效区屏蔽。
 
-## 标杆来源
+三条执行路径均先在 CPU 按相同 seed 生成产品 dtype 的输入；迁移 DUT 时按完整 backing storage 搬运，再以原 shape/stride/offset 重建视图，保留 QKV 只读别名。golden 不把产品输入改成 FP64；仅递推内部使用 FP64。
 
-`tests/atk/recurrent_gated_delta_rule/reference_recurrent_gated_delta_rule.py`；`fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/README.md`
+## 原生 CPU 双标杆
 
-CPU 标杆在本目录的 `reference_recurrent_gated_delta_rule.py` 中实现，输入构造、`run_cpu`、`run_npu` 和 `FunctionApi` 在 `executor_recurrent_gated_delta_rule.py` 中实现；公共文件只提供基础工具函数。CPU golden 与算子语义一致，按 batch 分段使用 FP32 执行递推，覆盖 GQA 头映射、`g/gk` 衰减、接受 token 对初始状态索引的选择，以及逐 token 状态写回。精度检查统一使用 ATK 原生 `mixed_tolerance_bm`。
+`reference.py` 原样来自用户提供的 2026-10-30 标杆，提供固定 FP64 golden 和 FP32 bench。两条路径均在 checkpoint 写回时转换到公开 dtype，下一 token 接续未舍入的工作 State。`reference_recurrent_gated_delta_rule.py` 只做兼容导入。
 
-ATK 比较以下两个结果：
+精度唯一标准为 YAML/JSON 中 ATK 原生 `cv_fused_double_benchmark`：`max_re_ratio=5`、`avg_re_ratio=1.5`、`root_mean_squared_ratio=1.5`。executor 不自定义误差阈值，也不以混合容差或单标杆替代双标杆。
 
-- `out`：`(T, Nv, Dv)` 的注意力输出；无效前缀没有公开数值语义，比较前统一置零。
-- `stateRef`：算子执行后原地更新的完整状态张量。
+ATK 原生标准还保留未显式覆盖的默认小值域判据。已安装版本的官方类和边界探针确认：FP32 输出的小值域为 `abs(golden)<=2^-14`，其中 `abs(actual-golden)>2^-30` 的元素计为错误点；错误点比例为 `countActual/max(countBench,1)`，默认 `number_count_radio=2`，等于2通过，大于2失败。官方 `NumberCountResult.do_summary` 会将 benchmark 的零计数改成1，因此报告中的 Benchmark 计数1不能区分原始0或1。以上规则未作修改。
 
-## SOC 支持
+ATK 26.9.24 的纯 CPU 探针已确认：两个显式节点配合 `--bm_device cpu` 自动形成三次计算。普通 CPU invocation 的 `task_result.is_benchmark_task=False`，执行 FP32 bench；ATK 自动追加的 CPU invocation 为 True，执行 FP64 golden。不能只按 device 或节点名决定精度。探针位于 `scripts/probe_atk_dual_roles.py`，不调用实际算子。
 
-YAML 元信息覆盖 `ascend910b`、`ascend910_93` 和 `ascend950`，可配合统一脚本的 `-soc=ascend910b|ascend910_93|ascend950` 使用。提交的 JSON 用例使用 `soc=all`，同一矩阵用于 A2、A3、A5。
-
-## 默认用例
-
-`atk_recurrent_gated_delta_rule.json` 由 `gen_recurrent_gated_delta_rule.py` 确定性生成，固定包含 200 条正向用例。每条 `case_spec` 都携带详细设计 `design_id`，映射关系如下：
-
-| ATK Case ID | 详细设计 ID | 数量 | 覆盖范围 |
-|---:|---|---:|---|
-| 0-5 | RGDR-P001-P006 | 6 | gate 组合、BF16/FP32 state、A2/A3 归约路径 |
-| 6-21 | RGDR-P007-P022 | 16 | 变长、prefix、零长度逻辑序列、accepted token |
-| 22 | RGDR-P023 | 1 | `Dk=Dv=128` 的对齐维度、UB profile |
-| 23-38 | RGDR-P024-P039 | 16 | `Nk/Nv=1..256`、GVA group size |
-| 39-54 | RGDR-P040-P055 | 16 | state stride/layout、稀疏/逆序/置换 index |
-| 55-69 | RGDR-P056-P070 | 15 | 平台、调用通路代表 shape、非连续输入、连续调用与回归 |
-| 70-81 | RGDR-P071-P082 | 12 | gate、state dtype/layout 与非连续输入交叉组合 |
-| 82-90 | RGDR-P083-P091 | 9 | 长变长链、accepted token、state index 置换与 scale |
-| 91-95 | RGDR-P092-P096 | 5 | 补充可整除的 `Nk/Nv` 头映射 |
-| 96-99 | RGDR-P097-P100 | 4 | 连续调用与 gate/beta 数值分布 |
-| 100-115 | RGDR-G001-G016 | 16 | GVA head 映射与 group size |
-| 116-131 | RGDR-G017-G032 | 16 | GVA gate、state dtype、可追踪 head 数据 |
-| 132-147 | RGDR-G033-G048 | 16 | GVA varlen、prefix、accepted 与稀疏 block |
-| 148 | RGDR-G049 | 1 | GVA 对齐维度、UB 分片（`Dk=Dv=128`） |
-| 149-164 | RGDR-G050-G065 | 16 | GVA state layout、index、非连续输入与复杂视图 |
-| 165-174 | RGDR-G066-G075 | 10 | 补充 GVA ratio 与大 head 边界 |
-| 175-182 | RGDR-G076-G083 | 8 | GVA gate、state layout 与数值 profile 交叉 |
-| 183-190 | RGDR-G084-G091 | 8 | GVA 长变长、accepted token 与 state index 链 |
-| 191-198 | RGDR-G092-G099 | 8 | GVA 复合非连续视图与连续调用 |
-| 199 | RGDR-G100 | 1 | prefix、varlen、accepted、GVA 与复合 layout 回归 |
-
-ATK DUT 统一通过 `fla_npu.ops.ascendc.recurrent_gated_delta_rule` 执行。`design_routes` 只保留详细设计中 P/A/D/F 的来源追溯，不表示本 JSON 已执行 aclnn C++ example 或快速拉起通路；这些通路仍由各自专用测试验证。
-
-正向 JSON 只包含 `Dk=Dv=128` 的合法 shape。任何不等于 128 的维度属于非法输入，由 `fla_npu` wrapper 和 op_host tiling 共同拦截；对应拦截由 op_host UT 覆盖。
-
-## 执行方式
+非对称常量探针进一步使用 NPU 节点（只初始化 marker，执行器返回 CPU 常量，不调用 DUT）：golden=1、bench=1.01、DUT=2 时原生比较 FAIL，Actual/Benchmark 误差约为 1/0.01，误差比约100；golden=1、bench=2、DUT=1.01 时 PASS，误差比约0.01。日志确认使用 `CvFusedDoubleBenchmarkAccuracyCompare`。ATK 将结果记在第二个 CPU 节点行，但 `Actual` 对应第一个 NPU DUT，不能只根据行名交换节点。探针公开输出使用 FP32，避免 FP64 输出触发不同比较路径。
 
 ```bash
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -npu_device_id=0
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -npu_device_id=0 -scope=accuracy
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -npu_device_id=0 -scope=performance
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -npu_device_id=0 -scope=determinism
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -npu_device_id=0 -scope=mssanitizer
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -scope=gen_cases
+atk node --name npu_dut --backend npu --devices 0 --is_bm False \
+  node --name cpu_bench --backend cpu --is_bm True \
+  task -c ./atk_recurrent_gated_delta_rule.json \
+    -p ./executor_recurrent_gated_delta_rule.py \
+    --task accuracy --bm_device cpu -to 2000
 ```
 
-提交的 200 条 JSON 可通过以下命令重新生成并复核：
+也可调用 `bash scripts/run_dual_accuracy.sh 0`，其余 ATK 参数可追加。发生失败时先加 `--save_data output` 保存失败用例并做 CT 定位；不改阈值、range、分布、shape 或覆盖来制造通过。
+
+入口在 ATK 命令结束后调用仓内公共结果检查器，读取本轮新生成的 xlsx 精度通过字段。任意精度失败、执行 ERROR、缺少报告或读到旧报告均返回非零；ATK 自身 CLI 退出0不代表精度通过。
+
+复检使用 `ATK_TASK=accuracy_lt bash scripts/run_dual_accuracy.sh 0 -wl '[63,399]' --loop_nums 50 --disable_id_seed -mt 8`，不加 `-sp`，并以 `ct dual analyze <report.xlsx>` 汇总。仅在 `disable_id_seed` 且 `loop_nums>1` 时，executor 将 ATK 每轮运行时 `case_config.id` 混入数值 seed；三角色共享该 id。shape、indices、accepted、layout、stride、offset、属性和数值范围保持冻结；正常 accuracy 与确定性继续使用原 seed。不能使用跨轮保持不变的 `torch.initial_seed()` 代替该运行时 id。
+
+两轮原生 `accuracy_lt` 探针已核验六次执行：三角色在同一轮的输入数值 hash 相同，下一轮数值 hash 改变；六次 metadata/stride/offset/属性 hash 完全相同。CPU 自检另对二维 checkpoint、accepted 大于有效长度、空请求和重复槽执行了相同断言。
+
+CT0.9.1 的 `dual analyze` 官方聚合仅覆盖 MARE/MERE/RMSE 三个 ratio，不定义小值域错误点数量比的聚合判定。复检记录必须同时保留每轮原生通过状态、小值域 Actual/Benchmark 计数和比例分布，不能用三 ratio 聚合结果覆盖其未覆盖的指标。CT CLI 不传播 `process_excel_and_check` 的失败数，聚合状态应读取该官方 API 的 `failed_cases`；现有 accuracy 报告检查脚本仅检查 ATK 原生汇总，不能替代 CT 统计。
+
+## 覆盖与映射
+
+精度矩阵共 **906** 条，每个逻辑 profile 包含固定种子 20261022、20261023、20261024。以历史 V2 834 条矩阵为基础：822 条符合新契约的 profile 原样保留 head、layout 和数值范围；另 12 条历史 ratio>16 的输入原 shape 迁入反向矩阵，未将 head 夹到 16。新增 84 条验证本次 Beta/g dtype、窗口和 checkpoint 契约。历史 gk/both 标签仅作来源追溯，当前正向计算统一使用设计要求的 scalar gate；gk 非空有独立反向用例。
+
+| 精度 case id | 覆盖 |
+| --- | --- |
+| 0～587 | 历史 P/G 合法 shape、GQA、prefix、accepted、State/input view、稀疏索引和连续调用；head 数保持原值 |
+| 588～821 | V2 的四 bool 16 组合、BF16/FP32 State、L=1/3/4/8/9/17/33、二维表、无 g、全空请求、布局、raw 极值、softplus 尾部、零 QK、257/258 heads |
+| 822～845 | State/Beta/g 的 8 个独立 dtype 组合，三个融合开关与 allow_neg_eigval 开启 |
+| 846～857、876～887 | BF16/FP32 State 的 L=7/16/32/65 窗口与尾部 |
+| 858～860、888～890 | 混合 QKV backing storage 的 slice/offset 与 prefix/变长 |
+| 861～866、891～896 | 一维重复写槽；二维 accepted>L、空请求与重复槽 |
+| 867～875、897～905 | ratio=16、复合 padding/offset 和 State slot/head 置换 |
+
+`python gen_recurrent_gated_delta_rule.py --summary` 输出逐条 design_id、shape 和布局，作为完整映射。
+
+原值域保持：普通 QKV 标准差 0.05、State 标准差 0.01；Beta 默认 [0.1,0.9]；已处理 g 默认 -[0.001,0.02]，另有已固化 near_zero/strong_decay/per_head 分支。raw g 标准差 2，raw Beta 标准差 3，A_log/dt_bias 标准差 0.5/0.2；独立极值覆盖 ±100 和 A_log=12～25/g=-A_log。未因 NPU 输出调整输入范围。
+
+MSS 人工矩阵为 **24** 条：0～7 一一对应 State/Beta/g 的 8 组模板 dtype；8～9 为 L=65；10～11 为混合 QKV；12～13 为二维 accepted/重复槽；14～17 为 offset/padding/置换；18～19 为空请求；20～21 为 softplus 尾部；22～23 为 257/258 heads。实际 TilingKey 选择仍需从本轮 kernel 记录核验。
+
+反向矩阵 **57** 条：0～11 保留历史越界 head ratio 原 shape；12～56 覆盖 gk、QKV 尾轴 stride、State 重叠/输入别名、跨请求竞争、slot、accepted、bool、scale、raw gate 依赖和 dtype。以 `--task run` 执行独立 negative executor，要求实际 wrapper 抛出 ValueError/TypeError，且 State 数值和版本未改变。JSON 显式配置 `expected_return_code=0`，表示反向验证 executor 完成预期拒绝和 State 不变检查后的成功返回码；导入、ACL 等运行时错误不会被捕获或当作通过。
+
+性能矩阵 **21** 条：case 0 保留原最小 V1 工程对比 shape、dtype、scale 和 seed；1～20 分别覆盖 8 组 dtype、长窗口、混合 QKV、二维 checkpoint、padding/offset/置换和 softplus 尾部。模型 case 和正式性能结论仍需按真实调用条件单独核验。共同接口可直接比较 V1/V2；新融合能力的 V1 基线应是等价的显式预处理调用链，不可规约输入后宣称同条件对比。性能只使用 msprof `op_summary` 的 `Task Duration(us)`，各 pipe 耗时不相加。
+
+## 生成与执行
+
+在本目录执行：
 
 ```bash
-python3 tests/atk/recurrent_gated_delta_rule/gen_recurrent_gated_delta_rule.py --summary
+# ATK 实际生成全矩阵（YAML dtype_numbers=906）
+atk case -f recurrent_gated_delta_rule.yaml -p gen_recurrent_gated_delta_rule.py -dt 906 -en 0 -s 20261030
+python scripts/check_atk_generated_json.py result/recurrent_gated_delta_rule/json/all_recurrent_gated_delta_rule.json
+cp result/recurrent_gated_delta_rule/json/all_recurrent_gated_delta_rule.json atk_recurrent_gated_delta_rule.json
+# Python materializer 仅作辅助逐条核验；不替代原生生成的正式输入
+python gen_recurrent_gated_delta_rule.py --output recurrent_gated_delta_rule_materialized.json
+# 生成独立手工 MSS、性能和反向矩阵
+python gen_recurrent_gated_delta_rule.py --kind mss
+python gen_recurrent_gated_delta_rule.py --kind perf
+python gen_recurrent_gated_delta_rule.py --kind negative
+# CPU 契约和双标杆 smoke，无 NPU 调用
+python scripts/check_atk_cpu_contract.py
+python test_reference.py
+# 精度双标杆
+bash scripts/run_dual_accuracy.sh 0
+# 全矩阵确定性（每条 50 次）；内存用手工24条
+atk node --backend npu --devices 0 task -c atk_recurrent_gated_delta_rule.json \
+  -p executor_recurrent_gated_delta_rule.py --task accuracy_dc --dc_loop_nums 50 -to 2000
+atk node --backend npu --devices 0 task -c atk_recurrent_gated_delta_rule_negative.json \
+  -p executor_recurrent_gated_delta_rule.py --task run -to 2000
 ```
 
-统一脚本的 `gen_cases` 默认传入 `-dt 100 -en 0`。需要通过 ATK case generator 生成完整矩阵时，显式设置：
+确定性可先用24条 MSS 集检查同步关键路径，再按验收要求执行906条完整矩阵；报告必须说明实际覆盖数。内存检查使用统一 `run_test_cpu.sh -scope=mssanitizer` 和 `_mss.json`。性能使用统一 `-scope=performance` 和 `_perf.json`，保留 V1 与 V2 各自的原始 msprof CSV。
+
+内存检测必须将外层 `mssanitizer --log-file` 和 ATK `-msl` 指向同一文件，并检查该日志非空。只看执行 SUCCESS 或读取空日志得出的 PASS 不能证明内存检测通过；还需核对目标 kernel 的真实诊断。正式编译包未添加 sanitizer 编译选项，本轮采用 GM 访问快速定界，不将它描述为 UB、未初始化或竞争检测全覆盖；检测能力范围见 [MSS 官方指南](https://github.com/Ascend/mssanitizer/blob/master/docs/zh/user_guide/mssanitizer_user_guide.md)。
+
+本轮使用官方 kernel 名过滤，仅检测当前算子的全部 dtype 变体，避免将执行器后处理中的框架算子混入目标结论。可在本目录复现：
 
 ```bash
-GEN_CASES_DTYPE_NUMBERS=200 \
-bash tests/atk/run_test_cpu.sh -op=recurrent_gated_delta_rule -scope=gen_cases
+MSS_LOG_PATH="$PWD/recurrent_gdn_mss.log"
+mssanitizer --tool=memcheck --kernel-name=RecurrentGatedDeltaRule \
+  --log-file="$MSS_LOG_PATH" -- \
+  atk node --backend npu --devices 0 task \
+    -c atk_recurrent_gated_delta_rule_mss.json \
+    -p executor_recurrent_gated_delta_rule.py \
+    --task run --mssanitizer -msl "$MSS_LOG_PATH" -sp -to 2000
+test -s "$MSS_LOG_PATH"
 ```
+
+行 padding 的 BF16/FP32 补充使用原完整 JSON 和 `-wl '[678,774]'`，另设独立日志文件；不改 shape、stride、offset 或输入范围。
+
+建议首轮白名单：`[0,657,663,807,822,825,828,831,834,837,840,843,855,858,864,870,885,888,894,903]`。白名单只用于烟测和定位，不替代完整精度验收。
+
+本次 CPU 自检已验证906条正向结构、57条反向拦截、20个代表 case 的40次FP64/FP32执行、相同数值/stride/offset及ATK角色分流。这些结果不代表 NPU 精度、性能、确定性或内存检查通过。
+
+原生 `atk case` 已实际生成906条 JSON；独立检查确认 id=0～905、每条 `case_spec`、默认 seed 和精度标准均与冻结矩阵一致。交付件中的 `atk_recurrent_gated_delta_rule.json` 使用这份原生输出作为本次完整精度、确定性验收输入，SHA256 为 `6fccb2d346cdb696c90643647739ec6d65fed5df44acbe2f0bb000873db547b6`。Python materializer 只作辅助核验，负测/MSS/性能继续采用各自人工矩阵。
+
+原生生成 JSON 只包含两个执行设备 marker 和一个完整 `case_spec`，ATK 的静态张量形状统计只描述 marker；真实算子 shape、layout 和 dtype 以 `case_spec` 与矩阵映射为准。
+
+## 本轮 A2 验收结果
+
+单算子编译、安装和包内/安装后 kernel 身份校验通过，Stable 入口命中已核验。原生 `atk case` 生成的 906 条完整矩阵已执行，首次精度 904 PASS、2 FAIL、0 ERROR；case_id 63、399 **需要复检**。保存输出和 CT 定位未发现结构异常后，两例各进行 50 轮复检，100/100 轮原生四项判据全部通过，官方 CT 三 ratio 聚合失败数为 0。按统计复检流程，精度验收通过；原单轮 FAIL 保留在配套交付件中，不描述为首次 906 PASS。
+
+负向 57/57 通过且异常前 State 不变；最终 host 修复包完整确定性 906 条每例 50 次全部通过，旧包结果另存历史材料，不替代最终包重跑。内存/MSS 的正式编译包 GM 访问检测 24 条主矩阵及原 case_id 678、774 两条行 padding 用例通过，目标算子零非法诊断；历史 C ABI 16/16 执行契约检查通过。ATK 扩展性能 21/21 完成。相同输入的 V1/V2 共同 6 场景均出现回退，V2 耗时为 V1 的 2.748～5.811 倍，未取得加速；正式耗时来源为 msprof `Task Duration(us)`。
+
+复检未调整输入范围、阈值、shape、布局或覆盖；CT 官方三项聚合与原生第四项分别核验。完整报告、原始 profiler CSV、结果工作簿与 SHA256 清单位于配套测试交付件。本轮仅完成 A2 真机验证，不代表 A3 真机或 wheel 安装验证完成。

@@ -9,6 +9,13 @@
 
 add_op_to_compiled_list()
 
+# Error-free FP32 transforms in the A2/A3 scalar preprocessing rely on the
+# written evaluation order. Keep these options scoped to this operator.
+add_ops_compile_options(
+    OP_NAME RecurrentGatedDeltaRule
+    OPTIONS -ffp-contract=off -fno-fast-math
+)
+
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE
         recurrent_gated_delta_rule_def.cpp

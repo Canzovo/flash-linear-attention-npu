@@ -439,7 +439,7 @@ if should_run mssanitizer; then
   log_info "ATK mssanitizer 日志：${MSS_LOG_PATH}"
   set_case_range_args "内存检测 case 范围" "$MSS_START" "$MSS_END"
   touch "$MSS_LOG_PATH"
-  mssanitizer --tool="$MSS_TOOL" -- \
+  mssanitizer --tool="$MSS_TOOL" --log-file="$MSS_LOG_PATH" -- \
     "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
     task \
       -c "atk_${OP}_mss.json" \
@@ -448,6 +448,7 @@ if should_run mssanitizer; then
       --mssanitizer \
       -msl "$MSS_LOG_PATH" \
       "${CASE_RANGE_ARGS[@]}"
+  [[ -s "$MSS_LOG_PATH" ]] || die "mssanitizer 日志为空，无法确认内存检测结果"
   log_info "完成内存检测"
   record_ran_type mssanitizer
 fi

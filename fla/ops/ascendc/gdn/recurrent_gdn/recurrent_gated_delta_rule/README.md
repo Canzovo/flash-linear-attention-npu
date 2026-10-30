@@ -1,4 +1,7 @@
 # RecurrentGatedDeltaRule 算子说明
+
+当前 A2/A3 V2 公开接口、融合开关与输入约束见 [接口说明](docs/api.md)，实现与同步设计见 [设计说明](docs/design.md)。下文记录历史 ACLNN 兼容入口的调用方式和约束；V2 使用独立的 `aclnnRecurrentGatedDeltaRuleV2` 入口，Python 公开接口通过 Stable ABI 调用 V2。
+
 `RecurrentGatedDeltaRule` 是用于循环门控 Delta 规则（Recurrent Gated Delta Rule，RGDR）的自定义算子，主要应用于线性注意力机制的推理场景。该算子在每个时间步根据当前输入 $q_t, k_t, v_t$ 和上一隐藏状态 $S_{t-1}$，计算当前输出 $o_t$ 并更新隐藏状态 $S_t$。
 
 ---

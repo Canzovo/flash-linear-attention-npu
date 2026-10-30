@@ -1,11 +1,8 @@
-"""Generate the reviewed recurrent_gated_delta_rule ATK case matrix.
+"""Generate the preserved three-seed matrix and A2/A3 contract supplements.
 
-The committed accuracy matrix is frozen by detailed-design ID:
-  * 0-99: RGDR-P001 through RGDR-P100
-  * 100-199: RGDR-G001 through RGDR-G100
-
-All positive cases use dimensions aligned to the 32B BF16 transfer block;
-unaligned dimensions are invalid and are covered by op_host interception tests.
+The positive matrix retains 822 supported historical cases and adds 84 A2/A3
+cases. Historical ratios above 16 keep their shapes in the negative matrix.
+Performance and MSS assets are generated as separate, explicit matrices.
 """
 
 from __future__ import annotations
@@ -13,8 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from case_matrix import build_a2a3_profiles, build_extension_profiles
 
 try:
     from atk.case_generator.generator.base_generator import CaseGenerator
@@ -43,7 +44,11 @@ else:
 OP_NAME = "recurrent_gated_delta_rule"
 SEED_BASE = 20260826
 DIM_REQUIRED = 128
-STANDARD = {"acc": "mixed_tolerance_bm", "perf": "not_key"}
+# 最终 A2 验证：case_id 63、399 需要复检；保留原生小值域失败，不能仅凭
+# CT 的三项 ratio 聚合将其标记为完整精度通过。输入和精度标准保持不变。
+STANDARD = {"acc": {"cv_fused_double_benchmark": {
+    "max_re_ratio": 5, "avg_re_ratio": 1.5, "root_mean_squared_ratio": 1.5,
+}}, "perf": "not_key"}
 
 STATE_LAYOUTS = {
     "contiguous",
@@ -51,6 +56,8 @@ STATE_LAYOUTS = {
     "head_padded",
     "block_padded",
     "head_block_padded",
+    "row_padded",
+    "interleaved",
 }
 INPUT_LAYOUTS = {
     "contiguous",
@@ -59,6 +66,9 @@ INPUT_LAYOUTS = {
     "noncontiguous_qk",
     "noncontiguous_v_gates",
     "noncontiguous_all",
+    "token_head_transposed",
+    "overlapping_qkv",
+    "mixed_qkv",
 }
 
 
@@ -377,17 +387,20 @@ def _finalize(profile: dict, case_id: int) -> dict:
     prefix_tokens = int(spec.get("prefix_tokens", 0))
     seq_lengths = [int(value) for value in spec["seq_lengths"]]
     total_tokens = prefix_tokens + sum(seq_lengths)
-    state_indices = [
-        int(value) for value in spec.get("state_indices", range(total_tokens))
-    ]
-    minimum_blocks = max(state_indices, default=0) + 1
+    width = int(spec.get("state_indices_width", 0))
+    if width:
+        state_indices = spec.get("state_indices", [list(range(b*width,(b+1)*width)) for b in range(len(seq_lengths))])
+        minimum_blocks = len(seq_lengths) * width
+    else:
+        state_indices = [int(value) for value in spec.get("state_indices", range(total_tokens))]
+        minimum_blocks = max(state_indices, default=0) + 1
     spec.update(
         {
             "op": OP_NAME,
             "case_id": case_id,
-            "seed": SEED_BASE + case_id,
+            "seed": int(spec.get("seed", SEED_BASE + case_id)),
             "route": "ascendc",
-            "soc": "all",
+            "soc": spec.get("soc", "all"),
             "dtype": "bf16",
             "B": len(seq_lengths),
             "T": total_tokens,
@@ -401,13 +414,6 @@ def _finalize(profile: dict, case_id: int) -> dict:
 
 
 def _validate_specs(specs: list[dict]) -> None:
-    positive_count = sum(str(spec["design_id"]).startswith("RGDR-P") for spec in specs)
-    gva_count = sum(str(spec["design_id"]).startswith("RGDR-G") for spec in specs)
-    expected_ids = [f"RGDR-P{index:03d}" for index in range(1, positive_count + 1)]
-    expected_ids += [f"RGDR-G{index:03d}" for index in range(1, gva_count + 1)]
-    actual_ids = [str(spec["design_id"]) for spec in specs]
-    if actual_ids != expected_ids:
-        raise ValueError("detailed-design IDs are missing, duplicated or out of order")
     names = [str(spec["name"]) for spec in specs]
     if len(set(names)) != len(names):
         raise ValueError("case names must be unique")
@@ -416,19 +422,21 @@ def _validate_specs(specs: list[dict]) -> None:
         if int(spec["case_id"]) != case_id:
             raise ValueError(f"{spec['design_id']}: non-contiguous case_id")
         seq_lengths = [int(value) for value in spec["seq_lengths"]]
-        if not seq_lengths or any(value < 0 or value > 8 for value in seq_lengths):
-            raise ValueError(f"{spec['design_id']}: seq_lengths must be in [0, 8]")
+        if not seq_lengths or any(value < 0 for value in seq_lengths):
+            raise ValueError(f"{spec['design_id']}: seq_lengths must be nonnegative")
         if int(spec.get("prefix_tokens", 0)) < 0:
             raise ValueError(f"{spec['design_id']}: prefix_tokens must be non-negative")
         if int(spec["T"]) <= 0:
             raise ValueError(f"{spec['design_id']}: T must be positive")
-        if not (1 <= int(spec["HK"]) <= int(spec["HV"]) <= 256):
+        if not (1 <= int(spec["HK"]) <= int(spec["HV"])):
             raise ValueError(f"{spec['design_id']}: invalid HK/HV range")
         if int(spec["HV"]) % int(spec["HK"]) != 0:
             raise ValueError(f"{spec['design_id']}: HV must be divisible by HK")
+        if int(spec["HV"]) // int(spec["HK"]) > 16:
+            raise ValueError(f"{spec['design_id']}: HV/HK must not exceed 16")
         if int(spec["K"]) != DIM_REQUIRED or int(spec["V"]) != DIM_REQUIRED:
             raise ValueError(f"{spec['design_id']}: K/V must equal {DIM_REQUIRED}")
-        if spec["gate_mode"] not in {"g", "gk", "both"}:
+        if spec["gate_mode"] not in {"g", "none"}:
             raise ValueError(f"{spec['design_id']}: invalid gate_mode")
         if spec["state_dtype"] not in {"bf16", "fp32"}:
             raise ValueError(f"{spec['design_id']}: invalid state_dtype")
@@ -436,27 +444,75 @@ def _validate_specs(specs: list[dict]) -> None:
             raise ValueError(f"{spec['design_id']}: invalid state_layout")
         if spec["input_layout"] not in INPUT_LAYOUTS:
             raise ValueError(f"{spec['design_id']}: invalid input_layout")
-        state_indices = [int(value) for value in spec["state_indices"]]
-        if len(state_indices) != int(spec["T"]):
+        width = int(spec.get("state_indices_width", 0))
+        state_indices = ([int(value) for row in spec["state_indices"] for value in row]
+                         if width else [int(value) for value in spec["state_indices"]])
+        if not width and len(state_indices) != int(spec["T"]):
             raise ValueError(f"{spec['design_id']}: state_indices length must equal T")
         if any(value < 0 or value >= int(spec["block_num"]) for value in state_indices):
             raise ValueError(f"{spec['design_id']}: state index out of range")
-        if len(set(state_indices)) != len(state_indices):
-            raise ValueError(f"{spec['design_id']}: state indices must be unique")
+        # Repeated checkpoints within one request are legal. Only requests
+        # sharing a write slot (or an initial-read/write slot) conflict.
+        start = int(spec.get("prefix_tokens", 0))
+        writes, reads = [], []
+        for batch, length in enumerate(seq_lengths):
+            row = spec["state_indices"][batch] if width else spec["state_indices"][start:start + length]
+            writes.append(set(row[:length]))
+            accepted = spec.get("accepted_tokens", [1] * len(seq_lengths))[batch]
+            reads.append(int(row[accepted - 1]) if length else None)
+            start += length
+        for a in range(len(writes)):
+            for b in range(a):
+                if writes[a] & writes[b] or reads[a] in writes[b] or reads[b] in writes[a]:
+                    raise ValueError(f"{spec['design_id']}: cross-request State conflict")
         accepted = spec.get("accepted_tokens")
         if accepted is not None:
             accepted = [int(value) for value in accepted]
             if len(accepted) != len(seq_lengths):
                 raise ValueError(f"{spec['design_id']}: accepted_tokens length must equal B")
-            if any(value < 1 or value > seq_lengths[index] for index, value in enumerate(accepted)):
+            if any(seq_lengths[index] and (value < 1 or value > (width or seq_lengths[index]))
+                   for index, value in enumerate(accepted)):
                 raise ValueError(f"{spec['design_id']}: accepted token out of range")
 
 
+@lru_cache(maxsize=1)
 def build_specs() -> list[dict]:
     profiles = _build_positive_profiles() + _build_gva_profiles()
-    specs = [_finalize(profile, case_id) for case_id, profile in enumerate(profiles)]
+    for profile in profiles:
+        profile["name"] = "legacy_shape_" + profile["name"]
+        profile["legacy_gate_mode"] = profile["gate_mode"]
+        profile["gate_mode"] = "g"
+    # These four historical ratios lie outside the new public contract.
+    # Preserve their exact shapes in build_negative_specs; never clamp heads.
+    profiles = [p for p in profiles if p["HV"] // p["HK"] <= 16]
+    extension = [dict(p, soc="all", dtype="bf16")
+                 for p in build_extension_profiles("full") if "cores" not in p]
+    profiles += extension + build_a2a3_profiles()
+    seeded = [dict(p,seed=seed,name=p["name"]+"_seed"+str(seed))
+              for p in profiles for seed in (20261022,20261023,20261024)]
+    specs = [_finalize(profile, case_id) for case_id, profile in enumerate(seeded)]
     _validate_specs(specs)
     return specs
+
+
+def build_negative_specs() -> list[dict]:
+    profiles = [dict(p, negative_kind="head_ratio")
+                for p in _build_positive_profiles() + _build_gva_profiles()
+                if p["HV"] // p["HK"] > 16]
+    for profile in profiles:
+        profile["gate_mode"] = "g"
+    base = dict(name="negative", seq_lengths=[9], HK=2, HV=4, K=128, V=128,
+                gate_mode="g", state_dtype="fp32", state_layout="contiguous",
+                input_layout="contiguous", design_id="RGDN-NEG", scale=128**-0.5)
+    for kind in ("gk", "qkv_last_stride", "state_overlap", "state_input_alias",
+                 "cross_request_write", "cross_request_read", "slot_range",
+                 "accepted_range", "bool_attr", "scale_nan", "raw_gate_no_g",
+                 "raw_gate_no_A_log", "query_dtype", "beta_dtype", "metadata_dtype"):
+        profiles.append(dict(base, name="negative_" + kind,
+                             design_id="RGDN-NEG-" + kind, negative_kind=kind))
+    return [_finalize(dict(p, name=p["name"] + "_seed" + str(seed), seed=seed), index)
+            for index, (p, seed) in enumerate(
+                (p, seed) for p in profiles for seed in (20261022, 20261023, 20261024))]
 
 
 def _spec(index: int) -> dict:
@@ -505,7 +561,7 @@ def _case_payload(case_id: int, spec: dict) -> dict:
         _input("soc", "string", spec["soc"]),
         _input("route", "string", spec["route"]),
     ]
-    return {
+    payload = {
         "id": case_id,
         "default_seed": spec["seed"],
         "name": OP_NAME,
@@ -520,6 +576,52 @@ def _case_payload(case_id: int, spec: dict) -> dict:
         "inputs": inputs,
         "save_name": OP_NAME,
     }
+    if "negative_kind" in spec:
+        payload["api_type"] = "executor_recurrent_gated_delta_rule_negative"
+        # Zero means the negative executor verified the expected Python
+        # rejection and unchanged State, not that the operator accepted input.
+        payload["expected_return_code"] = 0
+    return payload
+
+
+def build_mss_specs() -> list[dict]:
+    """Manually selected paths for all State/Beta/g dtype template tuples."""
+    specs = build_specs()
+    design_ids = ["RGDN-A2A3-dtypes_" + "_".join((s, b, g))
+                  for s in ("bf16", "fp32") for b in ("bf16", "fp32")
+                  for g in ("bf16", "fp32")]
+    design_ids += [
+        "RGDN-A2A3-window_bf16_65", "RGDN-A2A3-window_fp32_65",
+        "RGDN-A2A3-mixed_qkv_bf16", "RGDN-A2A3-mixed_qkv_fp32",
+        "RGDN-A2A3-table_repeated_checkpoint_bf16",
+        "RGDN-A2A3-table_repeated_checkpoint_fp32",
+        "RGDN-A2A3-offset_bf16", "RGDN-A2A3-offset_fp32",
+        "RGDN-A2A3-interleaved_state_bf16", "RGDN-A2A3-interleaved_state_fp32",
+        "RGDN-V2-empty_bf16", "RGDN-V2-empty_fp32",
+        "RGDN-V2-softplus_tail_bf16", "RGDN-V2-softplus_tail_fp32",
+        "RGDN-V2-large_heads_257", "RGDN-V2-large_heads_gqa",
+    ]
+    selected = []
+    for case_id, design_id in enumerate(design_ids):
+        spec = deepcopy(next(s for s in specs if s["design_id"] == design_id))
+        spec["case_id"] = case_id
+        selected.append(spec)
+    return selected
+
+
+def build_perf_specs() -> list[dict]:
+    """Preserve the original engineering case and add representative paths."""
+    original = _finalize(_build_positive_profiles()[0], 0)
+    original["name"] = "original_minimal_v1_comparison"
+    original["seed"] = 20260826
+    profiles = [original]
+    for spec in build_mss_specs():
+        if "empty_" in spec["name"] or "large_heads_" in spec["name"]:
+            continue
+        spec = deepcopy(spec)
+        spec["case_id"] = len(profiles)
+        profiles.append(spec)
+    return profiles
 
 
 def build_cases() -> list:
@@ -537,11 +639,19 @@ class RecurrentGatedDeltaRuleGenerator(CaseGenerator):
         super().__init__(config)
 
     def after_case_config(self, case_config: CaseConfig) -> CaseConfig:
-        del case_config
         index = max(int(self.index) - 1, 0)
         spec = _spec(index)
-        payload = _case_payload(index % len(build_specs()), spec)
-        return CaseConfig(**payload)
+        # Keep the ATK-created inputs and their static-metric registrations.
+        # Replacing CaseConfig (or adding undeclared YAML inputs) breaks the
+        # native generation report in ATK 26.9.24.
+        case_config.id = index % len(build_specs())
+        case_config.default_seed = spec["seed"]
+        for item in case_config.inputs:
+            cfg = item[0] if isinstance(item, list) else item
+            if cfg.name == "case_spec":
+                cfg.range_values = json.dumps(
+                    spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return case_config
 
 
 def main() -> None:
@@ -554,9 +664,14 @@ def main() -> None:
         default=Path(__file__).with_name(f"atk_{OP_NAME}.json"),
     )
     parser.add_argument("--summary", action="store_true")
+    parser.add_argument("--kind", choices=("full", "mss", "perf", "negative"), default="full")
+    parser.add_argument("--write-yaml", action="store_true")
     args = parser.parse_args()
 
-    specs = build_specs()
+    specs = {"full": build_specs, "mss": build_mss_specs, "perf": build_perf_specs,
+             "negative": build_negative_specs}[args.kind]()
+    if args.kind != "full" and args.output.name == f"atk_{OP_NAME}.json":
+        args.output = args.output.with_name(f"atk_{OP_NAME}_{args.kind}.json")
     payloads = [
         _case_payload(case_id, spec) for case_id, spec in enumerate(specs)
     ]
@@ -564,6 +679,23 @@ def main() -> None:
         json.dumps(payloads, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    if args.write_yaml:
+        first_spec = json.dumps(build_specs()[0], separators=(",", ":"))
+        header = (f"api: pytorch\napi_type: executor_{OP_NAME}\nversion: v2.1\n"
+                  f"name: {OP_NAME}\naclnn_name: RecurrentGatedDeltaRule\n"
+                  f"generate: generator_{OP_NAME}\ndtype_numbers: {len(build_specs())}\n"
+                  "extra_numbers: 0\nstandard:\n  acc:\n    cv_fused_double_benchmark:\n"
+                  "      max_re_ratio: 5\n      avg_re_ratio: 1.5\n"
+                  "      root_mean_squared_ratio: 1.5\n  perf: not_key\ninputs:\n")
+        for marker, dtype in (("low_precision_marker", "bf16"), ("fp32_marker", "fp32")):
+            header += (f"  - name: {marker}\n    type: tensor\n    required: true\n"
+                       f"    dtypes: {{values: [{dtype}]}}\n"
+                       "    ranges: {valid: {values: [[0, 0]]}, invalid: {values: []}}\n"
+                       "    shapes: {dim_numbers: {values: [1]}, dim_values: {values: [1]}}\n")
+        header += ("  - name: case_spec\n    type: attr\n    required: true\n"
+                   "    dtypes: {values: [string]}\n"
+                   f"    ranges: {{valid: {{values: ['{first_spec}']}}, invalid: {{values: []}}}}\n")
+        Path(__file__).with_name(f"{OP_NAME}.yaml").write_text(header, encoding="utf-8")
     if args.summary:
         print(f"total={len(payloads)} ids=0-{len(payloads) - 1}")
         for payload, spec in zip(payloads, specs):

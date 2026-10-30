@@ -1,5 +1,7 @@
 # aclnnRecurrentGatedDeltaRule
 
+本文记录历史 ACLNN 兼容入口。当前 A2/A3 V2 使用独立的 `aclnnRecurrentGatedDeltaRuleV2` 入口，接口、融合开关及扩展支持范围见 [V2 接口说明](api.md)。本文中的历史限制不作为 V2 的接口约束。
+
 [📄 查看源码](https://gitcode.com/cann/ops-transformer/tree/master/attention/recurrent_gated_delta_rule)
 
 ## 产品支持情况
