@@ -187,10 +187,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRuleGetWorkspaceSize(const aclTensor *query,
     auto out_ = l0op::Contiguous(out, uniqueExecutor.get());
 
     // 调用l0接口
-    auto outRet =
-        l0op::RecurrentGatedDeltaRule(query_, key_, value_, beta_, stateRef, actualSeqLengths_, ssmStateIndices_, g, gk,
-                                      numAcceptedTokens, nullptr, nullptr, scaleValue, false, false, false, false,
-                                      uniqueExecutor.get());
+    auto outRet = l0op::RecurrentGatedDeltaRule(query_, key_, value_, beta_, stateRef, actualSeqLengths_,
+                                                ssmStateIndices_, g, gk, numAcceptedTokens, scaleValue,
+                                                uniqueExecutor.get());
     if (outRet == nullptr) {
         return ACLNN_ERR_INNER_NULLPTR;
     }
@@ -266,7 +265,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRuleV2GetWorkspaceSize(
     CHECK_RET(betaContiguous && lengthsContiguous && indicesContiguous && (!g || gContiguous) &&
               (!numAcceptedTokens || acceptedContiguous) && (!useGateInKernel || aLogContiguous) &&
               (!useGateInKernel || !dtBias || biasContiguous), ACLNN_ERR_INNER_NULLPTR);
-    const auto outRet = l0op::RecurrentGatedDeltaRule(
+    const auto outRet = l0op::RecurrentGatedDeltaRuleV2(
         queryView, keyView, valueView, betaContiguous, stateView, lengthsContiguous, indicesContiguous,
         gContiguous, nullptr, acceptedContiguous, aLogContiguous, biasContiguous, scaleValue,
         useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval, uniqueExecutor.get());

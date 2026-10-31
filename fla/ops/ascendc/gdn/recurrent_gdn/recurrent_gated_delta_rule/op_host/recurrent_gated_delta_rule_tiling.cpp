@@ -99,6 +99,9 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetShapeAttrsInfo()
     OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid context."),
                 return ge::GRAPH_FAILED);
 
+    OP_CHECK_IF(GetVersion() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid version."),
+                return ge::GRAPH_FAILED);
+
     OP_CHECK_IF(AnalyzeDtype() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid dtypes."),
                 return ge::GRAPH_FAILED);
 
@@ -133,7 +136,14 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::DoLibApiTiling()
 {
     const auto stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
     const uint64_t stateDtypeKey = stateDtype == ge::DT_FLOAT ? RGDR_TPL_FP32 : RGDR_TPL_BF16;
-    tilingKey_ = GET_TPL_TILING_KEY(stateDtypeKey, tilingData_.betaDtype, tilingData_.gDtype);
+    if (tilingData_.useV2) {
+        tilingKey_ = GET_TPL_TILING_KEY(stateDtypeKey, tilingData_.betaDtype, tilingData_.gDtype);
+    } else {
+        // V1 keeps its original beta/g dtypes (BF16/FP32); the extra template
+        // parameters are only present because the shared kernel entry now also
+        // supports V2.
+        tilingKey_ = GET_TPL_TILING_KEY(stateDtypeKey, RGDR_TPL_BF16, RGDR_TPL_FP32);
+    }
     return ge::GRAPH_SUCCESS;
 };
 
@@ -194,6 +204,17 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::CheckContext()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus RecurrentGatedDeltaRuleTiling::GetVersion()
+{
+    auto attrs = context_->GetAttrs();
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
+    const bool *useV2 = attrs->GetAttrPointer<bool>(5);
+    // The V1 schema predates this hidden attribute.  Missing means the legacy
+    // entry point and is intentionally equivalent to false.
+    tilingData_.useV2 = useV2 != nullptr && *useV2;
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus RecurrentGatedDeltaRuleTiling::AnalyzeDtype()
 {
     auto queryDtype = context_->GetInputDesc(QUERY_INDEX)->GetDataType();
@@ -205,8 +226,9 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::AnalyzeDtype()
 
     auto betaDtype = context_->GetInputDesc(BETA_INDEX)->GetDataType();
     auto stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
-    OP_CHECK_IF(betaDtype != ge::DT_BF16 && betaDtype != ge::DT_FLOAT,
-                OP_LOGE(context_->GetNodeName(), "beta dtype should be bfloat16 or float32"),
+    OP_CHECK_IF((!tilingData_.useV2 && betaDtype != ge::DT_BF16) ||
+                    (tilingData_.useV2 && betaDtype != ge::DT_BF16 && betaDtype != ge::DT_FLOAT),
+                OP_LOGE(context_->GetNodeName(), "beta dtype is not supported by the selected version"),
                 return ge::GRAPH_FAILED);
     tilingData_.betaDtype = betaDtype == ge::DT_FLOAT ? RGDR_TPL_FP32 : RGDR_TPL_BF16;
     OP_CHECK_IF(stateDtype != ge::DT_FLOAT && stateDtype != ge::DT_BF16,
@@ -220,8 +242,9 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::AnalyzeDtype()
 
     if (HasOptionalTensor(context_, G_INDEX)) {
         auto gamaDtype = context_->GetOptionalInputDesc(G_INDEX)->GetDataType();
-        OP_CHECK_IF(gamaDtype != ge::DT_FLOAT && gamaDtype != ge::DT_BF16,
-                    OP_LOGE(context_->GetNodeName(), "g dtype should be bfloat16 or float32"),
+        OP_CHECK_IF((!tilingData_.useV2 && gamaDtype != ge::DT_FLOAT) ||
+                        (tilingData_.useV2 && gamaDtype != ge::DT_FLOAT && gamaDtype != ge::DT_BF16),
+                    OP_LOGE(context_->GetNodeName(), "g dtype is not supported by the selected version"),
                     return ge::GRAPH_FAILED);
         tilingData_.gDtype = gamaDtype == ge::DT_FLOAT ? RGDR_TPL_FP32 : RGDR_TPL_BF16;
     }
@@ -269,7 +292,7 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::AnalyzeShapes()
                 return ge::GRAPH_FAILED);
     const uint64_t keyHeads = static_cast<uint64_t>(query.GetDim(1));
     const uint64_t valueHeads = static_cast<uint64_t>(value.GetDim(1));
-    const bool legacyPath = HasOptionalTensor(context_, GK_INDEX) || compileInfo_.isA5;
+    const bool legacyPath = !tilingData_.useV2 || compileInfo_.isA5;
     OP_CHECK_IF(valueHeads % keyHeads != 0 || (!legacyPath && valueHeads / keyHeads > 16),
                 OP_LOGE(context_->GetNodeName(), "HV/HK must be an integer in [1, 16]"), return ge::GRAPH_FAILED);
 
@@ -417,7 +440,7 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetStateStrides()
                 tilingData_.stateStrides[2] - RGDR_REQUIRED_DIM > std::numeric_limits<uint32_t>::max() / stateBytes,
                 OP_LOGE(context_->GetNodeName(), "State requires a contiguous K axis and a uint32 DMA row gap"),
                 return ge::GRAPH_FAILED);
-    if (HasOptionalTensor(context_, GK_INDEX) || compileInfo_.isA5) {
+    if (!tilingData_.useV2 || compileInfo_.isA5) {
         OP_CHECK_IF(tilingData_.stateStrides[0] > std::numeric_limits<uint32_t>::max() ||
                     tilingData_.stateStrides[1] > std::numeric_limits<uint32_t>::max() ||
                     tilingData_.stateStrides[2] != RGDR_REQUIRED_DIM,
@@ -467,11 +490,18 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetOptionalInput()
         OP_CHECK_IF(!valid, OP_LOGE(context_->GetNodeName(), "invalid optional input shape at index %zu", index),
                     return ge::GRAPH_FAILED);
     }
-    OP_CHECK_IF((tilingData_.hasGamaK || compileInfo_.isA5) && (tilingData_.useQkL2NormInKernel || tilingData_.useGateInKernel ||
-                tilingData_.useBetaSigmoidInKernel || tilingData_.allowNegEigval || tilingData_.hasALog ||
-                tilingData_.hasDtBias || tilingData_.betaDtype != RGDR_TPL_BF16 ||
-                (tilingData_.hasGama && tilingData_.gDtype != RGDR_TPL_FP32)),
-                OP_LOGE(context_->GetNodeName(), "extended attributes and dtypes require the A2/A3 generic implementation"),
+    OP_CHECK_IF(tilingData_.useV2 && tilingData_.hasGamaK,
+                OP_LOGE(context_->GetNodeName(), "V2 does not accept the legacy gk input"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!tilingData_.useV2 && (tilingData_.useQkL2NormInKernel || tilingData_.useGateInKernel ||
+                                       tilingData_.useBetaSigmoidInKernel || tilingData_.allowNegEigval ||
+                                       tilingData_.hasALog || tilingData_.hasDtBias ||
+                                       tilingData_.betaDtype != RGDR_TPL_BF16 ||
+                                       (tilingData_.hasGama && tilingData_.gDtype != RGDR_TPL_FP32)),
+                OP_LOGE(context_->GetNodeName(), "V1 does not accept V2 attributes or dtypes"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(tilingData_.useV2 && compileInfo_.isA5,
+                OP_LOGE(context_->GetNodeName(), "V2 is not supported on this architecture"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -494,12 +524,13 @@ void RecurrentGatedDeltaRuleTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "scale: [%f]", tilingData_.scale);
     OP_LOGD(context_->GetNodeName(), "hasGama: [%u]", tilingData_.hasGama);
     OP_LOGD(context_->GetNodeName(), "hasGamaK: [%u]", tilingData_.hasGamaK);
+    OP_LOGD(context_->GetNodeName(), "useV2: [%u]", tilingData_.useV2);
     OP_LOGD(context_->GetNodeName(), "hasAcceptedTokens: [%u]", tilingData_.hasAcceptedTokens);
 }
 
 ge::graphStatus RecurrentGatedDeltaRuleTiling::CalUbSize()
 {
-    if (tilingData_.hasGamaK || compileInfo_.isA5) {
+    if (!tilingData_.useV2 || compileInfo_.isA5) {
         RecurrentGatedDeltaRuleTilingProcessor processor(BuildProcessorContext());
         return processor.ProcessUb(tilingData_);
     }

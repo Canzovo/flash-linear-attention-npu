@@ -30,11 +30,39 @@ OP_TYPE_REGISTER(RecurrentGatedDeltaRule);
 const aclTensor *RecurrentGatedDeltaRule(const aclTensor *query, const aclTensor *key, const aclTensor *value,
                                          const aclTensor *beta, aclTensor *stateRef, const aclTensor *actualSeqLengths,
                                          const aclTensor *ssmStateIndices, const aclTensor *g, const aclTensor *gk,
-                                         const aclTensor *numAcceptedTokens, const aclTensor *aLog, const aclTensor *dtBias,
-                                         float scaleValue, bool useQkL2NormInKernel, bool useGateInKernel,
-                                         bool useBetaSigmoidInKernel, bool allowNegEigval, aclOpExecutor *executor)
+                                         const aclTensor *numAcceptedTokens, float scaleValue, aclOpExecutor *executor)
 {
     L0_DFX(RecurrentGatedDeltaRule, query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk,
+           numAcceptedTokens, scaleValue);
+
+    DataType outType = DataType::DT_BF16;
+    Format format = Format::FORMAT_ND;
+    auto out = executor->AllocTensor(outType, format, format);
+    OP_CHECK(out != nullptr, OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "out AllocTensor failed."), return nullptr);
+
+    auto ret = INFER_SHAPE(
+        RecurrentGatedDeltaRule,
+        OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens),
+        OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue));
+    OP_CHECK_INFERSHAPE(ret != ACLNN_SUCCESS, return nullptr, "RecurrentGatedDeltaRule InferShape failed.");
+
+    ret = ADD_TO_LAUNCHER_LIST_AICORE(
+        RecurrentGatedDeltaRule,
+        OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens),
+        OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue));
+    OP_CHECK_ADD_TO_LAUNCHER_LIST_AICORE(ret != ACLNN_SUCCESS, return nullptr,
+                                         "RecurrentGatedDeltaRule ADD_TO_LAUNCHER_LIST_AICORE failed.");
+    return out;
+}
+
+const aclTensor *RecurrentGatedDeltaRuleV2(const aclTensor *query, const aclTensor *key, const aclTensor *value,
+                                           const aclTensor *beta, aclTensor *stateRef, const aclTensor *actualSeqLengths,
+                                           const aclTensor *ssmStateIndices, const aclTensor *g, const aclTensor *gk,
+                                           const aclTensor *numAcceptedTokens, const aclTensor *aLog, const aclTensor *dtBias,
+                                           float scaleValue, bool useQkL2NormInKernel, bool useGateInKernel,
+                                           bool useBetaSigmoidInKernel, bool allowNegEigval, aclOpExecutor *executor)
+{
+    L0_DFX(RecurrentGatedDeltaRuleV2, query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk,
            numAcceptedTokens, aLog, dtBias, scaleValue, useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval);
 
     DataType outType = DataType::DT_BF16;
@@ -58,7 +86,7 @@ const aclTensor *RecurrentGatedDeltaRule(const aclTensor *query, const aclTensor
     auto ret = INFER_SHAPE(
         RecurrentGatedDeltaRule,
         OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens, aLog, dtBias),
-        OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue, useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval));
+        OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue, useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval, true));
     OP_CHECK_INFERSHAPE(ret != ACLNN_SUCCESS, return nullptr, "RecurrentGatedDeltaRule InferShape failed.");
 
     // SetViewShape also resets strides, so restore strides after the shape.
@@ -72,7 +100,7 @@ const aclTensor *RecurrentGatedDeltaRule(const aclTensor *query, const aclTensor
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
         RecurrentGatedDeltaRule,
         OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens, aLog, dtBias),
-        OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue, useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval));
+        OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue, useQkL2NormInKernel, useGateInKernel, useBetaSigmoidInKernel, allowNegEigval, true));
     OP_CHECK_ADD_TO_LAUNCHER_LIST_AICORE(ret != ACLNN_SUCCESS, return nullptr,
                                          "RecurrentGatedDeltaRule ADD_TO_LAUNCHER_LIST_AICORE failed.");
 

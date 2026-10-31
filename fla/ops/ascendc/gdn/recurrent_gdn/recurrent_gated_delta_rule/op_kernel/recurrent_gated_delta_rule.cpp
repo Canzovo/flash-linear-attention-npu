@@ -55,7 +55,7 @@ recurrent_gated_delta_rule(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR be
     TPipe pipe;
     using StateType = typename RGDRDTypeTraits<D_T_STATE>::type;
 #if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
-    if (!tilingData.hasGamaK) {
+    if (tilingData.useV2) {
         using BetaType = typename RGDRDTypeTraits<D_T_BETA>::type;
         using GateType = typename RGDRDTypeTraits<D_T_G>::type;
         RGDRV2<StateType, BetaType, GateType> op(&tilingData);

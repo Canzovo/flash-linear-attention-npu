@@ -62,6 +62,7 @@ protected:
     RecurrentGatedDeltaRuleTilingContext BuildProcessorContext() const;
 
     ge::graphStatus CheckContext();
+    ge::graphStatus GetVersion();
     ge::graphStatus AnalyzeDtype();
     ge::graphStatus AnalyzeShapes();
     ge::graphStatus CalUbSize();

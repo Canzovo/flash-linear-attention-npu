@@ -83,6 +83,9 @@ struct alignas(8) RecurrentGatedDeltaRuleTilingData {
     uint32_t useGateInKernel = 0;
     uint32_t useBetaSigmoidInKernel = 0;
     uint32_t allowNegEigval = 0;
+    // Set only by the V2 L0 wrapper. Optional gk is a legacy input feature,
+    // not an implementation-version selector.
+    uint32_t useV2 = 0;
     uint32_t hasDtBias = 0;
     uint32_t hasALog = 0;
     uint32_t betaDtype = RGDR_TPL_BF16;
