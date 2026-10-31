@@ -65,15 +65,13 @@ A2/A3 的非空 gk 使用历史 kernel 和历史 UB 计算；A5 保留历史实�
 
 每个窗口有效长度为 `n=min(8,L-position)`。Q/K/V 分别用一次 `DataCopyPad` 描述 n 行，每行 256 B，GM 行间空隙为 `(tokenStride-128)*2`，head 偏移使用各自真实 stride。三个输入各有 ready，Q ready 后先 Cast Q，同时搬 K；K ready 后 Cast K，同时搬 V；V ready 后 Cast V。
 
-beta/g 只收集当前 head 的 n 个值。GM 标量读取只访问有效的 2/4 B，写入对应 typed raw UB 槽，通过 S→V 后整窗口转换为 FP32；FP32 输入用 32 B UB 内 copy，不调用 Float→Float Cast。尾窗口不访问额外的 GM 值。当前实现将 beta/g 的 FP32 值保留到整个窗口结束，因此 raw beta/g 的最后消费者是窗口转换，可以在转换完成后发布 V→S 回收；该回收不会覆盖仍被 token 使用的 FP32 窗口。
+beta/g 只收集当前 head 的 n 个值。GM 标量读取只访问有效的 2/4 B，写入对应 typed raw UB 槽，通过一次 S→V 事件后整窗口转换为 FP32；FP32 输入用 32 B UB 内 copy，不调用 Float→Float Cast。尾窗口不访问额外的 GM 值。窗口转换完成后 raw beta/g bank 才允许被下一窗口的 MTE2 复用，不覆盖仍被 token 使用的 FP32 窗口。
 
 Q/K norm 使用 FP32 平方和及 `rsqrt(sum+1e-6)`，Q scale 只执行一次。sigmoid 按输入正负选择 exp 分支，allow-neg 只在 sigmoid 开启时生效。softplus 使用 `max(z,0)+log1p(exp(-abs(z)))`。普通路径中，`x=exp(-abs(z))<1/64` 时使用 `x-x²/2+x³/3-x⁴/4`，否则使用 `Ln(1+x)`，避免把小尾部丢失在 `1+x` 的舍入中。FP32 本身的溢出、下溢和非有限行为与标杆比较。
 
-硬件 Rsqrt 作为初值，随后对 `x=sum+1e-6` 执行两轮 FP32 Newton 修正 `r=r*(1.5-0.5*x*r*r)`。原平方和保存在 scalarTmp[2]，倒数根使用 scalarTmp[3]，修正项使用 scalarTmp[0]，每轮真实读写依赖均有 V barrier。该计算使用现有临时块，不增加 UB 占用；Q/K 均使用修正后的 FP32 系数。
+硬件 Rsqrt 作为初值，随后对 `x=sum+1e-6` 执行三轮 FP32 Newton 修正 `r=r*(1.5-0.5*x*r*r)`。原平方和、倒数根和修正项都保存在现有向量临时块中，每轮真实读写依赖均有 V barrier。最后用 `Brcb` 将每个 token 的倒数根广播到 128 个特征，一次性缩放整个窗口；Q/K 均使用修正后的 FP32 系数。归一化路径不再逐 token 读取 Scalar 系数，也不为每个 token 发出 V→S 同步。
 
-FP32 State 路径在两轮修正后再读取 Scalar `x,r`，对正有限 `x` 和正 `r` 以 double-float 计算残差 `e=1-x*r*r`，再计算 `r'=r+0.5*r*e`，最后一次舍入回 FP32。保留残差可避免普通 FP32 Newton 最终偏低一个 ULP。无效或非有限输入保留原系数路径，不把补偿运算应用于 Inf/NaN。V→S 在读取前完成，Q/K 的 VEC 缩放使用最终 Scalar 系数；该修正同样不增加 UB。
-
-`|x|<=0.125` 的指数使用八阶 Taylor 的 expm1-tail Horner 形式，最后才与 1 相加，降低已处理小门控的舍入误差；其它输入使用 VEC Exp。该分支只改变计算精度，不改变输入值域或精度标准。
+beta sigmoid、softplus 和普通 gate 路径均按窗口批量执行 VEC 运算。beta/g 的 GM 非连续 head 收集是唯一保留的 Scalar 元数据读取，收集结束后通过一次 S→V 事件交给窗口向量预处理。超越函数的计算顺序由必要的 V pipe 依赖屏障保护，输入值域和 ATK 精度标准保持不变。
 
 FP32 State 的 raw gate 在有限正常域使用 Scalar double-float 预处理。每个值由两个 FP32 分量组成；TwoSum、按位拆分的 TwoProd、修正除法保存局部舍入残差，不使用 FP64 或硬件 FMA。Exp 先按双分量 ln(2) 做范围规约，再用十二阶多项式和二的整数幂缩放；Log1p 使用 `y=x/(2+x)` 的 atanh 奇次级数至 25 次。计算只占 Scalar 局部变量，不增加固定 UB。
 
@@ -103,10 +101,10 @@ State 初始读和每次 checkpoint 写均使用一次 128 行 DMA。GM slot/hea
 | --- | --- | --- |
 | 两个 raw bank 的 Q/K/V | MTE2→V，各 3 个，共 6 个 | 每次 DMA 后 ready；对应 Cast 前等待，禁止把三路 ready 合并 |
 | raw QKV bank | V→MTE2，共 2 个 | 三次 Cast 完成后发布；同 bank 再预取 Q 前等待 |
-| raw beta/g bank | S→V、V→S，各 2 个 | Scalar 收集后发布；窗口转换前等待，转换后回收，下一次 Scalar 覆盖前等待 |
+| raw beta/g bank | S→V，共 1 个 | Scalar 收集后发布；窗口转换前等待，转换完成后 raw bank 才能回收 |
 | State bank | V→MTE3、MTE3→V，各 2 个 | checkpoint 生产后发布，MTE3 发出后登记 free；该 bank 重新写入前等待 |
 | BF16 out bank | V→MTE3、MTE3→V，各 2 个 | Cast 后发布，写回后登记 free；该 bank 重新 Cast 前等待 |
-| Scalar/Vector 数值临时量 | V→S 及 S→V | 仅按实际读写依赖同步，不替代 MTE 事件 |
+| Scalar/Vector 元数据 | S→V，共 1 个 | 仅在非连续 beta/g/slot 收集后发布，窗口向量预处理前等待 |
 | task 边界 | V→MTE2、MTE3→MTE2，各 1 个 | 新 State DMA 前保证旧 UB 读及 GM 写完成 |
 
 事件由 TPipe 分配，并在处理完全部 task 后按相同 HardEvent 类型释放。每次 SetFlag 都有匹配 WaitFlag，pending 标志只登记已发布的 free。任务结束回收所有在途 raw/scalar/state/out 槽；没有任务或空请求不会制造未发布事件的等待。
