@@ -610,17 +610,50 @@ def build_mss_specs() -> list[dict]:
 
 
 def build_perf_specs() -> list[dict]:
-    """Preserve the original engineering case and add representative paths."""
-    original = _finalize(_build_positive_profiles()[0], 0)
-    original["name"] = "original_minimal_v1_comparison"
-    original["seed"] = 20260826
-    profiles = [original]
-    for spec in build_mss_specs():
-        if "empty_" in spec["name"] or "large_heads_" in spec["name"]:
-            continue
-        spec = deepcopy(spec)
-        spec["case_id"] = len(profiles)
-        profiles.append(spec)
+    """Build the fixed performance matrix requested for BS/HK/HV/TPB."""
+    profiles = []
+    for batch_size in (32, 64, 72):
+        for value_heads in (32, 48, 128):
+            for token_per_batch in (1, 2, 4, 8, 16, 32):
+                total_tokens = batch_size * token_per_batch
+                profiles.append(_finalize({
+                    "name": (
+                        f"perf_bs{batch_size}_hk16_hv{value_heads}_"
+                        f"tpb{token_per_batch}"
+                    ),
+                    "design_id": (
+                        f"RGDN-PERF-bs{batch_size}-hk16-hv{value_heads}-"
+                        f"tpb{token_per_batch}"
+                    ),
+                    "seq_lengths": [token_per_batch] * batch_size,
+                    "prefix_tokens": 0,
+                    "HK": 16,
+                    "HV": value_heads,
+                    "K": 128,
+                    "V": 128,
+                    "gate_mode": "g",
+                    "state_dtype": "bf16",
+                    "beta_dtype": "bf16",
+                    "g_dtype": "fp32",
+                    "state_layout": "contiguous",
+                    "input_layout": "contiguous",
+                    "state_indices": [
+                        batch for batch in range(batch_size)
+                        for _ in range(token_per_batch)
+                    ],
+                    "block_num": batch_size,
+                    "scale": 128 ** -0.5,
+                    "use_qk_l2norm_in_kernel": True,
+                    "use_gate_in_kernel": True,
+                    "use_beta_sigmoid_in_kernel": True,
+                    "allow_neg_eigval": True,
+                    "batch_size": batch_size,
+                    "token_per_batch": token_per_batch,
+                    "total_tokens": total_tokens,
+                    "seed": 20261022,
+                    "soc": "all",
+                    "route": "ascendc",
+                }, len(profiles)))
     return profiles
 
 

@@ -66,7 +66,7 @@ MSS 人工矩阵为 **24** 条：0～7 一一对应 State/Beta/g 的 8 组模板
 
 反向矩阵 **57** 条：0～11 保留历史越界 head ratio 原 shape；12～56 覆盖 gk、QKV 尾轴 stride、State 重叠/输入别名、跨请求竞争、slot、accepted、bool、scale、raw gate 依赖和 dtype。以 `--task run` 执行独立 negative executor，要求实际 wrapper 抛出 ValueError/TypeError，且 State 数值和版本未改变。JSON 显式配置 `expected_return_code=0`，表示反向验证 executor 完成预期拒绝和 State 不变检查后的成功返回码；导入、ACL 等运行时错误不会被捕获或当作通过。
 
-性能矩阵 **21** 条：case 0 保留原最小 V1 工程对比 shape、dtype、scale 和 seed；1～20 分别覆盖 8 组 dtype、长窗口、混合 QKV、二维 checkpoint、padding/offset/置换和 softplus 尾部。模型 case 和正式性能结论仍需按真实调用条件单独核验。共同接口可直接比较 V1/V2；新融合能力的 V1 基线应是等价的显式预处理调用链，不可规约输入后宣称同条件对比。性能只使用 msprof `op_summary` 的 `Task Duration(us)`，各 pipe 耗时不相加。
+性能矩阵 **54** 条：覆盖 `BS={32,64,72}`、`HK=16`、`HV={32,48,128}`、`TOKEN_PER_BATCH={1,2,4,8,16,32}` 和 `K=V=128`，每个 batch 使用独立 State slot。固定性能用例统一使用 QKV bf16、State bf16、Beta bf16、g fp32，并开启 Q/K L2 norm、gate、beta sigmoid 融合路径。模型 case 和正式性能结论仍需按真实调用条件单独核验。共同接口可直接比较 V1/V2；新融合能力的 V1 基线应是等价的显式预处理调用链，不可规约输入后宣称同条件对比。性能只使用 msprof `op_summary` 的 `Task Duration(us)`，各 pipe 耗时不相加；本轮 54 条执行成功，单 case 重跑后 54 条均生成可用 Task Duration。
 
 ## 生成与执行
 
@@ -126,6 +126,6 @@ test -s "$MSS_LOG_PATH"
 
 单算子编译、安装和包内/安装后 kernel 身份校验通过，Stable 入口命中已核验。原生 `atk case` 生成的 906 条完整矩阵已执行，首次精度 904 PASS、2 FAIL、0 ERROR；case_id 63、399 **需要复检**。保存输出和 CT 定位未发现结构异常后，两例各进行 50 轮复检，100/100 轮原生四项判据全部通过，官方 CT 三 ratio 聚合失败数为 0。按统计复检流程，精度验收通过；原单轮 FAIL 保留在配套交付件中，不描述为首次 906 PASS。
 
-负向 57/57 通过且异常前 State 不变；最终 host 修复包完整确定性 906 条每例 50 次全部通过，旧包结果另存历史材料，不替代最终包重跑。内存/MSS 的正式编译包 GM 访问检测 24 条主矩阵及原 case_id 678、774 两条行 padding 用例通过，目标算子零非法诊断；历史 C ABI 16/16 执行契约检查通过。ATK 扩展性能 21/21 完成。相同输入的 V1/V2 共同 6 场景均出现回退，V2 耗时为 V1 的 2.748～5.811 倍，未取得加速；正式耗时来源为 msprof `Task Duration(us)`。
+负向 57/57 通过且异常前 State 不变；最终 host 修复包完整确定性 906 条每例 50 次全部通过，旧包结果另存历史材料，不替代最终包重跑。内存/MSS 的正式编译包 GM 访问检测 24 条主矩阵及原 case_id 678、774 两条行 padding 用例通过，目标算子零非法诊断；历史 C ABI 16/16 执行契约检查通过。ATK 扩展性能矩阵 54/54 执行成功，单 case 重跑后 54 条均具备可用 Task Duration。相同输入的 V1/V2 共同 6 场景均出现回退，V2 耗时为 V1 的 2.748～5.811 倍，未取得加速；正式耗时来源为 msprof `Task Duration(us)`。
 
 复检未调整输入范围、阈值、shape、布局或覆盖；CT 官方三项聚合与原生第四项分别核验。完整报告、原始 profiler CSV、结果工作簿与 SHA256 清单位于配套测试交付件。本轮仅完成 A2 真机验证，不代表 A3 真机或 wheel 安装验证完成。
