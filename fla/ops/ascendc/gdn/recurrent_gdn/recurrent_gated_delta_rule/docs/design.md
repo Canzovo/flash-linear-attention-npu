@@ -142,3 +142,9 @@ V pipe 内的同址读写使用 `PipeBarrier<PIPE_V>()`，不能用它代替跨 
 | `ReleaseEvents` | 按分配时相同的 HardEvent 类型释放全部事件资源。 |
 
 主调用链为 `Init → Process → RunHead`。每个 head 先 `LoadState → CopyInput(Q)`，每个窗口执行 `PrepareWindow`，随后依次调用 `Token`；`PrepareWindow` 内调用 `CopyWindowMeta`、`CopyInput(K/V)` 和可选的 `NormalizeWindow`。`Token` 调用两次 `DotRows`，外积统一使用 `MulAddDst`，再由 `EmitState` 写回。所有任务结束后由 `Process` 调用 `ReleaseEvents`。窗口内预处理批量进行，State 递推仍按 token 先后顺序执行。
+
+### 2.9 Host 结构化报错
+
+ACLNN、inferShape 和 tiling 的拒绝分支使用 `op_common/log/log.h` 的类型化宏，向 ErrorManager 上报具体参数、实际值、期望条件和 `EZxxxx` 编号。上层传播失败时保留原消息，不再用通用日志覆盖具体原因。executor、内部 view/输出分配和启动器失败上报内部错误。
+
+workspaceSize/executor 空指针检查位于 DFX phase-1 之前，保留框架原有返回状态并补全具体参数名。V2 的完整 descriptor、属性、storage 和别名检查也在 DFX 缓存查询之前执行，避免相同 shape 命中缓存时绕过写别名检查。V1 的公开签名、计算流程和计算源码保持原样，仅整改报错分支。直接接口脚本同时检查返回状态、`aclGetRecentErrMsg()`、executor/workspace 和 State 未变，错误编号及复现入口见接口说明和 ATK README。

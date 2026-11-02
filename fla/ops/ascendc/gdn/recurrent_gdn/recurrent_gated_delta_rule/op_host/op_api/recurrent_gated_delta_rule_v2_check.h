@@ -3,6 +3,8 @@
 #ifndef RECURRENT_GDN_V2_CHECK_H
 #define RECURRENT_GDN_V2_CHECK_H
 
+#include "../recurrent_gated_delta_rule_error.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -25,17 +27,28 @@ inline uint64_t ElementBytes(const aclTensor *t)
     return t->GetDataType() == op::DataType::DT_BF16 ? 2 : 4;
 }
 
-inline bool Type(const aclTensor *t, std::initializer_list<op::DataType> allowed)
+inline bool Type(const aclTensor *t, std::initializer_list<op::DataType> allowed,
+                 const char *name, const char *expected, const char *entity)
 {
-    return !t || std::find(allowed.begin(), allowed.end(), t->GetDataType()) != allowed.end();
+    if (!t || std::find(allowed.begin(), allowed.end(), t->GetDataType()) != allowed.end()) return true;
+    OP_LOGE_WITH_INVALID_INPUT_DTYPE(entity, name,
+        ge::TypeUtils::DataTypeToSerialString(t->GetDataType()), expected);
+    return false;
 }
 
-inline bool Shape(const aclTensor *t, std::initializer_list<int64_t> expected)
+inline bool Shape(const aclTensor *t, std::initializer_list<int64_t> expected, const char *name)
 {
-    if (!t || t->GetViewShape().GetDimNum() != expected.size()) return false;
+    constexpr const char *entity = "aclnnRecurrentGatedDeltaRuleV2";
+    if (!t) { OP_LOGE_WITH_INVALID_INPUT(entity, name); return false; }
+    bool valid = t->GetViewShape().GetDimNum() == expected.size();
     size_t i = 0;
-    for (auto n : expected) if (t->GetViewShape().GetDim(i++) != n) return false;
-    return true;
+    if (valid) for (auto n : expected) valid = (t->GetViewShape().GetDim(i++) == n) && valid;
+    if (valid) return true;
+    std::ostringstream correct;
+    for (auto n : expected) { if (correct.tellp() != std::streampos(0)) correct << ','; correct << n; }
+    const std::string actual = rgdn_error::ShapeText(t->GetViewShape());
+    OP_LOGE_FOR_INVALID_SHAPE(entity, name, actual.substr(1, actual.size() - 2), correct.str());
+    return false;
 }
 
 // Validate every multiply/add before using an address or narrowing a DMA gap.
@@ -131,34 +144,119 @@ inline bool MatrixView(const aclTensor *t, size_t rowAxis)
 inline bool Check(const Params &p)
 {
     using op::DataType;
-    if (!p.q || !p.k || !p.v || !p.beta || !p.state || !p.lengths || !p.indices || !p.out || p.gk)
+    constexpr const char *entity = "aclnnRecurrentGatedDeltaRuleV2";
+    const std::pair<const char *, const aclTensor *> required[] = {
+        {"query",p.q},{"key",p.k},{"value",p.v},{"beta",p.beta},{"state",p.state},
+        {"actual_seq_lengths",p.lengths},{"ssm_state_indices",p.indices},{"out",p.out}};
+    for (const auto &input : required) {
+        if (!input.second) { OP_LOGE_WITH_INVALID_INPUT(entity, input.first); return false; }
+    }
+    if (p.gk) {
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(entity, "gk", "non-null gk is supported only by V1; V2 requires gk=nullptr");
         return false;
-    if (!std::isfinite(p.scale) || (p.rawGate && (!p.g || !p.aLog))) return false;
-    for (auto t : {p.q, p.k, p.v, static_cast<const aclTensor *>(p.out)})
-        if (!Type(t, {DataType::DT_BF16})) return false;
-    for (auto t : {p.beta, p.g, static_cast<const aclTensor *>(p.state)})
-        if (!Type(t, {DataType::DT_BF16, DataType::DT_FLOAT})) return false;
-    for (auto t : {p.aLog, p.bias}) if (!Type(t, {DataType::DT_FLOAT})) return false;
-    for (auto t : {p.lengths, p.indices, p.accepted}) if (!Type(t, {DataType::DT_INT32})) return false;
-    if (p.q->GetViewShape().GetDimNum() != 3 || p.v->GetViewShape().GetDimNum() != 3 ||
-        p.state->GetViewShape().GetDimNum() != 4 || p.lengths->GetViewShape().GetDimNum() != 1) return false;
+    }
+    if (!std::isfinite(p.scale)) {
+        OP_LOGE_FOR_INVALID_VALUE(entity, "scaleValue", std::to_string(p.scale), "finite float32");
+        return false;
+    }
+    if (p.rawGate && (!p.g || !p.aLog)) {
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(entity, "use_gate_in_kernel",
+            std::string("true requires non-null g and A_log; g=") + (p.g ? "present" : "null") +
+            ", A_log=" + (p.aLog ? "present" : "null"));
+        return false;
+    }
+    struct TensorRule {
+        const char *first;
+        const aclTensor *second;
+        std::initializer_list<DataType> allowed;
+        const char *expected;
+        size_t rank; // Zero means the separately checked one/two-dimensional indices.
+    };
+    const TensorRule tensors[] = {
+        {"query",p.q,{DataType::DT_BF16},"[bfloat16]",3},
+        {"key",p.k,{DataType::DT_BF16},"[bfloat16]",3},
+        {"value",p.v,{DataType::DT_BF16},"[bfloat16]",3},
+        {"out",p.out,{DataType::DT_BF16},"[bfloat16]",3},
+        {"state",p.state,{DataType::DT_BF16,DataType::DT_FLOAT},"[bfloat16, float32]",4},
+        {"beta",p.beta,{DataType::DT_BF16,DataType::DT_FLOAT},"[bfloat16, float32]",2},
+        {"g",p.g,{DataType::DT_BF16,DataType::DT_FLOAT},"[bfloat16, float32]",2},
+        {"A_log",p.aLog,{DataType::DT_FLOAT},"[float32]",1},
+        {"dt_bias",p.bias,{DataType::DT_FLOAT},"[float32]",1},
+        {"actual_seq_lengths",p.lengths,{DataType::DT_INT32},"[int32]",1},
+        {"ssm_state_indices",p.indices,{DataType::DT_INT32},"[int32]",0},
+        {"num_accepted_tokens",p.accepted,{DataType::DT_INT32},"[int32]",1}};
+    for (const auto &input : tensors) {
+        if (!Type(input.second,input.allowed,input.first,input.expected,entity)) return false;
+        if (input.second && input.second->GetStorageFormat() == op::Format::FORMAT_FRACTAL_NZ) {
+            OP_LOGE_WITH_INVALID_INPUT_FORMAT(entity,input.first,"FRACTAL_NZ","any format except FRACTAL_NZ");
+            return false;
+        }
+        if (!input.second || input.rank == 0) continue;
+        const size_t rank = input.second->GetViewShape().GetDimNum();
+        if (rank != input.rank) {
+            OP_LOGE_FOR_INVALID_SHAPEDIM(entity,input.first,std::to_string(rank),std::to_string(input.rank));
+            return false;
+        }
+    }
     const int64_t t = p.q->GetViewShape().GetDim(0), hk = p.q->GetViewShape().GetDim(1);
     const int64_t hv = p.v->GetViewShape().GetDim(1), blocks = p.state->GetViewShape().GetDim(0);
     const int64_t b = p.lengths->GetViewShape().GetDim(0) - 1;
-    if (t <= 0 || hk <= 0 || hv <= 0 || blocks <= 0 || b <= 0 || hv % hk || hv / hk > 16 ||
-        b > std::numeric_limits<int64_t>::max() / hv) return false;
-    if (!Shape(p.q, {t,hk,128}) || !Shape(p.k, {t,hk,128}) || !Shape(p.v, {t,hv,128}) ||
-        !Shape(p.beta, {t,hv}) || !Shape(p.state, {blocks,hv,128,128}) || !Shape(p.out, {t,hv,128})) return false;
+    for (const auto &dim : {std::make_pair("query.T",t),std::make_pair("query.HK",hk),
+         std::make_pair("value.HV",hv),std::make_pair("state.Cstate",blocks),std::make_pair("actual_seq_lengths.B",b)}) {
+        if (dim.second <= 0) {
+            OP_LOGE_FOR_INVALID_VALUE(entity,dim.first,std::to_string(dim.second),">0");
+            return false;
+        }
+    }
+    if (hv % hk || hv / hk > 16) {
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(entity,"query.HK,value.HV",
+            std::to_string(hk)+","+std::to_string(hv),"HV must be a multiple of HK and HV/HK must be in [1,16]");
+        return false;
+    }
+    if (b > std::numeric_limits<int64_t>::max() / hv) {
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(entity,"actual_seq_lengths.B,value.HV",
+            std::to_string(b)+","+std::to_string(hv),"B*HV must fit int64 task addressing");
+        return false;
+    }
+    if (!Shape(p.q,{t,hk,128},"query") || !Shape(p.k,{t,hk,128},"key") || !Shape(p.v,{t,hv,128},"value") ||
+        !Shape(p.beta,{t,hv},"beta") || !Shape(p.state,{blocks,hv,128,128},"state") || !Shape(p.out,{t,hv,128},"out")) return false;
     if (p.indices->GetViewShape().GetDimNum() == 1) {
-        if (!Shape(p.indices, {t})) return false;
+        if (!Shape(p.indices,{t},"ssm_state_indices")) return false;
     } else if (p.indices->GetViewShape().GetDimNum() == 2) {
-        if (p.indices->GetViewShape().GetDim(0) != b || p.indices->GetViewShape().GetDim(1) <= 0) return false;
-    } else return false;
-    if ((p.g && !Shape(p.g, {t,hv})) || (p.aLog && !Shape(p.aLog, {hv})) ||
-        (p.bias && !Shape(p.bias, {hv})) || (p.accepted && !Shape(p.accepted, {b}))) return false;
-    for (auto x : {p.q,p.k,p.v,p.beta,static_cast<const aclTensor *>(p.state),p.lengths,p.indices,
-                   p.g,p.accepted,p.aLog,p.bias,static_cast<const aclTensor *>(p.out)}) if (!ViewValid(x)) return false;
-    if (!MatrixView(p.q,0) || !MatrixView(p.k,0) || !MatrixView(p.v,0) || !MatrixView(p.state,2) || !op::IsContiguous(p.out)) return false;
+        if (p.indices->GetViewShape().GetDim(0) != b || p.indices->GetViewShape().GetDim(1) <= 0) {
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(entity,"ssm_state_indices",rgdn_error::ShapeText(p.indices->GetViewShape()),
+                "expected [B="+std::to_string(b)+",Ckpt] with Ckpt>0");
+            return false;
+        }
+    } else {
+        OP_LOGE_FOR_INVALID_SHAPEDIM(entity,"ssm_state_indices",std::to_string(p.indices->GetViewShape().GetDimNum()),"1 or 2");
+        return false;
+    }
+    if ((p.g && !Shape(p.g,{t,hv},"g")) || (p.aLog && !Shape(p.aLog,{hv},"A_log")) ||
+        (p.bias && !Shape(p.bias,{hv},"dt_bias")) || (p.accepted && !Shape(p.accepted,{b},"num_accepted_tokens"))) return false;
+    for (const auto &input : tensors) {
+        if (input.second && !ViewValid(input.second)) {
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(entity,input.first,
+                "view exceeds storage bounds, has invalid dimensions/strides, or overflows address arithmetic; shape="+
+                rgdn_error::ShapeText(input.second->GetViewShape())+", strides="+
+                rgdn_error::StrideText(input.second->GetViewStrides())+", offset="+std::to_string(input.second->GetViewOffset())+
+                ", storage="+rgdn_error::ShapeText(input.second->GetStorageShape()));
+            return false;
+        }
+    }
+    for (const auto &input : required) {
+        if (input.second != p.q && input.second != p.k && input.second != p.v && input.second != p.state) continue;
+        if (!MatrixView(input.second,input.second == p.state ? 2 : 0)) {
+            OP_LOGE_FOR_INVALID_STRIDE(entity,input.first,rgdn_error::StrideText(input.second->GetViewStrides()),
+                input.second == p.state ? "positive strides, K stride=1, V stride>=128, row byte gap<=UINT32_MAX" :
+                "positive strides, last stride=1, token stride>=128, token byte gap<=UINT32_MAX");
+            return false;
+        }
+    }
+    if (!op::IsContiguous(p.out)) {
+        OP_LOGE_FOR_INVALID_STRIDE(entity,"out",rgdn_error::StrideText(p.out->GetViewStrides()),"contiguous [T,HV,128]");
+        return false;
+    }
     // Fast proof for padding and permutations; exact intervals admit legal
     // interleaved State views instead of treating an inconclusive proof as failure.
     std::vector<std::pair<uint64_t,uint64_t>> axes;
@@ -173,11 +271,25 @@ inline bool Check(const Params &p)
     }
     if (!disjoint) {
         auto intervals=Intervals(p.state);
-        for (size_t i=1;i<intervals.size();++i) if(intervals[i-1].second>intervals[i].first) return false;
+        for (size_t i=1;i<intervals.size();++i) if(intervals[i-1].second>intervals[i].first) {
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(entity,"state",
+                "writable State elements overlap; strides="+rgdn_error::StrideText(p.state->GetViewStrides()));
+            return false;
+        }
     }
-    for (auto input : {p.q,p.k,p.v,p.beta,p.lengths,p.indices,p.g,p.accepted,p.aLog,p.bias})
-        if (Alias(p.state,input) || Alias(p.out,input)) return false;
-    return !Alias(p.state,p.out);
+    for (const auto &input : tensors) {
+        if (std::string(input.first) == "state" || std::string(input.first) == "out") continue;
+        if (Alias(p.state,input.second) || Alias(p.out,input.second)) {
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(entity,input.first,
+                std::string("read-only input overlaps writable ")+(Alias(p.state,input.second) ? "state" : "out"));
+            return false;
+        }
+    }
+    if (Alias(p.state,p.out)) {
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(entity,"state,out","writable State and out storage overlap");
+        return false;
+    }
+    return true;
 }
 } // namespace rgdn_v2
 #endif

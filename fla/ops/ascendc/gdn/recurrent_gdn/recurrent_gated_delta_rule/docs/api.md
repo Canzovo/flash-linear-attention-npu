@@ -109,4 +109,20 @@ state[write_slot,hv] = cast_state_dtype(S)
 
 Python 入口在提交计算前校验 descriptor、属性、metadata 值域和跨请求 State 所有权；metadata 原地修改后必须重新验证。直接 ACLNN 校验 descriptor 与属性，直接 C 调用方负责设备 metadata 的值域与 State 所有权。非法 shape、dtype、stride、slot、bool、scale、别名或 raw gate 缺少 g/A_log 时应在提交前报错，并保持 State 不变。
 
+Host 参数拒绝通过 `op_common/log/log.h` 的结构化 Error Message 上报，调用方可用 `aclGetRecentErrMsg()` 获取错误码、参数名、实际值和期望条件；不依赖普通错误日志是否开启。V1/V2 保留原返回状态：必选 tensor 为空或 dtype 错误为 `161002`，workspaceSize/executor 指针为空为 `161001`；公开函数签名不变。V1 的 shape/tiling 错误仍按原阶段返回，当前直接接口检验中的 inference/tiling 失败为 `561103`，具体原因由结构化消息保留；不将 V2 的新增功能约束加到 V1。
+
+| Error Message | 问题 |
+| --- | --- |
+| `EZ0004` | 必选 tensor、workspaceSize 或 executor 指针为空 |
+| `EZ0006` | 不支持的输入 format |
+| `EZ0007` | dtype 不匹配，附实际和支持的类型 |
+| `EZ0008` / `EZ0009` | shape 不匹配，附期望 shape 或原因 |
+| `EZ0011` / `EZ0013` | rank 或维度不匹配 |
+| `EZ0024` / `EZ0027` | 属性、维度值或组合关系无效 |
+| `EZ0028` | stride 不符合计算或写回要求 |
+| `EZ0037` | raw gate 依赖、V2 gk、storage 越界、写别名等约束不满足 |
+| `EZ9999` | executor、内部 view/输出分配或启动器失败 |
+
+这些编号为结构化错误目录编号，与 ACLNN 返回状态分开核验。V2 descriptor 检查在 DFX phase-1 缓存查询之前执行，缓存命中也不能绕过 storage 和别名约束。直接接口检验脚本见 [check_error_messages.py](../../../../../../../tests/atk/recurrent_gated_delta_rule/scripts/check_error_messages.py)。
+
 测试覆盖、执行方法和结果见 [ATK README](../../../../../../../tests/atk/recurrent_gated_delta_rule/README.md)。

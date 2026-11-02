@@ -181,6 +181,21 @@ done
 
 脚本核验固定case 0～9，保存逐输入SHA256。目标CSV中每例6次调用，按时间排序后取第6次，其余5次为预热；只读取目标算子的Task Duration(us)。历史6条小shape对比保留为优化前结果，不代替本次10条。
 
+## ACLNN Error Message 检验
+
+在已安装当前单算子包、已加载 CANN 和 custom 包环境后执行：
+
+```bash
+python scripts/check_error_messages.py --device 0 --output-json error_messages.json
+```
+
+脚本绕过 Python wrapper 的参数拦截，直接构造 ACL tensor descriptor 调用 V1/V2 两段式 API。
+关闭普通日志后仍要求 `aclGetRecentErrMsg()` 返回对应 `EZxxxx`、算子名、参数名和具体原因；
+同时核验 ACLNN 状态、未返回 executor、workspace 未产生以及 State 内容和版本未变化。
+包含两个正常执行对照，避免把加载或调用失败误判成参数拦截成功。
+覆盖必选空指针、dtype、rank/shape、format、stride、storage 越界、别名、scale、head 比例和 raw gate 依赖。
+此项是直接 C API 的报错检验，不代替原生 ATK 精度、性能和内存检查；设备 metadata 值域仍由直接 C 调用方负责。
+
 ## 2026-11-02 外积统一使用 MulAddDst
 
 按本轮要求，BF16和FP32 State的外积更新均使用MulAddDst：K=128分为两个64元素半行，每次repeat=128批量更新128行。
@@ -193,3 +208,13 @@ done
 固定前10条融合性能10/10执行成功，目标Task Duration为142.123～2935.699 us；本轮和修改前均为BF16 State，逐条耗时比（修改前/修改后）为0.988～1.010，不能据此声称FP32收益。1条GM内存检测通过，目标kernel完整开始/结束各1次，0错误、0告警。原始CSV、随机样本及原生报告的数值保真导出随本轮交付件保存。
 
 当前V1/V2共同能力对比已完成，两版逐输入SHA256一致，8条具有有效V1基线，TPB=16/32仍标为不支持。case 6/7本轮V1耗时分别为1201.524/687.614 us，明显高于前轮204.804/348.407 us；对应7.073/2.331倍仅作单轮观测，不作为稳定性能收益。其余6条本轮加速1.167～1.329倍。原始逐例数据全部保留，未删去异常点或追加采样改变结果。
+
+## 2026-11-02 结构化 Error Message
+
+本轮单算子构建、安装及包内/安装后身份校验通过。ACLNN、inferShape、tiling 的通用报错改用结构化消息，直接接口脚本88/88通过，包括86条非法调用和V1/V2两个正常执行对照。正常对照先将out置NaN，确认由kernel写出正确值；非法调用检查状态、EZ编号、参数、原因、未返回executor以及State未变。workspaceSize/executor空指针保留161001，必选tensor为空或dtype错误保留161002；V1的inference/tiling失败保留原阶段状态561103和具体消息。V2检查在DFX缓存查询前执行，缓存命中也不能绕过storage与别名约束。
+
+V1/V2的4个公开函数签名、6个kernel源文件及4个kernel二进制均与上一版一致，V1仅整改错误分支。静态审查0错误、0警告，issue规则覆盖检查通过。
+
+本轮随机20条原生双标杆精度20 PASS、0 FAIL、0 ERROR，sampling seed=2225571253467829970；候选池、输入范围和阈值未变。未重跑906条，也未修改计算二进制，上一版FP32 State的小值域计数限制仍保留，不能由本轮抽样通过推断已解决。
+
+固定前10条融合性能10/10执行成功，目标Task Duration为141.463～2935.438 us，pipe字段完整，输入JSON SHA256与修改前一致。另保留当前V1/V2共同能力逐例对比、输入SHA和原始CSV；TPB=16/32超出V1上限8，标为不支持。单轮数据不作为独占设备的稳定性统计。1条GM内存检测通过，目标kernel开始/结束各1次、0错误、0告警，不代表UB、未初始化或竞争检测全覆盖；本轮不执行确定性。
