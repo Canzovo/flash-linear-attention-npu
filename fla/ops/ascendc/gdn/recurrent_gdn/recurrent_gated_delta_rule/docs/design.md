@@ -56,7 +56,7 @@ A2/A3 的历史 ACLNN 入口使用历史 kernel 和历史 UB 计算，g/gk 维�
 | `[157312,161408)` | delta broadcast | 每个 delta 占一个 32 B block，外积更新消费 |
 | `[161408,161440)` | FP32 beta 窗口 | 保存当前窗口至多 8 个已转换 beta |
 | `[161440,161472)` | FP32 g 窗口 | 保存当前窗口至多 8 个已转换 g，g 缺省不读取 |
-| `[161472,161600)` | 4 个 32 B scalar 临时块 | Exp、Ln、norm 等按最后消费顺序复用 |
+| `[161472,161600)` | 3 个 32 B 预处理临时块和 1 个预留块 | Exp、Ln、norm 等按最后消费顺序复用 |
 | `[161600,161856)`、`[161856,162112)` | 两个 BF16 out bank | V 写、MTE3 读，按 bank 回收 |
 | `[162112,162144)` | head 参数预留区 | 当前实现的 head 参数可保留在 Scalar 局部变量 |
 | `[162144,162176)` | INT32 write-slot 窗口 | 当前窗口最后 token 写回发出后复用 |
@@ -79,11 +79,11 @@ Q/K norm 使用 FP32 平方和及 `rsqrt(sum+1e-6)`，Q scale 只执行一次。
 
 beta sigmoid、softplus 和普通 gate 路径均按窗口批量执行 VEC 运算。beta/g 的 GM 非连续 head 收集是唯一保留的 Scalar 元数据读取，收集结束后通过一次 S→V 事件交给窗口向量预处理。超越函数的计算顺序由必要的 V pipe 依赖屏障保护，输入值域和 ATK 精度标准保持不变。
 
-FP32 State 的 raw gate 在有限正常域使用 Scalar double-float 预处理。每个值由两个 FP32 分量组成；TwoSum、按位拆分的 TwoProd、修正除法保存局部舍入残差，不使用 FP64 或硬件 FMA。Exp 先按双分量 ln(2) 做范围规约，再用十二阶多项式和二的整数幂缩放；Log1p 使用 `y=x/(2+x)` 的 atanh 奇次级数至 25 次。计算只占 Scalar 局部变量，不增加固定 UB。
+BF16 和 FP32 State 统一消费 `PrepareWindow` 已完成的 FP32 raw gate 向量结果。每窗通过向量 Exp、Ln、Div 和逐元素运算计算 `alpha=exp(-exp(A_log)*softplus(g+bias))`；现有 softplus 向量尾部修正保持原样。Token 只读取当前 token 的 alpha，不保存 raw gate 副本，不按 State dtype 或输入值域切换到标量重算。
 
-预处理仍保留 CPU FP32 的逐步舍入顺序：`z=g+bias`、`tail=exp(-abs(z))`、`l=log1p(tail)`、`softplus=max(z,0)+l`、`magnitude=exp(A_log)`、`logGate=-magnitude*softplus`、`alpha=exp(logGate)`。每个超越函数在 double-float 内完成后舍入回 FP32，再进入下一步；不能将整条链替换为 FP64 最后一次舍入。仅当 `A_log∈[-80,80]` 且 gate、bias 均在 `[-1e20,1e20]` 时进入此路径；比较也排除 NaN/Inf。超出此域保留普通路径；极小 alpha 在安全下溢判断后直接返回零。beta sigmoid 和已处理 log gate 保留原指数路径。
+已删除 `recurrent_gated_delta_rule_df.h`、全部引用及其 double-float 函数调用；不把该文件的函数迁移到其他位置。对应 raw gate 临时拷贝、一次 FP32 State 窗口内 V barrier、逐 token GetValue、范围比较、分支、标量多项式与幂缩放循环一并去除。UB 布局仍为162240 B，原第四临时块保留地址预留，事件和 State 写回生命周期不变。
 
-该算子的编译选项限定为 `-ffp-contract=off -fno-fast-math`，使 TwoSum/TwoProd 所依赖的分步 FP32 舍入保持成立。禁止编译器把表达式收缩、重新结合或按实数代数消去残差计算；这些选项不扩展到其它算子。它们同样作用于本算子的历史 kernel，因此最终包还需重跑旧 C ABI 执行兼容性检查。数值改进的效果由原始 ATK 标准及失败用例复检评价，不改变输入范围或阈值。
+本算子的 `-ffp-contract=off -fno-fast-math` 编译选项保持原样，以保留两版既定 FP32 运算顺序；本轮不改变 V1 编译选项、接口或计算源码。精度使用原始 ATK 双标杆标准，不修改输入范围或阈值。性能仍固定前10条 BF16 State 用例，因此该矩阵只用于回归，不据此宣称 FP32 raw gate 的性能收益；V1 对比沿用删除前同轮采集的相同输入基线，当前 V2 重新采集。
 
 ### 2.5 完整 State 递推与写回
 

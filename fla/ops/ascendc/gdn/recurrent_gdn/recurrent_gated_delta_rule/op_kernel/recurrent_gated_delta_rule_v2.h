@@ -7,7 +7,6 @@
 
 #include "kernel_operator.h"
 #include "recurrent_gated_delta_rule_struct.h"
-#include "recurrent_gated_delta_rule_df.h"
 
 namespace RecurrentGatedDeltaRule {
 using namespace AscendC;
@@ -77,8 +76,6 @@ class RGDRV2 {
 
     static constexpr uint32_t kNormNewtonIterations = 3;
     static constexpr float kNormEpsilon = 1.0e-6f;
-    static constexpr float kRawGateLogBound = 80.0f;
-    static constexpr float kRawGateInputBound = 1.0e20f;
     static_assert(kWindowTokens == kFloatBlockElements, "Metadata window must fill one FP32 block");
 
 public:
@@ -208,7 +205,6 @@ private:
         auto tmp0 = ub_.GetWithOffset<float>(kWindowTokens, kTemp0Offset);
         auto tmp1 = ub_.GetWithOffset<float>(kWindowTokens, kTemp1Offset);
         auto tmp2 = ub_.GetWithOffset<float>(kWindowTokens, kTemp2Offset);
-        auto tmp3 = ub_.GetWithOffset<float>(kWindowTokens, kTemp3Offset);
         // Pad short metadata windows to the A2 FP32 vector granularity.  The
         // token loop consumes only [0, count), so the padded tail is ignored.
         const uint32_t vectorCount = kWindowTokens;
@@ -236,12 +232,6 @@ private:
         if (td_.hasGama) {
             if constexpr (std::is_same<Gate, float>::value) DataCopy(gate, gateRaw, vectorCount);
             else Cast(gate, gateRaw, RoundMode::CAST_NONE, vectorCount);
-            if constexpr (std::is_same<State, float>::value) {
-                if (td_.useGateInKernel) {
-                    DataCopy(tmp3, gate, vectorCount);
-                    PipeBarrier<PIPE_V>();
-                }
-            }
             if (td_.useGateInKernel) {
                 Adds(gate, gate, bias, vectorCount);
                 PipeBarrier<PIPE_V>();
@@ -400,23 +390,13 @@ private:
     }
 
     __aicore__ inline void Token(uint32_t token, uint64_t head,
-                                  uint64_t globalToken, uint32_t src, uint32_t dst,
-                                  float aLog, float bias)
+                                  uint64_t globalToken, uint32_t src, uint32_t dst)
     {
         auto query = ub_.GetWithOffset<float>(kHeadDim, kQueryOffset + token * kFloatRowBytes);
         auto key = ub_.GetWithOffset<float>(kHeadDim, kKeyOffset + token * kFloatRowBytes);
         auto value = ub_.GetWithOffset<float>(kHeadDim, kValueOffset + token * kFloatRowBytes);
         const float beta = ub_.GetWithOffset<float>(kWindowTokens, kBetaOffset).GetValue(token);
-        float alpha = td_.hasGama ? ub_.GetWithOffset<float>(kWindowTokens, kGateOffset).GetValue(token) : 1.0f;
-        if constexpr (std::is_same<State, float>::value) {
-            if (td_.hasGama && td_.useGateInKernel) {
-                const float rawGate = ub_.GetWithOffset<float>(kWindowTokens, kTemp3Offset).GetValue(token);
-                const bool accurateRawGate = aLog >= -kRawGateLogBound && aLog <= kRawGateLogBound &&
-                    rawGate >= -kRawGateInputBound && rawGate <= kRawGateInputBound &&
-                    bias >= -kRawGateInputBound && bias <= kRawGateInputBound;
-                if (accurateRawGate) alpha = RecurrentGdnDf::RawAlpha(rawGate, aLog, bias);
-            }
-        }
+        const float alpha = td_.hasGama ? ub_.GetWithOffset<float>(kWindowTokens, kGateOffset).GetValue(token) : 1.0f;
         auto source = ub_.GetWithOffset<float>(kStateElements, src * kStateBankBytes);
         auto target = ub_.GetWithOffset<float>(kStateElements, dst * kStateBankBytes);
         auto delta = ub_.GetWithOffset<float>(kHeadDim, kDeltaOffset);
@@ -500,7 +480,7 @@ private:
                 CopyInput(nextBank, kQueryInput, start + position + count, keyHead, nextCount);
             }
             for (uint32_t token = 0; token < count; ++token) {
-                Token(token, head, start + position + token, src, 1 - src, aLog, bias);
+                Token(token, head, start + position + token, src, 1 - src);
                 src = 1 - src;
             }
         }
