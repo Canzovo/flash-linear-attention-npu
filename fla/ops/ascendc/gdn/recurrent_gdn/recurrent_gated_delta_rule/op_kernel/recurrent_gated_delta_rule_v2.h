@@ -75,37 +75,11 @@ class RGDRV2 {
     static constexpr uint32_t kControlOffset = kMetadataScratchOffset + kBlockBytes;
     static constexpr uint32_t kUbBytes = kControlOffset + kBlockBytes;
 
-    // FP32 compensated outer-product scratch aliases the consumed State bank.
-    // Offsets in this group are element offsets, unlike the byte offsets above.
-    static constexpr uint32_t kBitsPerByte = 8;
-    static constexpr uint32_t kOuterScratchTensorCount = 4;
-    static constexpr uint32_t kKeyLowElement = kHeadDim;
-    static constexpr uint32_t kDeltaHighElement = kKeyLowElement + kHeadDim;
-    static constexpr uint32_t kDeltaLowElement = kDeltaHighElement + kHeadDim;
-    static constexpr uint32_t kHighBroadcastElement = kDeltaLowElement + kHeadDim;
-    static constexpr uint32_t kLowBroadcastElement = kHighBroadcastElement + kHeadDim * kFloatBlockElements;
-    static constexpr uint32_t kProductElement = kLowBroadcastElement + kHeadDim * kFloatBlockElements;
-    static constexpr uint32_t kOuterTileRows =
-        ((kStateBankBytes - kProductElement * sizeof(float)) /
-         (kOuterScratchTensorCount * kFloatRowBytes + kHeadDim / kBitsPerByte)) /
-        kFloatBlockElements * kFloatBlockElements;
-    static constexpr uint32_t kOuterTileElements = kOuterTileRows * kHeadDim;
-    static constexpr uint32_t kProductErrorElement = kProductElement + kOuterTileElements;
-    static constexpr uint32_t kSumElement = kProductErrorElement + kOuterTileElements;
-    static constexpr uint32_t kRecoveredElement = kSumElement + kOuterTileElements;
-    static constexpr uint32_t kFiniteMaskElement = kRecoveredElement + kOuterTileElements;
-    static constexpr uint32_t kSplitMaskElements = kFloatRowBytes / sizeof(uint16_t);
     static constexpr uint32_t kNormNewtonIterations = 3;
     static constexpr float kNormEpsilon = 1.0e-6f;
-    static constexpr float kMaxFiniteFloat = 3.402823466e+38f;
-    static constexpr float kCompensatedLogBound = 80.0f;
-    static constexpr float kCompensatedInputBound = 1.0e20f;
-    static constexpr uint16_t kAllHalfwordBits = 0xffff;
-    static constexpr uint16_t kSplitLowHalfwordMask = 0xf000;
-    static constexpr uint64_t kEvenHalfwordMask = 0x5555555555555555ULL;
+    static constexpr float kRawGateLogBound = 80.0f;
+    static constexpr float kRawGateInputBound = 1.0e20f;
     static_assert(kWindowTokens == kFloatBlockElements, "Metadata window must fill one FP32 block");
-    static_assert((kFiniteMaskElement * sizeof(float) + kOuterTileElements / kBitsPerByte) <= kStateBankBytes,
-                  "Compensated outer-product scratch must fit the reclaimed State bank");
 
 public:
     __aicore__ inline RGDRV2(const RecurrentGatedDeltaRuleTilingData *td) : td_(*td) {}
@@ -425,96 +399,6 @@ private:
         statePending_[bank] = true;
     }
 
-    __aicore__ inline void CompensatedOuter(LocalTensor<float> target, LocalTensor<float> scratch,
-                                            LocalTensor<float> key, LocalTensor<float> delta)
-    {
-        // Split each multiplier into two exact FP32 parts without scaling.
-        // Clearing twelve mantissa bits avoids splitter multiplication overflow.
-        auto mask = ub_.GetWithOffset<uint16_t>(kSplitMaskElements, kReductionOffset);
-        Duplicate(mask, kAllHalfwordBits, kSplitMaskElements);
-        PipeBarrier<PIPE_V>();
-        uint64_t alternating[2] = {kEvenHalfwordMask, kEvenHalfwordMask};
-        Duplicate(mask, kSplitLowHalfwordMask, alternating, kFloatRowBytes / kVectorBytes, 1, kVectorBytes / kBlockBytes);
-        PipeBarrier<PIPE_V>();
-        auto keyHigh = scratch;
-        auto keyLow = scratch[kKeyLowElement];
-        auto deltaHigh = scratch[kDeltaHighElement];
-        auto deltaLow = scratch[kDeltaLowElement];
-        And(keyHigh.ReinterpretCast<uint16_t>(), key.ReinterpretCast<uint16_t>(), mask, kSplitMaskElements);
-        And(deltaHigh.ReinterpretCast<uint16_t>(), delta.ReinterpretCast<uint16_t>(), mask, kSplitMaskElements);
-        PipeBarrier<PIPE_V>();
-        Sub(keyLow, key, keyHigh, kHeadDim);
-        Sub(deltaLow, delta, deltaHigh, kHeadDim);
-        PipeBarrier<PIPE_V>();
-        auto highBroadcast = scratch[kHighBroadcastElement];
-        auto lowBroadcast = scratch[kLowBroadcastElement];
-        Brcb(highBroadcast, deltaHigh, kHeadDim / kFloatBlockElements, {1, kFloatBlockElements});
-        Brcb(lowBroadcast, deltaLow, kHeadDim / kFloatBlockElements, {1, kFloatBlockElements});
-        PipeBarrier<PIPE_V>();
-        auto product = scratch[kProductElement];
-        auto productError = scratch[kProductErrorElement];
-        auto sum = scratch[kSumElement];
-        auto recovered = scratch[kRecoveredElement];
-        auto finite = scratch[kFiniteMaskElement].ReinterpretCast<uint8_t>();
-        auto broadcast = ub_.GetWithOffset<float>(kHeadDim * kFloatBlockElements, kBroadcastOffset);
-        for (uint32_t row = 0; row < kHeadDim; row += kOuterTileRows) {
-            const uint32_t rows = kHeadDim - row < kOuterTileRows ? kHeadDim - row : kOuterTileRows;
-            const uint32_t elements = rows * kHeadDim;
-            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
-                Mul(product[half], key[half], broadcast[row * kFloatBlockElements],
-                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
-                Mul(productError[half], keyHigh[half], highBroadcast[row * kFloatBlockElements],
-                    kFloatVectorElements, rows,
-                    {1, 1, 0, kRowBlocks, 0, 1});
-            }
-            PipeBarrier<PIPE_V>();
-            Sub(productError, productError, product, elements);
-            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
-                Mul(recovered[half], keyHigh[half], lowBroadcast[row * kFloatBlockElements],
-                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
-            }
-            PipeBarrier<PIPE_V>();
-            Add(productError, productError, recovered, elements);
-            PipeBarrier<PIPE_V>();
-            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
-                Mul(recovered[half], keyLow[half], highBroadcast[row * kFloatBlockElements],
-                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
-            }
-            PipeBarrier<PIPE_V>();
-            Add(productError, productError, recovered, elements);
-            PipeBarrier<PIPE_V>();
-            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
-                Mul(recovered[half], keyLow[half], lowBroadcast[row * kFloatBlockElements],
-                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
-            }
-            PipeBarrier<PIPE_V>();
-            Add(productError, productError, recovered, elements);
-            Add(sum, product, target[row * kHeadDim], elements);
-            PipeBarrier<PIPE_V>();
-            Sub(recovered, sum, product, elements);
-            PipeBarrier<PIPE_V>();
-            // The original accumulator is dead after c-v; retain that error
-            // in target while reusing product/recovered for the remaining sum.
-            Sub(target[row * kHeadDim], target[row * kHeadDim], recovered, elements);
-            PipeBarrier<PIPE_V>();
-            Sub(recovered, sum, recovered, elements);
-            PipeBarrier<PIPE_V>();
-            Sub(product, product, recovered, elements);
-            PipeBarrier<PIPE_V>();
-            Add(product, product, target[row * kHeadDim], elements);
-            PipeBarrier<PIPE_V>();
-            Add(productError, product, productError, elements);
-            PipeBarrier<PIPE_V>();
-            Add(product, sum, productError, elements);
-            Abs(recovered, sum, elements);
-            PipeBarrier<PIPE_V>();
-            CompareScalar(finite, recovered, kMaxFiniteFloat, CMPMODE::LE, elements);
-            PipeBarrier<PIPE_V>();
-            Select(target[row * kHeadDim], finite, product, sum, SELMODE::VSEL_TENSOR_TENSOR_MODE, elements);
-            PipeBarrier<PIPE_V>();
-        }
-    }
-
     __aicore__ inline void Token(uint32_t token, uint64_t head,
                                   uint64_t globalToken, uint32_t src, uint32_t dst,
                                   float aLog, float bias)
@@ -527,10 +411,10 @@ private:
         if constexpr (std::is_same<State, float>::value) {
             if (td_.hasGama && td_.useGateInKernel) {
                 const float rawGate = ub_.GetWithOffset<float>(kWindowTokens, kTemp3Offset).GetValue(token);
-                const bool compensatedGate = aLog >= -kCompensatedLogBound && aLog <= kCompensatedLogBound &&
-                    rawGate >= -kCompensatedInputBound && rawGate <= kCompensatedInputBound &&
-                    bias >= -kCompensatedInputBound && bias <= kCompensatedInputBound;
-                if (compensatedGate) alpha = RecurrentGdnDf::RawAlpha(rawGate, aLog, bias);
+                const bool accurateRawGate = aLog >= -kRawGateLogBound && aLog <= kRawGateLogBound &&
+                    rawGate >= -kRawGateInputBound && rawGate <= kRawGateInputBound &&
+                    bias >= -kRawGateInputBound && bias <= kRawGateInputBound;
+                if (accurateRawGate) alpha = RecurrentGdnDf::RawAlpha(rawGate, aLog, bias);
             }
         }
         auto source = ub_.GetWithOffset<float>(kStateElements, src * kStateBankBytes);
@@ -554,12 +438,9 @@ private:
         auto broadcast = ub_.GetWithOffset<float>(kWindowElements, kBroadcastOffset);
         Brcb(broadcast, delta, kHeadDim / kFloatBlockElements, {1, kFloatBlockElements});
         PipeBarrier<PIPE_V>();
-        if constexpr (std::is_same<State, float>::value) {
-            CompensatedOuter(target, source, key, delta);
-        } else {
-            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
-                MulAddDst(target[half], key[half], broadcast, kFloatVectorElements, kHeadDim, {1, 1, 0, kRowBlocks, 0, 1});
-            }
+        for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+            MulAddDst(target[half], key[half], broadcast, kFloatVectorElements, kHeadDim,
+                      {1, 1, 0, kRowBlocks, 0, 1});
         }
         PipeBarrier<PIPE_V>();
         auto output = ub_.GetWithOffset<float>(kHeadDim, kOutputOffset);

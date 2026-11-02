@@ -38,7 +38,7 @@ A2/A3 的历史 ACLNN 入口使用历史 kernel 和历史 UB 计算，g/gk 维�
 
 只申请一个 `TBuf<VECCALC>`，大小 `162240 B`。平台 UB 容量至少为 `162240+2048 B`；2048 B guard 不申请、不写入。各区域起点按 32 B 对齐。
 
-实现中以 `kHeadDim`、`kWindowTokens`、`kBlockBytes` 和元素类型的 `sizeof` 推导区域大小，后一区域起点由前一区域起点加容量得到；访问点直接使用具名偏移常量，不添加短小访问封装。补偿外积 scratch 单独以元素为单位推导，并通过静态断言检查其位于回收的 State bank 内。常量化不改变下表的实际布局或事件协议。
+实现中以 `kHeadDim`、`kWindowTokens`、`kBlockBytes` 和元素类型的 `sizeof` 推导区域大小，后一区域起点由前一区域起点加容量得到；访问点直接使用具名偏移常量，不添加短小访问封装。常量化不改变下表的实际布局或事件协议。
 
 | 字节半开区间 | 对象 | 生命周期与复用条件 |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ A2/A3 的历史 ACLNN 入口使用历史 kernel 和历史 UB 计算，g/gk 维�
 | `[151680,155776)` | FP32 V 窗口 | 整窗口 Cast，delta 消费 |
 | `[155776,156288)` | prediction/delta | 每 token 完成后复用 |
 | `[156288,156800)` | FP32 out | attention 归约后 Cast，下一 token 复用 |
-| `[156800,157312)` | 归约/掩码临时区 | norm 归约和 FP32 分量拆分交替掩码复用 |
+| `[156800,157312)` | 归约临时区 | norm 归约和 FP32 分量拆分交替掩码复用 |
 | `[157312,161408)` | delta broadcast | 每个 delta 占一个 32 B block，外积更新消费 |
 | `[161408,161440)` | FP32 beta 窗口 | 保存当前窗口至多 8 个已转换 beta |
 | `[161440,161472)` | FP32 g 窗口 | 保存当前窗口至多 8 个已转换 g，g 缺省不读取 |
@@ -67,7 +67,7 @@ A2/A3 的历史 ACLNN 入口使用历史 kernel 和历史 UB 计算，g/gk 维�
 
 ### 2.4 输入、预处理与数值门禁
 
-本轮批处理优化保持固定 UB 容量与公开语义：两条 dtype 路径均先整块计算一次衰减 State。旧 src 最后一次读取完成、对应 MTE3 回收后作为完整乘积 scratch；两次矩阵向量运算各以 repeat=128 批量发出两个半行 Mul、一次 Add fold 和一次 WholeReduceSum，按 Mul→fold→reduce→复用的真实依赖同步。FP32 补偿保留相同舍入次序，通过原地保存加法误差将七份 tile 临时量降为四份，tile 行数由 State bank 容量减去固定分量/广播区后推导并向下对齐到 8 行，得到 24 行，尾部 8 行使用实际 repeat。BF16 snapshot 仍只在旧 src 最后消费后覆盖其后半区；未引入额外 GM 中间量。
+本轮批处理实现保持固定 UB 容量：两条 dtype 路径均先整块计算一次衰减 State。旧 src 最后一次读取完成、对应 MTE3 回收后作为完整乘积 scratch；两次矩阵向量运算各以 repeat=128 批量发出两个半行 Mul、一次 Add fold 和一次 WholeReduceSum，按 Mul→fold→reduce→复用的真实依赖同步。BF16 与 FP32 State 的外积更新统一使用两次半行 MulAddDst，每次 repeat=128。BF16 snapshot 仍只在旧 src 最后消费后覆盖其后半区；未引入额外 GM 中间量。
 
 每个窗口有效长度为 `n=min(8,L-position)`。Q/K/V 分别用一次 `DataCopyPad` 描述 n 行，每行 256 B，GM 行间空隙为 `(tokenStride-128)*2`，head 偏移使用各自真实 stride。三个输入各有 ready，Q ready 后先 Cast Q，同时搬 K；K ready 后 Cast K，同时搬 V；V ready 后 Cast V。
 
@@ -89,11 +89,11 @@ FP32 State 的 raw gate 在有限正常域使用 Scalar double-float 预处理�
 
 初始 FP32 State 通过 128 行 DMA 直接载入 bank 0。初始 BF16 State 搬入 `kSnapshotOffset` 对应的 `[32768,65536)`，MTE2→V 后 Cast 到 bank 0 的完整 FP32 区域。
 
-每个 head 的 128 行乘积一次写入已回收的旧 State bank；通过 repeat=128 批量折叠每行前后 64 项，再用 WholeReduceSum 批量归约。完整乘积区在归约完成后复用。delta 通过 `Brcb(...,16,{1,8})` 扩展成 `[128,8]`。BF16 State 路径用 MulAddDst 覆盖 K 的两个 64 元素半段；FP32 State 路径使用下述补偿乘加。
+每个 head 的 128 行乘积一次写入已回收的旧 State bank；通过 repeat=128 批量折叠每行前后 64 项，再用 WholeReduceSum 批量归约。完整乘积区在归约完成后复用。delta 通过 `Brcb(...,16,{1,8})` 扩展成 `[128,8]`。BF16与FP32 State均用MulAddDst覆盖K的两个64元素半段。
 
 FP32 State 路径先在 dst 生成完整 `alpha*src`，用 dst 计算 prediction、delta 和更新，再计算 attention。MTE3 直接读取 dst 写 checkpoint。下一 token 只读此状态并写另一 bank；该 bank 再成为目的区前等待对应 MTE3 完成。
 
-A2/A3 的 vmla/vmadd 不能据 API 名称推断为 IEEE 单次舍入乘加。FP32 外积更新采用 TwoProd/TwoSum 补偿：按位清除乘数低 12 位尾数形成 high/low 两部分，计算乘积残差及加法残差，再将总残差加回。旧 src 的 V 消费结束且对应 MTE3 回收后，将其前 59776 B 用作分量、广播及 24 行 tile 临时区；四份 tile 临时量为 product、productError、sum、recovered。原地保存 c-v 后，旧 accumulator 不再存活，product/recovered 可继续复用。没有新增 UB 申请或 GM 中间结果。归约临时区暂作 16 位交替掩码。非有限 baseline 保留原加法结果，避免补偿残差对 Inf 引入额外 NaN。tile 内真实读写依赖均使用 V barrier。
+BF16 和 FP32 State 均直接以 `MulAddDst` 更新外积：`target += key * delta`。K=128分成两个64元素半行，每次repeat=128批量覆盖全部value行，key的repeat stride为0，delta使用Brcb广播。外积路径不使用TwoProd/TwoSum、乘积拆分、误差恢复、有限值mask或额外tile scratch；完成两次互不重叠的半行更新后，通过一次V barrier供attention点积读取。
 
 BF16 与 FP32 State 路径均先回收 dst，整块执行一次 `alpha*src` 得到衰减 State；V 读取结束并回收 src 的 MTE3 后，src 作为整 head 点积 scratch。prediction 和外积共享同一份衰减 State，保持衰减在归约前的 FP32 运算顺序。BF16 在 attention 点积最后消费后将新 dst Cast 到旧 src 后半的 snapshot，再写 GM。下一 token 继续从完整 FP32 dst 递推；BF16 snapshot 不反馈到递推链。
 
@@ -138,8 +138,7 @@ V pipe 内的同址读写使用 `PipeBarrier<PIPE_V>()`，不能用它代替跨 
 | `LoadState` | 等待上个任务的 UB/GM 使用结束，按 State stride 读入初始矩阵，并将 BF16 输入转为 FP32 工作状态。 |
 | `Token` | 读取本 token 预处理结果，完成 decay、prediction、delta、外积更新、attention、out 转换及 checkpoint 写回；接续完整 FP32 State。 |
 | `DotRows` | 计算矩阵各行与向量的点积，用于 `State×K` 和 `State×Q`；整 head 多行 repeat 计算，共享回收的旧 State bank 作乘积 scratch。 |
-| `CompensatedOuter` | FP32 State 专用的分块外积补偿乘加，复用已消费的旧 State bank 保存乘积及加法残差。 |
 | `EmitState` | 按 slot/head/行 stride 将完整 checkpoint 写回 GM，记录对应 State bank 的 MTE3 完成事件。 |
 | `ReleaseEvents` | 按分配时相同的 HardEvent 类型释放全部事件资源。 |
 
-主调用链为 `Init → Process → RunHead`。每个 head 先 `LoadState → CopyInput(Q)`，每个窗口执行 `PrepareWindow`，随后依次调用 `Token`；`PrepareWindow` 内调用 `CopyWindowMeta`、`CopyInput(K/V)` 和可选的 `NormalizeWindow`。`Token` 调用两次 `DotRows`，FP32 路径另外调用 `CompensatedOuter`，再由 `EmitState` 写回。所有任务结束后由 `Process` 调用 `ReleaseEvents`。窗口内预处理批量进行，State 递推仍按 token 先后顺序执行。
+主调用链为 `Init → Process → RunHead`。每个 head 先 `LoadState → CopyInput(Q)`，每个窗口执行 `PrepareWindow`，随后依次调用 `Token`；`PrepareWindow` 内调用 `CopyWindowMeta`、`CopyInput(K/V)` 和可选的 `NormalizeWindow`。`Token` 调用两次 `DotRows`，外积统一使用 `MulAddDst`，再由 `EmitState` 写回。所有任务结束后由 `Process` 调用 `ReleaseEvents`。窗口内预处理批量进行，State 递推仍按 token 先后顺序执行。
