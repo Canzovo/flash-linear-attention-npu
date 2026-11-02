@@ -40,7 +40,7 @@ atk node --name npu_dut --backend npu --devices 0 --is_bm False \
 
 入口在 ATK 命令结束后调用仓内公共结果检查器，读取本轮新生成的 xlsx 精度通过字段。任意精度失败、执行 ERROR、缺少报告或读到旧报告均返回非零；ATK 自身 CLI 退出0不代表精度通过。
 
-复检使用 `ATK_TASK=accuracy_lt bash scripts/run_dual_accuracy.sh 0 -wl '[63,399]' --loop_nums 50 --disable_id_seed -mt 8`，不加 `-sp`，并以 `ct dual analyze <report.xlsx>` 汇总。仅在 `disable_id_seed` 且 `loop_nums>1` 时，executor 将 ATK 每轮运行时 `case_config.id` 混入数值 seed；三角色共享该 id。shape、indices、accepted、layout、stride、offset、属性和数值范围保持冻结；正常 accuracy 与确定性继续使用原 seed。不能使用跨轮保持不变的 `torch.initial_seed()` 代替该运行时 id。
+复检按当前要求每个case执行100轮，例如 `ATK_TASK=accuracy_lt bash scripts/run_dual_accuracy.sh 0 -wl '[685,705,707,725,802]' --loop_nums 100 --disable_id_seed -mt 8`，不加 `-sp`，并以 `ct dual analyze <report.xlsx>` 汇总。仅在 `disable_id_seed` 且 `loop_nums>1` 时，executor 将 ATK 每轮运行时 `case_config.id` 混入数值 seed；三角色共享该 id。shape、indices、accepted、layout、stride、offset、属性和数值范围保持冻结；正常 accuracy 与确定性继续使用原 seed。不能使用跨轮保持不变的 `torch.initial_seed()` 代替该运行时 id。历史50轮记录保留原结果，不改写为100轮。
 
 两轮原生 `accuracy_lt` 探针已核验六次执行：三角色在同一轮的输入数值 hash 相同，下一轮数值 hash 改变；六次 metadata/stride/offset/属性 hash 完全相同。CPU 自检另对二维 checkpoint、accepted 大于有效长度、空请求和重复槽执行了相同断言。
 
@@ -241,3 +241,19 @@ V1/V2的4个公开函数签名、6个kernel源文件及4个kernel二进制均与
 正式编译包GM内存检查26条为26通过、0未通过；目标kernel开始26次、完成且无错误26次，0目标错误、0目标告警，State padding/storage guard检查通过。导出后的诊断和逐例byte offset再次核验一致。该结论范围为GM访问与executor guard，不代表UB、未初始化或竞争检测全覆盖。确定性通过不替代精度通过。
 
 本轮未修改算子源码，不重测性能，不改变后续默认随机20条的回归范围。配套交付件保留冻结JSON、单算子包、三路失败输出、CT图、原生报告的数值保真JSON、逐轮复检结果及SHA256清单。
+
+## 2026-11-02 失败5例各100轮复检
+
+按最新要求重新对原case 685、705、707、725、802各执行100轮，共500轮。算子源码仍为fcf59aff版本，受测包及安装后二进制身份在执行前后核验一致；固定原case的全部结构和输入范围，只按运行时case ID随机数值，原生精度阈值未改。该轮与此前各50轮的记录分别保存。
+
+| 原case ID | 轮数 | 原生PASS | 原生FAIL | 执行ERROR |
+| ---: | ---: | ---: | ---: | ---: |
+| 685 | 100 | 94 | 6 | 0 |
+| 705 | 100 | 92 | 8 | 0 |
+| 707 | 100 | 87 | 13 | 0 |
+| 725 | 100 | 81 | 19 | 0 |
+| 802 | 100 | 94 | 6 | 0 |
+
+原生单轮合计448 PASS、52 FAIL、0 ERROR；Attention输出500轮全部通过，52轮失败均涉及State输出的小值域计数判据。已执行ct dual analyze，5个case的MARE/MERE/RMSE三ratio聚合全部通过，官方API返回聚合失败数0。该CT版本不定义小值域计数的聚合判定，保留原生第四项的逐轮结果，不将CT三项聚合通过描述为500轮原生全部通过。
+
+配套交付件保留本轮冻结JSON、每例100轮的原生结果、CT命令日志及官方聚合结果、结构和数值保真核验、同一单算子包与源码快照、复现命令和SHA256清单。本次仅复检上述5例，不重跑性能、确定性或内存检查；后续失败case的数值复检统一采用每例100轮再执行ct dual analyze。
