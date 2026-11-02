@@ -608,6 +608,37 @@ class FunctionApi(BaseApi):
         }
 
 
+@register("executor_recurrent_gated_delta_rule_perf")
+class PerformanceApi(FunctionApi):
+    """Profile a fixed input while restoring State before every invocation."""
+
+    def __init__(self, task_result):
+        super().__init__(task_result)
+        self.performance_spec = None
+        self.performance_inputs = None
+        self.initial_state = None
+
+    def __call__(self, input_data: InputDataset, with_output: bool = False):
+        del with_output
+        if self.device not in {"npu", "pyaclnn"}:
+            raise RuntimeError("The performance entry requires an NPU node.")
+        spec = self._run_spec(input_data)
+        if spec != self.performance_spec:
+            self.performance_inputs = build_inputs(spec, _marker_device(input_data))
+            self.initial_state = self.performance_inputs["state"].clone()
+            self.performance_spec = spec
+        self.performance_inputs["state"].copy_(self.initial_state)
+        from fla_npu.ops import ascendc
+
+        out = ascendc.recurrent_gated_delta_rule(**_operator_kwargs(self.performance_inputs))
+        backend = getattr(ascendc, "BACKENDS", {}).get("npu_recurrent_gated_delta_rule")
+        if backend != "stable":
+            raise RuntimeError(f"{OP_NAME}: Stable backend required, got {backend!r}.")
+        # Accuracy/storage guards belong to FunctionApi. Returning only the
+        # small attention output avoids profiling or exporting the full State.
+        return (out,)
+
+
 def _negative_inputs(spec):
     inputs = build_inputs(spec, torch.device("cpu"))
     kind = spec["negative_kind"]

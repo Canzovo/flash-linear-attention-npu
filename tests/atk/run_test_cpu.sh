@@ -14,7 +14,7 @@ show_usage() {
   -npu_device_id=0               传给 ATK node --devices 的 NPU 卡号，默认 0；gen_cases 不需要
   -soc=ascend910b                可选：ascend910b/A2、ascend910_93/A3、ascend950/A5；默认 auto 自动探测
   -scope=all                     可选：all、accuracy、performance、determinism、mssanitizer、gen_cases
-                                 all 包含 accuracy/performance/determinism/mssanitizer；
+                                 all 包含 accuracy/performance/determinism/mssanitizer；RecurrentGDN 跳过 determinism；
                                  gen_cases 只生成精度候选用例，不在 all 中
 
 常用环境变量：
@@ -27,7 +27,7 @@ show_usage() {
   DC_LOOP_NUMS                   确定性循环次数，默认 50（与 ATK 一致）
   DC_TIMEOUT                     确定性阶段超时，默认 3600
   PERFORMANCE_TIMEOUT            性能阶段超时，默认 2000
-  CASE_START/CASE_END            通用 case 顺序范围；不设置时不传 -s/-e，ATK 执行全部用例
+  CASE_START/CASE_END            通用 case 顺序范围；RecurrentGDN 默认随机20精度、前10性能、1内存，不做确定性
   ACCURACY_START/ACCURACY_END    精度与 NaN 检测 case 范围
   PERFORMANCE_START/END          性能 case 范围
   DETERMINISM_START/END          确定性 case 范围
@@ -103,6 +103,9 @@ source_env_file() {
 
 should_run() {
   local stage="$1"
+  if [[ "$OP" == "recurrent_gated_delta_rule" && "$RUN_SCOPE" == "all" && "$stage" == "determinism" ]]; then
+    return 1
+  fi
   if [[ "$stage" == "gen_cases" ]]; then
     [[ "$RUN_SCOPE" == "gen_cases" ]]
     return
@@ -352,7 +355,7 @@ if [[ "$RUN_SCOPE" == "all" ]] &&
       -n "$PERFORMANCE_START" || -n "$PERFORMANCE_END" ||
       -n "$DETERMINISM_START" || -n "$DETERMINISM_END" ||
       -n "$MSS_START" || -n "$MSS_END" ]]; then
-  die "正式验收的 all 必须执行全部用例，不能设置 case 范围"
+  die "all 模式使用默认范围；指定 case 范围时请使用单项 scope"
 fi
 
 cd "$OP_DIR"
@@ -384,6 +387,13 @@ if should_run gen_cases; then
 fi
 
 if should_run accuracy; then
+  if [[ "$OP" == "recurrent_gated_delta_rule" ]]; then
+    log_info "开始随机 20 条原生 CPU 双标杆精度检测"
+    set_case_range_args "精度 case 范围" "$ACCURACY_START" "$ACCURACY_END"
+    ATK_OUTPUT_ROOT="$ATK_OUTPUT_ROOT" ATK_TIMEOUT="$ATK_TIMEOUT" \
+      bash "$OP_DIR/scripts/run_dual_accuracy.sh" "$NPU_DEVICE_ID" \
+      "${CASE_RANGE_ARGS[@]}" "${GM_INIT_ARGS[@]}"
+  else
   log_info "开始精度与 NaN 检测：mixed_tolerance_bm + CPU单标杆 + GM 初始化"
   set_case_range_args "精度与 NaN 检测 case 范围" "$ACCURACY_START" "$ACCURACY_END"
   "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
@@ -398,6 +408,7 @@ if should_run accuracy; then
       "${CASE_RANGE_ARGS[@]}" \
       "${GM_INIT_ARGS[@]}" \
       -to "$ATK_TIMEOUT"
+  fi
   log_info "完成精度与 NaN 检测"
   record_ran_type accuracy
 fi
@@ -405,11 +416,16 @@ fi
 if should_run performance; then
   log_info "开始性能测试：performance_device"
   set_case_range_args "性能测试 case 范围" "$PERFORMANCE_START" "$PERFORMANCE_END"
+  PERFORMANCE_BM_ARGS=()
+  if [[ "$OP" == "recurrent_gated_delta_rule" ]]; then
+    PERFORMANCE_BM_ARGS=(--bm_device npu --performance_data 1,1,1)
+  fi
   "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
       --output_path "${ATK_OUTPUT_ROOT}/perf" \
     task \
       -c "atk_${OP}_perf.json" \
       --task performance_device \
+      "${PERFORMANCE_BM_ARGS[@]}" \
       -p "executor_${OP}.py" \
       "${CASE_RANGE_ARGS[@]}" \
       --save_data profile \
@@ -422,6 +438,7 @@ if should_run determinism; then
   log_info "开始确定性测试：accuracy_dc（循环次数=${DC_LOOP_NUMS}，超时=${DC_TIMEOUT}s）"
   set_case_range_args "确定性测试 case 范围" "$DETERMINISM_START" "$DETERMINISM_END"
   "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
+      --output_path "${ATK_OUTPUT_ROOT}/determinism" \
     task \
       -c "atk_${OP}_mss.json" \
       -p "executor_${OP}.py" \
@@ -438,9 +455,18 @@ if should_run mssanitizer; then
   log_info "开始内存检测：mssanitizer ${MSS_TOOL}"
   log_info "ATK mssanitizer 日志：${MSS_LOG_PATH}"
   set_case_range_args "内存检测 case 范围" "$MSS_START" "$MSS_END"
+  if [[ "$OP" == "recurrent_gated_delta_rule" && ${#CASE_RANGE_ARGS[@]} -eq 0 ]]; then
+    # FP32 State/Beta/g、三融合、跨窗口；白名单精确选择一个原始 case ID。
+    CASE_RANGE_ARGS=(-wl '[7]')
+  fi
   touch "$MSS_LOG_PATH"
-  mssanitizer --tool="$MSS_TOOL" --log-file="$MSS_LOG_PATH" -- \
+  MSS_KERNEL_ARGS=()
+  if [[ "$OP" == "recurrent_gated_delta_rule" ]]; then
+    MSS_KERNEL_ARGS=(--kernel-name=RecurrentGatedDeltaRule)
+  fi
+  mssanitizer --tool="$MSS_TOOL" "${MSS_KERNEL_ARGS[@]}" --log-file="$MSS_LOG_PATH" -- \
     "$ATK_BIN" node --name npu_dut --backend npu --devices "$NPU_DEVICE_ID" \
+      --output_path "${ATK_OUTPUT_ROOT}/mssanitizer" \
     task \
       -c "atk_${OP}_mss.json" \
       -p "executor_${OP}.py" \

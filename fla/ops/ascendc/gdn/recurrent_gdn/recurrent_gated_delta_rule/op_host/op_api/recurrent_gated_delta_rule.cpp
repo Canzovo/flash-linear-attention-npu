@@ -42,13 +42,17 @@ const aclTensor *RecurrentGatedDeltaRule(const aclTensor *query, const aclTensor
 
     auto ret = INFER_SHAPE(
         RecurrentGatedDeltaRule,
-        OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens),
+        OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens,
+                 static_cast<const aclTensor *>(nullptr), static_cast<const aclTensor *>(nullptr)),
         OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue));
     OP_CHECK_INFERSHAPE(ret != ACLNN_SUCCESS, return nullptr, "RecurrentGatedDeltaRule InferShape failed.");
 
+    // The shared kernel has two additional optional input slots. Preserve the
+    // historical API while supplying their positions in the launch argument list.
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
         RecurrentGatedDeltaRule,
-        OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens),
+        OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens,
+                 static_cast<const aclTensor *>(nullptr), static_cast<const aclTensor *>(nullptr)),
         OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue));
     OP_CHECK_ADD_TO_LAUNCHER_LIST_AICORE(ret != ACLNN_SUCCESS, return nullptr,
                                          "RecurrentGatedDeltaRule ADD_TO_LAUNCHER_LIST_AICORE failed.");

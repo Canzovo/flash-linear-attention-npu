@@ -610,7 +610,8 @@ def build_mss_specs() -> list[dict]:
 
 
 def build_perf_specs() -> list[dict]:
-    """Build the fixed performance matrix requested for BS/HK/HV/TPB."""
+    """Use the first ten entries of the ordered BS/HK/HV/TPB matrix."""
+    performance_case_count = 10
     profiles = []
     for batch_size in (32, 64, 72):
         for value_heads in (32, 48, 128):
@@ -637,11 +638,8 @@ def build_perf_specs() -> list[dict]:
                     "g_dtype": "fp32",
                     "state_layout": "contiguous",
                     "input_layout": "contiguous",
-                    "state_indices": [
-                        batch for batch in range(batch_size)
-                        for _ in range(token_per_batch)
-                    ],
-                    "block_num": batch_size,
+                    "state_indices": list(range(total_tokens)),
+                    "block_num": total_tokens,
                     "scale": 128 ** -0.5,
                     "use_qk_l2norm_in_kernel": True,
                     "use_gate_in_kernel": True,
@@ -654,7 +652,7 @@ def build_perf_specs() -> list[dict]:
                     "soc": "all",
                     "route": "ascendc",
                 }, len(profiles)))
-    return profiles
+    return profiles[:performance_case_count]
 
 
 def build_cases() -> list:
@@ -708,9 +706,13 @@ def main() -> None:
     payloads = [
         _case_payload(case_id, spec) for case_id, spec in enumerate(specs)
     ]
+    if args.kind == "perf":
+        for payload in payloads:
+            payload["api_type"] = "executor_recurrent_gated_delta_rule_perf"
     args.output.write_text(
         json.dumps(payloads, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     if args.write_yaml:
         first_spec = json.dumps(build_specs()[0], separators=(",", ":"))

@@ -31,6 +31,82 @@ struct RGDRV2InitParams {
 // the consumed source bank, never in the FP32 bank used by the next recurrence.
 template <typename State, typename Beta, typename Gate>
 class RGDRV2 {
+    static constexpr uint32_t kHeadDim = 128;
+    static constexpr uint32_t kWindowTokens = 8;
+    static constexpr uint32_t kBufferCount = 2;
+    static constexpr uint32_t kQkvInputCount = 3;
+    static constexpr uint32_t kQueryInput = 0;
+    static constexpr uint32_t kKeyInput = 1;
+    static constexpr uint32_t kValueInput = 2;
+    static constexpr uint32_t kBlockBytes = 32;
+    static constexpr uint32_t kVectorBytes = 256;
+    static constexpr uint32_t kFloatBlockElements = kBlockBytes / sizeof(float);
+    static constexpr uint32_t kFloatVectorElements = kVectorBytes / sizeof(float);
+    static constexpr uint32_t kFloatRowBytes = kHeadDim * sizeof(float);
+    static constexpr uint32_t kBf16RowBytes = kHeadDim * sizeof(bfloat16_t);
+    static constexpr uint32_t kRowBlocks = kFloatRowBytes / kBlockBytes;
+    static constexpr uint32_t kStateElements = kHeadDim * kHeadDim;
+    static constexpr uint32_t kStateBankBytes = kStateElements * sizeof(float);
+    static constexpr uint32_t kSnapshotOffset = kStateBankBytes - kStateElements * sizeof(bfloat16_t);
+    static constexpr uint32_t kWindowElements = kWindowTokens * kHeadDim;
+    static constexpr uint32_t kRawInputBytes = kWindowElements * sizeof(bfloat16_t);
+    static constexpr uint32_t kRawBetaOffset = kQkvInputCount * kRawInputBytes;
+    static constexpr uint32_t kRawGateOffset = kRawBetaOffset + kBlockBytes;
+    static constexpr uint32_t kRawBankBytes = kRawGateOffset + kBlockBytes;
+    static constexpr uint32_t kRawBaseOffset = kBufferCount * kStateBankBytes;
+    static constexpr uint32_t kFloatWindowBytes = kWindowElements * sizeof(float);
+    static constexpr uint32_t kQueryOffset = kRawBaseOffset + kBufferCount * kRawBankBytes;
+    static constexpr uint32_t kKeyOffset = kQueryOffset + kFloatWindowBytes;
+    static constexpr uint32_t kValueOffset = kKeyOffset + kFloatWindowBytes;
+    static constexpr uint32_t kDeltaOffset = kValueOffset + kFloatWindowBytes;
+    static constexpr uint32_t kOutputOffset = kDeltaOffset + kFloatRowBytes;
+    static constexpr uint32_t kReductionOffset = kOutputOffset + kFloatRowBytes;
+    static constexpr uint32_t kBroadcastOffset = kReductionOffset + kFloatRowBytes;
+    static constexpr uint32_t kBetaOffset = kBroadcastOffset + kHeadDim * kBlockBytes;
+    static constexpr uint32_t kGateOffset = kBetaOffset + kBlockBytes;
+    static constexpr uint32_t kTemp0Offset = kGateOffset + kBlockBytes;
+    static constexpr uint32_t kTemp1Offset = kTemp0Offset + kBlockBytes;
+    static constexpr uint32_t kTemp2Offset = kTemp1Offset + kBlockBytes;
+    static constexpr uint32_t kTemp3Offset = kTemp2Offset + kBlockBytes;
+    static constexpr uint32_t kOutputBf16Offset = kTemp3Offset + kBlockBytes;
+    static constexpr uint32_t kHeadParamsOffset = kOutputBf16Offset + kBufferCount * kBf16RowBytes;
+    static constexpr uint32_t kWriteSlotsOffset = kHeadParamsOffset + kBlockBytes;
+    static constexpr uint32_t kMetadataScratchOffset = kWriteSlotsOffset + kBlockBytes;
+    static constexpr uint32_t kControlOffset = kMetadataScratchOffset + kBlockBytes;
+    static constexpr uint32_t kUbBytes = kControlOffset + kBlockBytes;
+
+    // FP32 compensated outer-product scratch aliases the consumed State bank.
+    // Offsets in this group are element offsets, unlike the byte offsets above.
+    static constexpr uint32_t kBitsPerByte = 8;
+    static constexpr uint32_t kOuterScratchTensorCount = 4;
+    static constexpr uint32_t kKeyLowElement = kHeadDim;
+    static constexpr uint32_t kDeltaHighElement = kKeyLowElement + kHeadDim;
+    static constexpr uint32_t kDeltaLowElement = kDeltaHighElement + kHeadDim;
+    static constexpr uint32_t kHighBroadcastElement = kDeltaLowElement + kHeadDim;
+    static constexpr uint32_t kLowBroadcastElement = kHighBroadcastElement + kHeadDim * kFloatBlockElements;
+    static constexpr uint32_t kProductElement = kLowBroadcastElement + kHeadDim * kFloatBlockElements;
+    static constexpr uint32_t kOuterTileRows =
+        ((kStateBankBytes - kProductElement * sizeof(float)) /
+         (kOuterScratchTensorCount * kFloatRowBytes + kHeadDim / kBitsPerByte)) /
+        kFloatBlockElements * kFloatBlockElements;
+    static constexpr uint32_t kOuterTileElements = kOuterTileRows * kHeadDim;
+    static constexpr uint32_t kProductErrorElement = kProductElement + kOuterTileElements;
+    static constexpr uint32_t kSumElement = kProductErrorElement + kOuterTileElements;
+    static constexpr uint32_t kRecoveredElement = kSumElement + kOuterTileElements;
+    static constexpr uint32_t kFiniteMaskElement = kRecoveredElement + kOuterTileElements;
+    static constexpr uint32_t kSplitMaskElements = kFloatRowBytes / sizeof(uint16_t);
+    static constexpr uint32_t kNormNewtonIterations = 3;
+    static constexpr float kNormEpsilon = 1.0e-6f;
+    static constexpr float kMaxFiniteFloat = 3.402823466e+38f;
+    static constexpr float kCompensatedLogBound = 80.0f;
+    static constexpr float kCompensatedInputBound = 1.0e20f;
+    static constexpr uint16_t kAllHalfwordBits = 0xffff;
+    static constexpr uint16_t kSplitLowHalfwordMask = 0xf000;
+    static constexpr uint64_t kEvenHalfwordMask = 0x5555555555555555ULL;
+    static_assert(kWindowTokens == kFloatBlockElements, "Metadata window must fill one FP32 block");
+    static_assert((kFiniteMaskElement * sizeof(float) + kOuterTileElements / kBitsPerByte) <= kStateBankBytes,
+                  "Compensated outer-product scratch must fit the reclaimed State bank");
+
 public:
     __aicore__ inline RGDRV2(const RecurrentGatedDeltaRuleTilingData *td) : td_(*td) {}
 
@@ -49,9 +125,9 @@ public:
         aLog_.SetGlobalBuffer((__gm__ float *)p.aLog);
         bias_.SetGlobalBuffer((__gm__ float *)p.dtBias);
         out_.SetGlobalBuffer((__gm__ bfloat16_t *)p.out);
-        pipe_->InitBuffer(ub_, 162240);
-        for (uint32_t bank = 0; bank < 2; ++bank) {
-            for (uint32_t input = 0; input < 3; ++input) {
+        pipe_->InitBuffer(ub_, kUbBytes);
+        for (uint32_t bank = 0; bank < kBufferCount; ++bank) {
+            for (uint32_t input = 0; input < kQkvInputCount; ++input) {
                 ready_[bank][input] = pipe_->AllocEventID<HardEvent::MTE2_V>();
             }
             rawFree_[bank] = pipe_->AllocEventID<HardEvent::V_MTE2>();
@@ -89,15 +165,16 @@ private:
     __aicore__ inline void CopyInput(uint32_t bank, uint32_t input, uint64_t start,
                                      uint64_t head, uint32_t count)
     {
-        const uint64_t *strides = input == 0 ? td_.queryStrides :
-                                  (input == 1 ? td_.keyStrides : td_.valueStrides);
+        const uint64_t *strides = input == kQueryInput ? td_.queryStrides :
+                                  (input == kKeyInput ? td_.keyStrides : td_.valueStrides);
         const uint64_t offset = start * strides[0] + head * strides[1];
-        DataCopyExtParams params{static_cast<uint16_t>(count), 256,
-                                 static_cast<uint32_t>((strides[0] - 128) * 2), 0, 0};
+        DataCopyExtParams params{static_cast<uint16_t>(count), kBf16RowBytes,
+                                 static_cast<uint32_t>((strides[0] - kHeadDim) * sizeof(bfloat16_t)), 0, 0};
         DataCopyPadExtParams<bfloat16_t> padding{false, 0, 0, 0};
-        auto dst = ub_.GetWithOffset<bfloat16_t>(1024, 131072 + bank * 6208 + input * 2048);
-        if (input == 0) DataCopyPad(dst, q_[offset], params, padding);
-        else if (input == 1) DataCopyPad(dst, k_[offset], params, padding);
+        auto dst = ub_.GetWithOffset<bfloat16_t>(
+            kWindowElements, kRawBaseOffset + bank * kRawBankBytes + input * kRawInputBytes);
+        if (input == kQueryInput) DataCopyPad(dst, q_[offset], params, padding);
+        else if (input == kKeyInput) DataCopyPad(dst, k_[offset], params, padding);
         else DataCopyPad(dst, v_[offset], params, padding);
         SetFlag<HardEvent::MTE2_V>(ready_[bank][input]);
     }
@@ -105,10 +182,10 @@ private:
     __aicore__ inline void CopyWindowMeta(uint32_t bank, uint64_t batch, uint64_t head,
                                           uint64_t start, uint32_t position, uint32_t count)
     {
-        auto betaRaw = ub_.GetWithOffset<Beta>(8, 131072 + bank * 6208 + 6144);
-        auto gateRaw = ub_.GetWithOffset<Gate>(8, 131072 + bank * 6208 + 6176);
-        auto slots = ub_.GetWithOffset<int32_t>(8, 162144);
-        for (uint32_t i = 0; i < 8; ++i) {
+        auto betaRaw = ub_.GetWithOffset<Beta>(kWindowTokens, kRawBaseOffset + bank * kRawBankBytes + kRawBetaOffset);
+        auto gateRaw = ub_.GetWithOffset<Gate>(kWindowTokens, kRawBaseOffset + bank * kRawBankBytes + kRawGateOffset);
+        auto slots = ub_.GetWithOffset<int32_t>(kWindowTokens, kWriteSlotsOffset);
+        for (uint32_t i = 0; i < kWindowTokens; ++i) {
             betaRaw.SetValue(i, static_cast<Beta>(0.0f));
             if (td_.hasGama) gateRaw.SetValue(i, static_cast<Gate>(0.0f));
             slots.SetValue(i, 0);
@@ -132,52 +209,51 @@ private:
                                          uint64_t start, uint32_t position, uint32_t count,
                                          float aLog, float bias)
     {
-        auto betaRaw = ub_.GetWithOffset<Beta>(8, 131072 + bank * 6208 + 6144);
-        auto gateRaw = ub_.GetWithOffset<Gate>(8, 131072 + bank * 6208 + 6176);
+        auto betaRaw = ub_.GetWithOffset<Beta>(kWindowTokens, kRawBaseOffset + bank * kRawBankBytes + kRawBetaOffset);
+        auto gateRaw = ub_.GetWithOffset<Gate>(kWindowTokens, kRawBaseOffset + bank * kRawBankBytes + kRawGateOffset);
         const uint64_t keyHead = head / (td_.valueHeads / td_.keyHeads);
         CopyWindowMeta(bank, batch, head, start, position, count);
-        WaitFlag<HardEvent::MTE2_V>(ready_[bank][0]);
-        CopyInput(bank, 1, start, keyHead, count);
-        Cast(ub_.GetWithOffset<float>(1024, 143488),
-             ub_.GetWithOffset<bfloat16_t>(1024, 131072 + bank * 6208),
-             RoundMode::CAST_NONE, count * 128);
-        WaitFlag<HardEvent::MTE2_V>(ready_[bank][1]);
-        CopyInput(bank, 2, start, head, count);
-        Cast(ub_.GetWithOffset<float>(1024, 147584),
-             ub_.GetWithOffset<bfloat16_t>(1024, 131072 + bank * 6208 + 2048),
-             RoundMode::CAST_NONE, count * 128);
-        WaitFlag<HardEvent::MTE2_V>(ready_[bank][2]);
-        Cast(ub_.GetWithOffset<float>(1024, 151680),
-             ub_.GetWithOffset<bfloat16_t>(1024, 131072 + bank * 6208 + 4096),
-             RoundMode::CAST_NONE, count * 128);
+        WaitFlag<HardEvent::MTE2_V>(ready_[bank][kQueryInput]);
+        CopyInput(bank, kKeyInput, start, keyHead, count);
+        Cast(ub_.GetWithOffset<float>(kWindowElements, kQueryOffset),
+             ub_.GetWithOffset<bfloat16_t>(kWindowElements, kRawBaseOffset + bank * kRawBankBytes),
+             RoundMode::CAST_NONE, count * kHeadDim);
+        WaitFlag<HardEvent::MTE2_V>(ready_[bank][kKeyInput]);
+        CopyInput(bank, kValueInput, start, head, count);
+        Cast(ub_.GetWithOffset<float>(kWindowElements, kKeyOffset),
+             ub_.GetWithOffset<bfloat16_t>(kWindowElements, kRawBaseOffset + bank * kRawBankBytes + kRawInputBytes),
+             RoundMode::CAST_NONE, count * kHeadDim);
+        WaitFlag<HardEvent::MTE2_V>(ready_[bank][kValueInput]);
+        Cast(ub_.GetWithOffset<float>(kWindowElements, kValueOffset),
+             ub_.GetWithOffset<bfloat16_t>(
+                 kWindowElements, kRawBaseOffset + bank * kRawBankBytes + kValueInput * kRawInputBytes),
+             RoundMode::CAST_NONE, count * kHeadDim);
         WaitFlag<HardEvent::S_V>(scalarToVector_);
-        auto beta = ub_.GetWithOffset<float>(8, 161408);
-        auto gate = ub_.GetWithOffset<float>(8, 161440);
-        auto tmp0 = ub_.GetWithOffset<float>(8, 161472);
-        auto tmp1 = ub_.GetWithOffset<float>(8, 161504);
-        auto tmp2 = ub_.GetWithOffset<float>(8, 161536);
-        auto tmp3 = ub_.GetWithOffset<float>(8, 161568);
+        auto beta = ub_.GetWithOffset<float>(kWindowTokens, kBetaOffset);
+        auto gate = ub_.GetWithOffset<float>(kWindowTokens, kGateOffset);
+        auto tmp0 = ub_.GetWithOffset<float>(kWindowTokens, kTemp0Offset);
+        auto tmp1 = ub_.GetWithOffset<float>(kWindowTokens, kTemp1Offset);
+        auto tmp2 = ub_.GetWithOffset<float>(kWindowTokens, kTemp2Offset);
+        auto tmp3 = ub_.GetWithOffset<float>(kWindowTokens, kTemp3Offset);
         // Pad short metadata windows to the A2 FP32 vector granularity.  The
         // token loop consumes only [0, count), so the padded tail is ignored.
-        const uint32_t vectorCount = 8;
+        const uint32_t vectorCount = kWindowTokens;
         if constexpr (std::is_same<Beta, float>::value) DataCopy(beta, betaRaw, vectorCount);
         else Cast(beta, betaRaw, RoundMode::CAST_NONE, vectorCount);
         if (td_.useBetaSigmoidInKernel) {
+            // Both exponent arguments are nonpositive. This preserves sigmoid
+            // tails without a packed-mask select for the short metadata window.
             Abs(tmp0, beta, vectorCount);
+            Mins(tmp1, beta, 0.0f, vectorCount);
             PipeBarrier<PIPE_V>();
-            Muls(tmp1, tmp0, -1.0f, vectorCount);
+            Muls(tmp0, tmp0, -1.0f, vectorCount);
             Exp(tmp1, tmp1, vectorCount);
             PipeBarrier<PIPE_V>();
-            Adds(tmp2, tmp1, 1.0f, vectorCount);
+            Exp(tmp0, tmp0, vectorCount);
             PipeBarrier<PIPE_V>();
-            Duplicate(tmp0, 1.0f, vectorCount);
-            Div(tmp0, tmp0, tmp2, vectorCount);
-            Div(tmp2, tmp1, tmp2, vectorCount);
+            Adds(tmp0, tmp0, 1.0f, vectorCount);
             PipeBarrier<PIPE_V>();
-            auto betaMask = tmp3.template ReinterpretCast<uint8_t>();
-            CompareScalar(betaMask, beta, 0.0f, CMPMODE::GE, vectorCount);
-            PipeBarrier<PIPE_V>();
-            Select(beta, betaMask, tmp0, tmp2, SELMODE::VSEL_TENSOR_TENSOR_MODE, vectorCount);
+            Div(beta, tmp1, tmp0, vectorCount);
             if (td_.allowNegEigval) {
                 PipeBarrier<PIPE_V>();
                 Muls(beta, beta, 2.0f, vectorCount);
@@ -201,9 +277,20 @@ private:
                 Exp(tmp1, tmp1, vectorCount);
                 PipeBarrier<PIPE_V>();
                 Adds(tmp2, tmp1, 1.0f, vectorCount);
-                Ln(tmp2, tmp2, vectorCount);
                 PipeBarrier<PIPE_V>();
-                Add(gate, tmp0, tmp2, vectorCount);
+                // u=round(1+x), x=exp(-abs(z)). Recover the rounding loss
+                // before Ln so small softplus tails survive multiplication
+                // by exp(A_log). No scalar branch or packed mask is needed.
+                Adds(gate, tmp2, -1.0f, vectorCount);
+                PipeBarrier<PIPE_V>();
+                Sub(gate, tmp1, gate, vectorCount);
+                PipeBarrier<PIPE_V>();
+                Div(gate, gate, tmp2, vectorCount);
+                Ln(tmp1, tmp2, vectorCount);
+                PipeBarrier<PIPE_V>();
+                Add(gate, gate, tmp1, vectorCount);
+                PipeBarrier<PIPE_V>();
+                Add(gate, tmp0, gate, vectorCount);
                 Duplicate(tmp1, aLog, vectorCount);
                 Exp(tmp1, tmp1, vectorCount);
                 PipeBarrier<PIPE_V>();
@@ -221,36 +308,38 @@ private:
         PipeBarrier<PIPE_V>();
         SetFlag<HardEvent::V_MTE2>(rawFree_[bank]);
         rawPending_[bank] = true;
-        auto q = ub_.GetWithOffset<float>(1024, 143488);
-        auto k = ub_.GetWithOffset<float>(1024, 147584);
+        auto q = ub_.GetWithOffset<float>(kWindowElements, kQueryOffset);
+        auto k = ub_.GetWithOffset<float>(kWindowElements, kKeyOffset);
         if (td_.useQkL2NormInKernel) {
             NormalizeWindow(q, count);
             NormalizeWindow(k, count);
         }
-        Muls(q, q, td_.scale, count * 128);
+        Muls(q, q, td_.scale, count * kHeadDim);
         PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void NormalizeWindow(LocalTensor<float> vector, uint32_t rows)
     {
-        auto product = ub_.GetWithOffset<float>(1024, 157312);
-        auto sum = ub_.GetWithOffset<float>(128, 155776);
-        auto inverse = ub_.GetWithOffset<float>(128, 156800);
-        auto correction = ub_.GetWithOffset<float>(8, 161472);
-        Mul(product, vector, vector, rows * 128);
+        auto product = ub_.GetWithOffset<float>(kWindowElements, kBroadcastOffset);
+        auto sum = ub_.GetWithOffset<float>(kHeadDim, kDeltaOffset);
+        auto inverse = ub_.GetWithOffset<float>(kHeadDim, kReductionOffset);
+        auto correction = ub_.GetWithOffset<float>(kWindowTokens, kTemp0Offset);
+        Mul(product, vector, vector, rows * kHeadDim);
         PipeBarrier<PIPE_V>();
         for (uint32_t row = 0; row < rows; ++row) {
-            Add(product[row * 128 + 64], product[row * 128], product[row * 128 + 64], 64);
-            WholeReduceSum(sum[row], product[row * 128 + 64], 64, 1, 1, 1, 8);
+            Add(product[row * kHeadDim + kFloatVectorElements], product[row * kHeadDim],
+                product[row * kHeadDim + kFloatVectorElements], kFloatVectorElements);
+            WholeReduceSum(sum[row], product[row * kHeadDim + kFloatVectorElements],
+                           kFloatVectorElements, 1, 1, 1, kVectorBytes / kBlockBytes);
         }
         PipeBarrier<PIPE_V>();
-        const uint32_t vectorRows = 8;
-        Adds(sum, sum, 1.0e-6f, vectorRows);
+        const uint32_t vectorRows = kWindowTokens;
+        Adds(sum, sum, kNormEpsilon, vectorRows);
         PipeBarrier<PIPE_V>();
         Adds(inverse, sum, 0.0f, vectorRows);
         Rsqrt(inverse, inverse, vectorRows);
         PipeBarrier<PIPE_V>();
-        for (uint32_t iteration = 0; iteration < 3; ++iteration) {
+        for (uint32_t iteration = 0; iteration < kNormNewtonIterations; ++iteration) {
             Mul(correction, inverse, inverse, vectorRows);
             PipeBarrier<PIPE_V>();
             Mul(correction, correction, sum, vectorRows);
@@ -261,19 +350,20 @@ private:
             Mul(inverse, inverse, correction, vectorRows);
             PipeBarrier<PIPE_V>();
         }
-        // Broadcast one inverse norm to each 128-element token row and scale
+        // Broadcast one inverse norm to each kHeadDim-element token row and scale
         // the whole window in one VEC pass.  This removes the former scalar
         // read/scale loop over tokens while retaining an extra Newton step for
         // the A2 rsqrt approximation.
-        auto broadcast = ub_.GetWithOffset<float>(1024, 157312);
-        Brcb(broadcast, inverse, static_cast<uint8_t>((rows + 7U) / 8U), {1, 8});
+        auto broadcast = ub_.GetWithOffset<float>(kWindowElements, kBroadcastOffset);
+        Brcb(broadcast, inverse, static_cast<uint8_t>((rows + kFloatBlockElements - 1) / kFloatBlockElements),
+             {1, kFloatBlockElements});
         PipeBarrier<PIPE_V>();
         // Brcb stores one 8-scalar block per repeat.  The repeat form below
-        // reuses those row scalars across all 128 features without reading
+        // reuses those row scalars across all kHeadDim features without reading
         // beyond the compact broadcast block.
-        for (uint32_t half = 0; half < 128; half += 64) {
-            Mul(vector[half], vector[half], broadcast, 64, rows,
-                {1, 1, 0, 16, 16, 1});
+        for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+            Mul(vector[half], vector[half], broadcast, kFloatVectorElements, rows,
+                {1, 1, 0, kRowBlocks, kRowBlocks, 1});
         }
         PipeBarrier<PIPE_V>();
     }
@@ -284,59 +374,52 @@ private:
         WaitFlag<HardEvent::V_MTE2>(taskUbFree_);
         SetFlag<HardEvent::MTE3_MTE2>(taskGmFree_);
         WaitFlag<HardEvent::MTE3_MTE2>(taskGmFree_);
-        DataCopyExtParams params{128, static_cast<uint32_t>(128 * sizeof(State)),
-            static_cast<uint32_t>((td_.stateStrides[2] - 128) * sizeof(State)), 0, 0};
+        DataCopyExtParams params{kHeadDim, static_cast<uint32_t>(kHeadDim * sizeof(State)),
+            static_cast<uint32_t>((td_.stateStrides[2] - kHeadDim) * sizeof(State)), 0, 0};
         DataCopyPadExtParams<State> padding{false, 0, 0, 0};
         const uint64_t stateOffset = slot * td_.stateStrides[0] + head * td_.stateStrides[1];
         if constexpr (std::is_same<State, float>::value) {
-            DataCopyPad(ub_.GetWithOffset<float>(16384, 0), state_[stateOffset], params, padding);
+            DataCopyPad(ub_.GetWithOffset<float>(kStateElements, 0), state_[stateOffset], params, padding);
         } else {
-            DataCopyPad(ub_.GetWithOffset<State>(16384, 32768), state_[stateOffset], params, padding);
+            DataCopyPad(ub_.GetWithOffset<State>(kStateElements, kSnapshotOffset), state_[stateOffset], params, padding);
         }
-        SetFlag<HardEvent::MTE2_V>(ready_[0][0]);
-        WaitFlag<HardEvent::MTE2_V>(ready_[0][0]);
+        SetFlag<HardEvent::MTE2_V>(ready_[0][kQueryInput]);
+        WaitFlag<HardEvent::MTE2_V>(ready_[0][kQueryInput]);
         if constexpr (!std::is_same<State, float>::value) {
-            Cast(ub_.GetWithOffset<float>(16384, 0), ub_.GetWithOffset<State>(16384, 32768),
-                 RoundMode::CAST_NONE, 16384);
+            Cast(ub_.GetWithOffset<float>(kStateElements, 0), ub_.GetWithOffset<State>(kStateElements, kSnapshotOffset),
+                 RoundMode::CAST_NONE, kStateElements);
             PipeBarrier<PIPE_V>();
         }
     }
 
     __aicore__ inline void DotRows(LocalTensor<float> dst, LocalTensor<float> matrix,
-                                    LocalTensor<float> vector, float alpha)
+                                    LocalTensor<float> vector, LocalTensor<float> product)
     {
-        auto product = ub_.GetWithOffset<float>(1024, 157312);
-        // Keep the reduction destination isolated for every row.  The vector
-        // multiply is still used for the complete 128-element row; the
-        // reduction instruction has an implementation-defined 8-lane write
-        // footprint, so batching rows into one destination window can overlap
-        // the next row and corrupt adjacent UB state.
-        for (uint32_t row = 0; row < 128; ++row) {
-            if (alpha != 1.0f) {
-                Muls(product, matrix[row * 128], alpha, 128);
-                PipeBarrier<PIPE_V>();
-                Mul(product, product, vector, 128);
-            } else {
-                Mul(product, matrix[row * 128], vector, 128);
-            }
-            PipeBarrier<PIPE_V>();
-            Add(product[64], product, product[64], 64);
-            WholeReduceSum(dst[row], product[64], 64, 1, 1, 1, 8);
-            PipeBarrier<PIPE_V>();
+        // The reclaimed source State bank is disjoint from matrix and dst.
+        for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+            Mul(product[half], matrix[half], vector[half], kFloatVectorElements, kHeadDim,
+                {1, 1, 1, kRowBlocks, kRowBlocks, 0});
         }
+        PipeBarrier<PIPE_V>();
+        Add(product[kFloatVectorElements], product, product[kFloatVectorElements],
+            kFloatVectorElements, kHeadDim, {1, 1, 1, kRowBlocks, kRowBlocks, kRowBlocks});
+        PipeBarrier<PIPE_V>();
+        WholeReduceSum(dst, product[kFloatVectorElements], kFloatVectorElements, kHeadDim, 1, 1, kRowBlocks);
+        PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void EmitState(uint32_t bank, uint64_t slot, uint64_t head)
     {
         SetFlag<HardEvent::V_MTE3>(stateReady_[bank]);
         WaitFlag<HardEvent::V_MTE3>(stateReady_[bank]);
-        DataCopyExtParams params{128, static_cast<uint32_t>(128 * sizeof(State)), 0,
-            static_cast<uint32_t>((td_.stateStrides[2] - 128) * sizeof(State)), 0};
+        DataCopyExtParams params{kHeadDim, static_cast<uint32_t>(kHeadDim * sizeof(State)), 0,
+            static_cast<uint32_t>((td_.stateStrides[2] - kHeadDim) * sizeof(State)), 0};
         const uint64_t stateOffset = slot * td_.stateStrides[0] + head * td_.stateStrides[1];
         if constexpr (std::is_same<State, float>::value) {
-            DataCopyPad(state_[stateOffset], ub_.GetWithOffset<float>(16384, bank * 65536), params);
+            DataCopyPad(state_[stateOffset], ub_.GetWithOffset<float>(kStateElements, bank * kStateBankBytes), params);
         } else {
-            DataCopyPad(state_[stateOffset], ub_.GetWithOffset<State>(16384, bank * 65536 + 32768), params);
+            DataCopyPad(state_[stateOffset],
+                        ub_.GetWithOffset<State>(kStateElements, bank * kStateBankBytes + kSnapshotOffset), params);
         }
         SetFlag<HardEvent::MTE3_V>(stateFree_[bank]);
         statePending_[bank] = true;
@@ -347,82 +430,87 @@ private:
     {
         // Split each multiplier into two exact FP32 parts without scaling.
         // Clearing twelve mantissa bits avoids splitter multiplication overflow.
-        auto mask = ub_.GetWithOffset<uint16_t>(256, 156800);
-        Duplicate(mask, static_cast<uint16_t>(0xffff), 256);
+        auto mask = ub_.GetWithOffset<uint16_t>(kSplitMaskElements, kReductionOffset);
+        Duplicate(mask, kAllHalfwordBits, kSplitMaskElements);
         PipeBarrier<PIPE_V>();
-        uint64_t alternating[2] = {0x5555555555555555ULL, 0x5555555555555555ULL};
-        Duplicate(mask, static_cast<uint16_t>(0xf000), alternating, 2, 1, 8);
+        uint64_t alternating[2] = {kEvenHalfwordMask, kEvenHalfwordMask};
+        Duplicate(mask, kSplitLowHalfwordMask, alternating, kFloatRowBytes / kVectorBytes, 1, kVectorBytes / kBlockBytes);
         PipeBarrier<PIPE_V>();
         auto keyHigh = scratch;
-        auto keyLow = scratch[128];
-        auto deltaHigh = scratch[256];
-        auto deltaLow = scratch[384];
-        And(keyHigh.ReinterpretCast<uint16_t>(), key.ReinterpretCast<uint16_t>(), mask, 256);
-        And(deltaHigh.ReinterpretCast<uint16_t>(), delta.ReinterpretCast<uint16_t>(), mask, 256);
+        auto keyLow = scratch[kKeyLowElement];
+        auto deltaHigh = scratch[kDeltaHighElement];
+        auto deltaLow = scratch[kDeltaLowElement];
+        And(keyHigh.ReinterpretCast<uint16_t>(), key.ReinterpretCast<uint16_t>(), mask, kSplitMaskElements);
+        And(deltaHigh.ReinterpretCast<uint16_t>(), delta.ReinterpretCast<uint16_t>(), mask, kSplitMaskElements);
         PipeBarrier<PIPE_V>();
-        Sub(keyLow, key, keyHigh, 128);
-        Sub(deltaLow, delta, deltaHigh, 128);
+        Sub(keyLow, key, keyHigh, kHeadDim);
+        Sub(deltaLow, delta, deltaHigh, kHeadDim);
         PipeBarrier<PIPE_V>();
-        auto highBroadcast = scratch[512];
-        auto lowBroadcast = scratch[1536];
-        Brcb(highBroadcast, deltaHigh, 16, {1, 8});
-        Brcb(lowBroadcast, deltaLow, 16, {1, 8});
+        auto highBroadcast = scratch[kHighBroadcastElement];
+        auto lowBroadcast = scratch[kLowBroadcastElement];
+        Brcb(highBroadcast, deltaHigh, kHeadDim / kFloatBlockElements, {1, kFloatBlockElements});
+        Brcb(lowBroadcast, deltaLow, kHeadDim / kFloatBlockElements, {1, kFloatBlockElements});
         PipeBarrier<PIPE_V>();
-        auto product = scratch[2560];
-        auto productError = scratch[3584];
-        auto temp = scratch[4608];
-        auto error = scratch[5632];
-        auto previous = scratch[6656];
-        auto sum = scratch[7680];
-        auto recovered = scratch[8704];
-        auto finite = scratch[9728].ReinterpretCast<uint8_t>();
-        auto broadcast = ub_.GetWithOffset<float>(1024, 157312);
-        for (uint32_t row = 0; row < 128; row += 8) {
-            DataCopy(previous, target[row * 128], 1024);
-            for (uint32_t half = 0; half < 128; half += 64) {
-                Mul(product[half], key[half], broadcast[row * 8], 64, 8, {1, 1, 0, 16, 0, 1});
-                Mul(productError[half], keyHigh[half], highBroadcast[row * 8], 64, 8,
-                    {1, 1, 0, 16, 0, 1});
+        auto product = scratch[kProductElement];
+        auto productError = scratch[kProductErrorElement];
+        auto sum = scratch[kSumElement];
+        auto recovered = scratch[kRecoveredElement];
+        auto finite = scratch[kFiniteMaskElement].ReinterpretCast<uint8_t>();
+        auto broadcast = ub_.GetWithOffset<float>(kHeadDim * kFloatBlockElements, kBroadcastOffset);
+        for (uint32_t row = 0; row < kHeadDim; row += kOuterTileRows) {
+            const uint32_t rows = kHeadDim - row < kOuterTileRows ? kHeadDim - row : kOuterTileRows;
+            const uint32_t elements = rows * kHeadDim;
+            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+                Mul(product[half], key[half], broadcast[row * kFloatBlockElements],
+                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
+                Mul(productError[half], keyHigh[half], highBroadcast[row * kFloatBlockElements],
+                    kFloatVectorElements, rows,
+                    {1, 1, 0, kRowBlocks, 0, 1});
             }
             PipeBarrier<PIPE_V>();
-            Sub(productError, productError, product, 1024);
-            for (uint32_t half = 0; half < 128; half += 64) {
-                Mul(temp[half], keyHigh[half], lowBroadcast[row * 8], 64, 8, {1, 1, 0, 16, 0, 1});
+            Sub(productError, productError, product, elements);
+            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+                Mul(recovered[half], keyHigh[half], lowBroadcast[row * kFloatBlockElements],
+                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
             }
             PipeBarrier<PIPE_V>();
-            Add(productError, productError, temp, 1024);
+            Add(productError, productError, recovered, elements);
             PipeBarrier<PIPE_V>();
-            for (uint32_t half = 0; half < 128; half += 64) {
-                Mul(temp[half], keyLow[half], highBroadcast[row * 8], 64, 8, {1, 1, 0, 16, 0, 1});
+            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+                Mul(recovered[half], keyLow[half], highBroadcast[row * kFloatBlockElements],
+                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
             }
             PipeBarrier<PIPE_V>();
-            Add(productError, productError, temp, 1024);
+            Add(productError, productError, recovered, elements);
             PipeBarrier<PIPE_V>();
-            for (uint32_t half = 0; half < 128; half += 64) {
-                Mul(temp[half], keyLow[half], lowBroadcast[row * 8], 64, 8, {1, 1, 0, 16, 0, 1});
+            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+                Mul(recovered[half], keyLow[half], lowBroadcast[row * kFloatBlockElements],
+                    kFloatVectorElements, rows, {1, 1, 0, kRowBlocks, 0, 1});
             }
             PipeBarrier<PIPE_V>();
-            Add(productError, productError, temp, 1024);
-            Add(sum, product, previous, 1024);
+            Add(productError, productError, recovered, elements);
+            Add(sum, product, target[row * kHeadDim], elements);
             PipeBarrier<PIPE_V>();
-            Sub(recovered, sum, product, 1024);
+            Sub(recovered, sum, product, elements);
             PipeBarrier<PIPE_V>();
-            Sub(temp, sum, recovered, 1024);
+            // The original accumulator is dead after c-v; retain that error
+            // in target while reusing product/recovered for the remaining sum.
+            Sub(target[row * kHeadDim], target[row * kHeadDim], recovered, elements);
             PipeBarrier<PIPE_V>();
-            Sub(error, product, temp, 1024);
+            Sub(recovered, sum, recovered, elements);
             PipeBarrier<PIPE_V>();
-            Sub(temp, previous, recovered, 1024);
+            Sub(product, product, recovered, elements);
             PipeBarrier<PIPE_V>();
-            Add(error, error, temp, 1024);
+            Add(product, product, target[row * kHeadDim], elements);
             PipeBarrier<PIPE_V>();
-            Add(error, error, productError, 1024);
+            Add(productError, product, productError, elements);
             PipeBarrier<PIPE_V>();
-            Add(temp, sum, error, 1024);
-            Abs(recovered, sum, 1024);
+            Add(product, sum, productError, elements);
+            Abs(recovered, sum, elements);
             PipeBarrier<PIPE_V>();
-            CompareScalar(finite, recovered, 3.402823466e+38f, CMPMODE::LE, 1024);
+            CompareScalar(finite, recovered, kMaxFiniteFloat, CMPMODE::LE, elements);
             PipeBarrier<PIPE_V>();
-            Select(target[row * 128], finite, temp, sum, SELMODE::VSEL_TENSOR_TENSOR_MODE, 1024);
+            Select(target[row * kHeadDim], finite, product, sum, SELMODE::VSEL_TENSOR_TENSOR_MODE, elements);
             PipeBarrier<PIPE_V>();
         }
     }
@@ -431,86 +519,72 @@ private:
                                   uint64_t globalToken, uint32_t src, uint32_t dst,
                                   float aLog, float bias)
     {
-        auto query = ub_.GetWithOffset<float>(128, 143488 + token * 512);
-        auto key = ub_.GetWithOffset<float>(128, 147584 + token * 512);
-        auto value = ub_.GetWithOffset<float>(128, 151680 + token * 512);
-        const float beta = ub_.GetWithOffset<float>(8, 161408).GetValue(token);
-        float alpha = td_.hasGama ? ub_.GetWithOffset<float>(8, 161440).GetValue(token) : 1.0f;
+        auto query = ub_.GetWithOffset<float>(kHeadDim, kQueryOffset + token * kFloatRowBytes);
+        auto key = ub_.GetWithOffset<float>(kHeadDim, kKeyOffset + token * kFloatRowBytes);
+        auto value = ub_.GetWithOffset<float>(kHeadDim, kValueOffset + token * kFloatRowBytes);
+        const float beta = ub_.GetWithOffset<float>(kWindowTokens, kBetaOffset).GetValue(token);
+        float alpha = td_.hasGama ? ub_.GetWithOffset<float>(kWindowTokens, kGateOffset).GetValue(token) : 1.0f;
         if constexpr (std::is_same<State, float>::value) {
             if (td_.hasGama && td_.useGateInKernel) {
-                const float rawGate = ub_.GetWithOffset<float>(8, 161568).GetValue(token);
-                const bool compensatedGate = aLog >= -80.0f && aLog <= 80.0f &&
-                    rawGate >= -1.0e20f && rawGate <= 1.0e20f && bias >= -1.0e20f && bias <= 1.0e20f;
+                const float rawGate = ub_.GetWithOffset<float>(kWindowTokens, kTemp3Offset).GetValue(token);
+                const bool compensatedGate = aLog >= -kCompensatedLogBound && aLog <= kCompensatedLogBound &&
+                    rawGate >= -kCompensatedInputBound && rawGate <= kCompensatedInputBound &&
+                    bias >= -kCompensatedInputBound && bias <= kCompensatedInputBound;
                 if (compensatedGate) alpha = RecurrentGdnDf::RawAlpha(rawGate, aLog, bias);
             }
         }
-        auto source = ub_.GetWithOffset<float>(16384, src * 65536);
-        auto target = ub_.GetWithOffset<float>(16384, dst * 65536);
-        auto delta = ub_.GetWithOffset<float>(128, 155776);
-        if constexpr (std::is_same<State, float>::value) {
-            if (statePending_[dst]) {
-                WaitFlag<HardEvent::MTE3_V>(stateFree_[dst]);
-                statePending_[dst] = false;
-            }
-            Muls(target, source, alpha, 16384);
-            PipeBarrier<PIPE_V>();
-            DotRows(delta, target, key, 1.0f);
-        } else {
-            DotRows(delta, source, key, alpha);
+        auto source = ub_.GetWithOffset<float>(kStateElements, src * kStateBankBytes);
+        auto target = ub_.GetWithOffset<float>(kStateElements, dst * kStateBankBytes);
+        auto delta = ub_.GetWithOffset<float>(kHeadDim, kDeltaOffset);
+        if (statePending_[dst]) {
+            WaitFlag<HardEvent::MTE3_V>(stateFree_[dst]);
+            statePending_[dst] = false;
         }
-        Sub(delta, value, delta, 128);
+        Muls(target, source, alpha, kStateElements);
         PipeBarrier<PIPE_V>();
-        Muls(delta, delta, beta, 128);
-        PipeBarrier<PIPE_V>();
-        auto broadcast = ub_.GetWithOffset<float>(1024, 157312);
-        Brcb(broadcast, delta, 16, {1, 8});
-        PipeBarrier<PIPE_V>();
-        if constexpr (!std::is_same<State, float>::value) {
-            if (statePending_[dst]) {
-                WaitFlag<HardEvent::MTE3_V>(stateFree_[dst]);
-                statePending_[dst] = false;
-            }
-            Muls(target, source, alpha, 16384);
-            PipeBarrier<PIPE_V>();
+        if (statePending_[src]) {
+            WaitFlag<HardEvent::MTE3_V>(stateFree_[src]);
+            statePending_[src] = false;
         }
+        DotRows(delta, target, key, source);
+        Sub(delta, value, delta, kHeadDim);
+        PipeBarrier<PIPE_V>();
+        Muls(delta, delta, beta, kHeadDim);
+        PipeBarrier<PIPE_V>();
+        auto broadcast = ub_.GetWithOffset<float>(kWindowElements, kBroadcastOffset);
+        Brcb(broadcast, delta, kHeadDim / kFloatBlockElements, {1, kFloatBlockElements});
+        PipeBarrier<PIPE_V>();
         if constexpr (std::is_same<State, float>::value) {
-            // The old source has no remaining V readers. Reclaim its previous
-            // copyout before using its storage for TwoProd/TwoSum scratch.
-            // Neither A2 vmla nor vmadd guarantees IEEE single-round FP32 FMA.
-            if (statePending_[src]) {
-                WaitFlag<HardEvent::MTE3_V>(stateFree_[src]);
-                statePending_[src] = false;
-            }
             CompensatedOuter(target, source, key, delta);
         } else {
-            for (uint32_t half = 0; half < 128; half += 64) {
-                MulAddDst(target[half], key[half], broadcast, 64, 128, {1, 1, 0, 16, 0, 1});
+            for (uint32_t half = 0; half < kHeadDim; half += kFloatVectorElements) {
+                MulAddDst(target[half], key[half], broadcast, kFloatVectorElements, kHeadDim, {1, 1, 0, kRowBlocks, 0, 1});
             }
         }
         PipeBarrier<PIPE_V>();
-        auto output = ub_.GetWithOffset<float>(128, 156288);
-        DotRows(output, target, query, 1.0f);
-        const uint32_t outBank = globalToken % 2;
+        auto output = ub_.GetWithOffset<float>(kHeadDim, kOutputOffset);
+        DotRows(output, target, query, source);
+        const uint32_t outBank = globalToken % kBufferCount;
         if (outPending_[outBank]) {
             WaitFlag<HardEvent::MTE3_V>(outFree_[outBank]);
             outPending_[outBank] = false;
         }
-        auto outputBf16 = ub_.GetWithOffset<bfloat16_t>(128, 161600 + outBank * 256);
-        Cast(outputBf16, output, RoundMode::CAST_RINT, 128);
-        const int32_t writeSlot = ub_.GetWithOffset<int32_t>(8, 162144).GetValue(token);
+        auto outputBf16 = ub_.GetWithOffset<bfloat16_t>(kHeadDim, kOutputBf16Offset + outBank * kBf16RowBytes);
+        Cast(outputBf16, output, RoundMode::CAST_RINT, kHeadDim);
+        const int32_t writeSlot = ub_.GetWithOffset<int32_t>(kWindowTokens, kWriteSlotsOffset).GetValue(token);
         if constexpr (std::is_same<State, float>::value) {
             EmitState(dst, static_cast<uint64_t>(writeSlot), head);
         } else {
             // Source was reclaimed on its preceding turn as a destination.
             // All V reads above must finish before its upper half is reused.
             PipeBarrier<PIPE_V>();
-            Cast(ub_.GetWithOffset<State>(16384, src * 65536 + 32768), target,
-                 RoundMode::CAST_RINT, 16384);
+            Cast(ub_.GetWithOffset<State>(kStateElements, src * kStateBankBytes + kSnapshotOffset), target,
+                 RoundMode::CAST_RINT, kStateElements);
             EmitState(src, static_cast<uint64_t>(writeSlot), head);
         }
         SetFlag<HardEvent::V_MTE3>(outReady_[outBank]);
         WaitFlag<HardEvent::V_MTE3>(outReady_[outBank]);
-        DataCopy(out_[(globalToken * td_.valueHeads + head) * 128], outputBf16, 128);
+        DataCopy(out_[(globalToken * td_.valueHeads + head) * kHeadDim], outputBf16, kHeadDim);
         SetFlag<HardEvent::MTE3_V>(outFree_[outBank]);
         outPending_[outBank] = true;
     }
@@ -529,26 +603,27 @@ private:
             WaitFlag<HardEvent::V_MTE2>(rawFree_[0]);
             rawPending_[0] = false;
         }
-        CopyInput(0, 0, start, keyHead, length < 8 ? length : 8);
-        for (uint32_t position = 0; position < length; position += 8) {
-            const uint32_t bank = (position / 8) % 2;
-            const uint32_t count = length - position < 8 ? length - position : 8;
+        CopyInput(0, kQueryInput, start, keyHead, length < kWindowTokens ? length : kWindowTokens);
+        for (uint32_t position = 0; position < length; position += kWindowTokens) {
+            const uint32_t bank = (position / kWindowTokens) % kBufferCount;
+            const uint32_t count = length - position < kWindowTokens ? length - position : kWindowTokens;
             PrepareWindow(bank, batch, head, start + position, position, count, aLog, bias);
             if (position + count < length) {
-                const uint32_t nextCount = length - position - count < 8 ? length - position - count : 8;
+                const uint32_t nextCount =
+                    length - position - count < kWindowTokens ? length - position - count : kWindowTokens;
                 const uint32_t nextBank = 1 - bank;
                 if (rawPending_[nextBank]) {
                     WaitFlag<HardEvent::V_MTE2>(rawFree_[nextBank]);
                     rawPending_[nextBank] = false;
                 }
-                CopyInput(nextBank, 0, start + position + count, keyHead, nextCount);
+                CopyInput(nextBank, kQueryInput, start + position + count, keyHead, nextCount);
             }
             for (uint32_t token = 0; token < count; ++token) {
                 Token(token, head, start + position + token, src, 1 - src, aLog, bias);
                 src = 1 - src;
             }
         }
-        for (uint32_t bank = 0; bank < 2; ++bank) {
+        for (uint32_t bank = 0; bank < kBufferCount; ++bank) {
             if (statePending_[bank]) {
                 WaitFlag<HardEvent::MTE3_V>(stateFree_[bank]);
                 statePending_[bank] = false;
@@ -566,8 +641,8 @@ private:
 
     __aicore__ inline void ReleaseEvents()
     {
-        for (uint32_t bank = 0; bank < 2; ++bank) {
-            for (uint32_t i = 0; i < 3; ++i) pipe_->ReleaseEventID<HardEvent::MTE2_V>(ready_[bank][i]);
+        for (uint32_t bank = 0; bank < kBufferCount; ++bank) {
+            for (uint32_t i = 0; i < kQkvInputCount; ++i) pipe_->ReleaseEventID<HardEvent::MTE2_V>(ready_[bank][i]);
             pipe_->ReleaseEventID<HardEvent::V_MTE2>(rawFree_[bank]);
             pipe_->ReleaseEventID<HardEvent::V_MTE3>(stateReady_[bank]);
             pipe_->ReleaseEventID<HardEvent::MTE3_V>(stateFree_[bank]);
@@ -588,12 +663,12 @@ private:
     GlobalTensor<State> state_;
     GlobalTensor<int32_t> lengths_, indices_, accepted_;
     GlobalTensor<float> aLog_, bias_;
-    TEventID ready_[2][3], rawFree_[2];
-    TEventID stateReady_[2], stateFree_[2], outReady_[2], outFree_[2];
+    TEventID ready_[kBufferCount][kQkvInputCount], rawFree_[kBufferCount];
+    TEventID stateReady_[kBufferCount], stateFree_[kBufferCount], outReady_[kBufferCount], outFree_[kBufferCount];
     TEventID scalarToVector_, taskUbFree_, taskGmFree_;
-    bool rawPending_[2] = {false, false};
-    bool statePending_[2] = {false, false};
-    bool outPending_[2] = {false, false};
+    bool rawPending_[kBufferCount] = {false, false};
+    bool statePending_[kBufferCount] = {false, false};
+    bool outPending_[kBufferCount] = {false, false};
 };
 } // namespace RecurrentGatedDeltaRule
 #endif

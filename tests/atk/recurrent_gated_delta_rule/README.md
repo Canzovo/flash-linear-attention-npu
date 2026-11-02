@@ -27,14 +27,16 @@ ATK 26.9.24 的纯 CPU 探针已确认：两个显式节点配合 `--bm_device c
 非对称常量探针进一步使用 NPU 节点（只初始化 marker，执行器返回 CPU 常量，不调用 DUT）：golden=1、bench=1.01、DUT=2 时原生比较 FAIL，Actual/Benchmark 误差约为 1/0.01，误差比约100；golden=1、bench=2、DUT=1.01 时 PASS，误差比约0.01。日志确认使用 `CvFusedDoubleBenchmarkAccuracyCompare`。ATK 将结果记在第二个 CPU 节点行，但 `Actual` 对应第一个 NPU DUT，不能只根据行名交换节点。探针公开输出使用 FP32，避免 FP64 输出触发不同比较路径。
 
 ```bash
+python scripts/sample_accuracy_cases.py --source atk_recurrent_gated_delta_rule.json \
+  --output atk_output/accuracy/atk_recurrent_gated_delta_rule_random20.json
 atk node --name npu_dut --backend npu --devices 0 --is_bm False \
   node --name cpu_bench --backend cpu --is_bm True \
-  task -c ./atk_recurrent_gated_delta_rule.json \
+  task -c ./atk_output/accuracy/atk_recurrent_gated_delta_rule_random20.json \
     -p ./executor_recurrent_gated_delta_rule.py \
     --task accuracy --bm_device cpu -to 2000
 ```
 
-也可调用 `bash scripts/run_dual_accuracy.sh 0`，其余 ATK 参数可追加。发生失败时先加 `--save_data output` 保存失败用例并做 CT 定位；不改阈值、range、分布、shape 或覆盖来制造通过。
+每轮精度按当前任务要求随机执行 **20 条**，不再默认执行全部 906 条。`bash scripts/run_dual_accuracy.sh 0` 和统一入口的 `-scope=accuracy` 均采用该默认值；其余 ATK 参数可追加。抽样不放回，保存 sampling seed、原始 case ID、候选池和子集 SHA256；不改变任何 case 内容、输入 seed、值域或精度标准。`ATK_SAMPLE_SEED=<seed>` 可复现抽样，`ATK_CASE_FILE=<saved.json>` 可重跑已保存子集。性能始终执行固定前 10 条（case 0～9），不随机抽样。每次源码修改后的默认回归为随机20条精度、固定10条性能和1条内存检测，取消默认确定性测试。内存检测固定使用 MSS case 7（B=1、T=9、HK=2、HV=4、K=V=128，State/Beta/g 为FP32，三项融合开启）。发生失败时先加 `--save_data output` 保存失败用例并做 CT 定位；不改阈值、range、分布、shape 或覆盖来制造通过。
 
 入口在 ATK 命令结束后调用仓内公共结果检查器，读取本轮新生成的 xlsx 精度通过字段。任意精度失败、执行 ERROR、缺少报告或读到旧报告均返回非零；ATK 自身 CLI 退出0不代表精度通过。
 
@@ -45,6 +47,8 @@ atk node --name npu_dut --backend npu --devices 0 --is_bm False \
 CT0.9.1 的 `dual analyze` 官方聚合仅覆盖 MARE/MERE/RMSE 三个 ratio，不定义小值域错误点数量比的聚合判定。复检记录必须同时保留每轮原生通过状态、小值域 Actual/Benchmark 计数和比例分布，不能用三 ratio 聚合结果覆盖其未覆盖的指标。CT CLI 不传播 `process_excel_and_check` 的失败数，聚合状态应读取该官方 API 的 `failed_cases`；现有 accuracy 报告检查脚本仅检查 ATK 原生汇总，不能替代 CT 统计。
 
 ## 覆盖与映射
+
+以下 906 条为候选池和覆盖映射；当前每轮精度从中随机抽取 20 条，抽样清单随报告保存。历史全矩阵报告保留原始结果。
 
 精度矩阵共 **906** 条，每个逻辑 profile 包含固定种子 20261022、20261023、20261024。以历史 V2 834 条矩阵为基础：822 条符合新契约的 profile 原样保留 head、layout 和数值范围；另 12 条历史 ratio>16 的输入原 shape 迁入反向矩阵，未将 head 夹到 16。新增 84 条验证本次 Beta/g dtype、窗口和 checkpoint 契约。历史 gk/both 标签仅作来源追溯，当前正向计算统一使用设计要求的 scalar gate；gk 非空有独立反向用例。
 
@@ -62,11 +66,20 @@ CT0.9.1 的 `dual analyze` 官方聚合仅覆盖 MARE/MERE/RMSE 三个 ratio，�
 
 原值域保持：普通 QKV 标准差 0.05、State 标准差 0.01；Beta 默认 [0.1,0.9]；已处理 g 默认 -[0.001,0.02]，另有已固化 near_zero/strong_decay/per_head 分支。raw g 标准差 2，raw Beta 标准差 3，A_log/dt_bias 标准差 0.5/0.2；独立极值覆盖 ±100 和 A_log=12～25/g=-A_log。未因 NPU 输出调整输入范围。
 
-MSS 人工矩阵为 **24** 条：0～7 一一对应 State/Beta/g 的 8 组模板 dtype；8～9 为 L=65；10～11 为混合 QKV；12～13 为二维 accepted/重复槽；14～17 为 offset/padding/置换；18～19 为空请求；20～21 为 softplus 尾部；22～23 为 257/258 heads。实际 TilingKey 选择仍需从本轮 kernel 记录核验。
+MSS 人工候选池为 **24** 条，当前默认只执行 case 7：0～7 一一对应 State/Beta/g 的 8 组模板 dtype；8～9 为 L=65；10～11 为混合 QKV；12～13 为二维 accepted/重复槽；14～17 为 offset/padding/置换；18～19 为空请求；20～21 为 softplus 尾部；22～23 为 257/258 heads。实际 TilingKey 选择仍需从本轮 kernel 记录核验。
 
 反向矩阵 **57** 条：0～11 保留历史越界 head ratio 原 shape；12～56 覆盖 gk、QKV 尾轴 stride、State 重叠/输入别名、跨请求竞争、slot、accepted、bool、scale、raw gate 依赖和 dtype。以 `--task run` 执行独立 negative executor，要求实际 wrapper 抛出 ValueError/TypeError，且 State 数值和版本未改变。JSON 显式配置 `expected_return_code=0`，表示反向验证 executor 完成预期拒绝和 State 不变检查后的成功返回码；导入、ACL 等运行时错误不会被捕获或当作通过。
 
-性能矩阵 **54** 条：覆盖 `BS={32,64,72}`、`HK=16`、`HV={32,48,128}`、`TOKEN_PER_BATCH={1,2,4,8,16,32}` 和 `K=V=128`，每个 batch 使用独立 State slot。固定性能用例统一使用 QKV bf16、State bf16、Beta bf16、g fp32，并开启 Q/K L2 norm、gate、beta sigmoid 融合路径。模型 case 和正式性能结论仍需按真实调用条件单独核验。共同接口可直接比较 V1/V2；新融合能力的 V1 基线应是等价的显式预处理调用链，不可规约输入后宣称同条件对比。性能只使用 msprof `op_summary` 的 `Task Duration(us)`，各 pipe 耗时不相加；本轮 54 条执行成功，单 case 重跑后 54 条均生成可用 Task Duration。
+性能候选矩阵共 54 条，按 BS、HV、TOKEN_PER_BATCH 的列出顺序排列；当前默认只执行前 **10** 条（case 0～9）。候选范围为 `BS={32,64,72}`、`HK=16`、`HV={32,48,128}`、`TOKEN_PER_BATCH={1,2,4,8,16,32}` 和 `K=V=128`。`T=BS×TOKEN_PER_BATCH`，`block_num=T`，`state_indices=list(range(T))`，每个 token 使用独立 State slot，State shape 为 `[T,HV,V,K]`。固定性能用例统一使用 QKV bf16、State bf16、Beta bf16、g fp32，并开启 Q/K L2 norm、gate、beta sigmoid 融合路径。模型 case 和正式性能结论仍需按真实调用条件单独核验。共同接口可直接比较 V1/V2；新融合能力的 V1 基线应是等价的显式预处理调用链，不可规约输入后宣称同条件对比。性能只使用 msprof `op_summary` 中目标算子的 `Task Duration(us)`，各 pipe 耗时不相加。此前 `block_num=BS`、batch 内重复 slot 的 54 条结果仅作历史记录，不代表本矩阵。
+
+性能 JSON 使用 `executor_recurrent_gated_delta_rule_perf` 入口，仍由同一个 executor 文件注册。该入口按固定规格缓存输入，每次调用前恢复初始 State，只返回 attention 输出，避免重复构造和导出完整 State；精度入口继续比较完整输出与 State。前 10 条用例的规格、seed、shape 和 range 与原矩阵相同。性能入口要求 NPU 节点，执行时指定 `--bm_device npu`；可用下列命令采集单轮性能：
+
+```bash
+atk node --backend npu --devices 0 --is_bm False task \
+  -c atk_recurrent_gated_delta_rule_perf.json -p executor_recurrent_gated_delta_rule.py \
+  --task performance_device --bm_device npu --performance_data 1,1,1 \
+  --save_data profile -sp -mt 1 -to 2000 --save_report_json
+```
 
 ## 生成与执行
 
@@ -88,18 +101,16 @@ python scripts/check_atk_cpu_contract.py
 python test_reference.py
 # 精度双标杆
 bash scripts/run_dual_accuracy.sh 0
-# 全矩阵确定性（每条 50 次）；内存用手工24条
-atk node --backend npu --devices 0 task -c atk_recurrent_gated_delta_rule.json \
-  -p executor_recurrent_gated_delta_rule.py --task accuracy_dc --dc_loop_nums 50 -to 2000
+# 每次修改后不执行确定性测试
 atk node --backend npu --devices 0 task -c atk_recurrent_gated_delta_rule_negative.json \
   -p executor_recurrent_gated_delta_rule.py --task run -to 2000
 ```
 
-确定性可先用24条 MSS 集检查同步关键路径，再按验收要求执行906条完整矩阵；报告必须说明实际覆盖数。内存检查使用统一 `run_test_cpu.sh -scope=mssanitizer` 和 `_mss.json`。性能使用统一 `-scope=performance` 和 `_perf.json`，保留 V1 与 V2 各自的原始 msprof CSV。
+每次源码修改后取消确定性测试；统一入口的 RecurrentGDN `all` 跳过该阶段。内存检测默认执行 MSS case 7 一条，使用 `run_test_cpu.sh -scope=mssanitizer`，默认白名单为 `[7]`；候选池保留，显式范围仅用于定位。性能使用统一 `-scope=performance` 和 `_perf.json`，保留 V1 与 V2 各自的原始 msprof CSV。
 
 内存检测必须将外层 `mssanitizer --log-file` 和 ATK `-msl` 指向同一文件，并检查该日志非空。只看执行 SUCCESS 或读取空日志得出的 PASS 不能证明内存检测通过；还需核对目标 kernel 的真实诊断。正式编译包未添加 sanitizer 编译选项，本轮采用 GM 访问快速定界，不将它描述为 UB、未初始化或竞争检测全覆盖；检测能力范围见 [MSS 官方指南](https://github.com/Ascend/mssanitizer/blob/master/docs/zh/user_guide/mssanitizer_user_guide.md)。
 
-本轮使用官方 kernel 名过滤，仅检测当前算子的全部 dtype 变体，避免将执行器后处理中的框架算子混入目标结论。可在本目录复现：
+使用官方 kernel 名过滤，当前默认检测 case 7 对应的目标 kernel。可在本目录复现：
 
 ```bash
 MSS_LOG_PATH="$PWD/recurrent_gdn_mss.log"
@@ -108,24 +119,64 @@ mssanitizer --tool=memcheck --kernel-name=RecurrentGatedDeltaRule \
   atk node --backend npu --devices 0 task \
     -c atk_recurrent_gated_delta_rule_mss.json \
     -p executor_recurrent_gated_delta_rule.py \
-    --task run --mssanitizer -msl "$MSS_LOG_PATH" -sp -to 2000
+    --task run --mssanitizer -msl "$MSS_LOG_PATH" -wl '[7]' -sp -to 2000
 test -s "$MSS_LOG_PATH"
 ```
 
 行 padding 的 BF16/FP32 补充使用原完整 JSON 和 `-wl '[678,774]'`，另设独立日志文件；不改 shape、stride、offset 或输入范围。
 
-建议首轮白名单：`[0,657,663,807,822,825,828,831,834,837,840,843,855,858,864,870,885,888,894,903]`。白名单只用于烟测和定位，不替代完整精度验收。
+建议首轮白名单：`[0,657,663,807,822,825,828,831,834,837,840,843,855,858,864,870,885,888,894,903]`。白名单只用于烟测和定位；当前每轮回归仍按随机20条精度执行。
 
 本次 CPU 自检已验证906条正向结构、57条反向拦截、20个代表 case 的40次FP64/FP32执行、相同数值/stride/offset及ATK角色分流。这些结果不代表 NPU 精度、性能、确定性或内存检查通过。
 
-原生 `atk case` 已实际生成906条 JSON；独立检查确认 id=0～905、每条 `case_spec`、默认 seed 和精度标准均与冻结矩阵一致。交付件中的 `atk_recurrent_gated_delta_rule.json` 使用这份原生输出作为本次完整精度、确定性验收输入，SHA256 为 `6fccb2d346cdb696c90643647739ec6d65fed5df44acbe2f0bb000873db547b6`。Python materializer 只作辅助核验，负测/MSS/性能继续采用各自人工矩阵。
+原生 `atk case` 已实际生成906条 JSON；独立检查确认 id=0～905、每条 `case_spec`、默认 seed 和精度标准均与冻结矩阵一致。交付件中的 `atk_recurrent_gated_delta_rule.json` 使用这份原生输出作为精度候选池及历史完整验收输入，SHA256 为 `6fccb2d346cdb696c90643647739ec6d65fed5df44acbe2f0bb000873db547b6`。Python materializer 只作辅助核验，负测/MSS/性能继续采用各自人工矩阵。
 
 原生生成 JSON 只包含两个执行设备 marker 和一个完整 `case_spec`，ATK 的静态张量形状统计只描述 marker；真实算子 shape、layout 和 dtype 以 `case_spec` 与矩阵映射为准。
 
-## 本轮 A2 验收结果
+## 历史 A2 验收记录
+
+以下为窗口向量化及本次用例修正前的历史结果，不能替代当前 V2 的重新验证。尤其旧 54 条性能用例使用了 batch 内重复 State slot，现已作废；当前固定矩阵采用上一节规定的 `block_num=T` 与完整索引。
 
 单算子编译、安装和包内/安装后 kernel 身份校验通过，Stable 入口命中已核验。原生 `atk case` 生成的 906 条完整矩阵已执行，首次精度 904 PASS、2 FAIL、0 ERROR；case_id 63、399 **需要复检**。保存输出和 CT 定位未发现结构异常后，两例各进行 50 轮复检，100/100 轮原生四项判据全部通过，官方 CT 三 ratio 聚合失败数为 0。按统计复检流程，精度验收通过；原单轮 FAIL 保留在配套交付件中，不描述为首次 906 PASS。
 
 负向 57/57 通过且异常前 State 不变；最终 host 修复包完整确定性 906 条每例 50 次全部通过，旧包结果另存历史材料，不替代最终包重跑。内存/MSS 的正式编译包 GM 访问检测 24 条主矩阵及原 case_id 678、774 两条行 padding 用例通过，目标算子零非法诊断；历史 C ABI 16/16 执行契约检查通过。ATK 扩展性能矩阵 54/54 执行成功，单 case 重跑后 54 条均具备可用 Task Duration。相同输入的 V1/V2 共同 6 场景均出现回退，V2 耗时为 V1 的 2.748～5.811 倍，未取得加速；正式耗时来源为 msprof `Task Duration(us)`。
 
 复检未调整输入范围、阈值、shape、布局或覆盖；CT 官方三项聚合与原生第四项分别核验。完整报告、原始 profiler CSV、结果工作簿与 SHA256 清单位于配套测试交付件。本轮仅完成 A2 真机验证，不代表 A3 真机或 wheel 安装验证完成。
+
+## 2026-11-02 用例与窗口预处理修正（repeat 优化前）
+
+本节为后述 repeat 优化前的历史测试结果；不代替当前版本的随机20条验证。
+
+固定性能矩阵已修正为 `block_num=T`、`state_indices=list(range(T))`，54 条 shape、顺序和 seed 保持固定。V2 的 UB 区域采用具名尺寸与偏移推导；短窗口 beta sigmoid 改为不依赖压缩 mask 的向量公式，softplus 增加向量舍入残差校正。V1 接口和计算实现未修改。
+
+当前正式包随机 20 条原生双标杆精度 20/20 通过。完整 906 条为 898 PASS、8 FAIL、0 ERROR；未通过的 `case_id=63,275,399,574,722,725,734,802` 均为 FP32 State 小值域计数问题。保存输出、CT 对比后各做 50 轮数值复检：368/400 轮原生 PASS，32 轮仍未通过小值域计数判据；官方 CT 三 ratio 聚合失败数为 0，但该聚合不覆盖小值域计数。完整精度尚未达到全量原生通过，原始失败和每轮判据均保留。
+
+正式编译包 GM 内存检测 24/24 通过，核对到 24 次目标 kernel 的完整开始/结束记录，0 非法访问、0 目标告警；该结果不代表 UB、未初始化或竞争检测全覆盖。随机 20 条确定性每条 50 次全部通过，0 ERROR。
+
+历史 ACLNN 的内部启动列表补齐共享 kernel 新增的两个空输入槽，公开签名和 V1 计算实现保持原样；旧 C ABI 16 条执行兼容检查全部通过。该适配后的包再次执行随机 20 条原生双标杆精度，20 PASS、0 FAIL、0 ERROR。适配前后的 4 个 kernel 二进制 SHA256 全部相同，V2 L0 路径未修改。
+
+共同接口的 6 条固定场景为 `T=1/4/8`、`HK=2`、`HV=8`、`K=V=128`、State BF16/FP32，融合属性关闭。输入 SHA256、每次调用前的 State 重置、5 次预热与 1 次正式采样一致，所有 pipe 字段完整；V2 耗时为 V1 的 2.664～5.701 倍，存在性能回退。该对比仅覆盖共同能力，不代表上述 54 条融合场景的等价 V1 基线。后续范围已调整为固定前10条，54条扩展采集已停止；对应原始数据保留为历史。
+
+## 2026-11-02 repeat 批处理优化
+
+V2 两次点积改用 repeat=128 批量处理128行，复用回收后的旧 State bank 作为完整乘积 scratch；两次点积合计8次向量 API 调用、6次 V barrier。BF16 路径整块衰减一次供 prediction 和更新共享。FP32 补偿将 tile 临时量从7份压为4份，保持原运算舍入顺序，单 tile 由8行增加到24行，补偿路径动态 V barrier 从261次减少到101次。UB总量仍为162240 B，V1公共接口和计算头文件未修改。
+
+当前单算子编译、安装、头文件/二进制身份校验通过。随机20条原生双标杆精度20 PASS、0 FAIL、0 ERROR；sampling seed=7090966332440272974，原始case ID和输入SHA随报告保存。精度候选池、输入范围和原生阈值保持原样。本轮仅按要求执行随机20条，未重跑906条。
+
+性能固定执行case 0～9，使用相同输入JSON、每次调用前恢复初始State，耗时来自msprof目标算子的Task Duration(us)。优化前10条和优化后10条分别归档，结果以配套交付件为准。
+
+本轮固定10条性能全部执行成功，目标算子相对 repeat 优化前加速 3.730～5.243 倍；两轮输入 JSON SHA256 相同，原始 CSV 与逐例对比随交付件保存。当前按任务要求取消确定性；内存检测仅执行 MSS case 7。
+
+## 当前V1/V2固定10条性能复现
+
+固定10条中8条有有效V1基线，V2相对V1加速1.168～1.209倍。V1的MAX_MTP=8，TPB=16/32会直接返回，约9us的空返回记录不作为计算性能，逐例标记为不支持。逐例耗时与原始CSV见配套交付件 comparison_fixed10_v1_v2/。两版使用相同CPU预处理结果，Q/K与beta按V1接口统一转为BF16、g转为已处理的FP32 log gate，再关闭融合。每例5次预热、1次正式采样，每次调用前恢复初始State。比较不包含CPU预处理耗时，不等同于FP32归一化的V2融合路径，也不作为端到端预处理调用链性能。
+
+```bash
+for version in v1 v2; do
+  msprof --output="profile_fixed10/$version" python scripts/profile_v1_v2_fixed10.py \
+    --version "$version" --cases atk_recurrent_gated_delta_rule_perf.json \
+    --manifest "profile_fixed10/$version/case_manifest.json"
+done
+```
+
+脚本核验固定case 0～9，保存逐输入SHA256。目标CSV中每例6次调用，按时间排序后取第6次，其余5次为预热；只读取目标算子的Task Duration(us)。历史6条小shape对比保留为优化前结果，不代替本次10条。
