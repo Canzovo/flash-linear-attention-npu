@@ -10,10 +10,11 @@
 add_op_to_compiled_list()
 
 # Preserve the established FP32 evaluation order for both kernel versions.
-# Keep these options scoped to this operator.
+# Keep these options scoped to this operator, including binary package builds
+# where BUILD_OPS_RTY_KERNEL is disabled.
 add_ops_compile_options(
     OP_NAME RecurrentGatedDeltaRule
-    OPTIONS -ffp-contract=off -fno-fast-math
+    OPTIONS --cce-auto-sync=off -ffp-contract=off -fno-fast-math
 )
 
 if (BUILD_OPEN_PROJECT)
@@ -25,8 +26,7 @@ endif()
 if (BUILD_OPS_RTY_KERNEL) # 回黄kernel
     add_ops_compile_options(
         OP_NAME RecurrentGatedDeltaRule
-        OPTIONS --cce-auto-sync=on
-                -Wno-deprecated-declarations
+        OPTIONS -Wno-deprecated-declarations
                 -Werror
     )
     if("${ASCEND_COMPUTE_UNIT}" STREQUAL "ascend950")
