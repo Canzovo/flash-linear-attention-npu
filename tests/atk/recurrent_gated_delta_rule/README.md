@@ -258,7 +258,7 @@ V1/V2的4个公开函数签名、6个kernel源文件及4个kernel二进制均与
 
 配套交付件保留本轮冻结JSON、每例100轮的原生结果、CT命令日志及官方聚合结果、结构和数值保真核验、同一单算子包与源码快照、复现命令和SHA256清单。本次仅复检上述5例，不重跑性能、确定性或内存检查；后续失败case的数值复检统一采用每例100轮再执行ct dual analyze。
 
-## NPU与H20性能矩阵脚本
+## 历史FLA-org标杆性能矩阵脚本
 
 `scripts/benchmark_recurrent_gdn.py`可单独复制到NPU或GPU环境，case直接定义在脚本内，不依赖ATK、YAML或外部JSON。GPU调用[上游fused_recurrent_gated_delta_rule](https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/fused_recurrent.py)，NPU调用已安装的`fla_npu.ops.ascendc.recurrent_gated_delta_rule`并核验Stable ABI。
 
@@ -304,3 +304,28 @@ python scripts/compare_recurrent_gdn_v1_v2.py --output v1_v2_false_results
 脚本与`benchmark_recurrent_gdn.py`应放在同一目录。默认每版每例5次预热、1次正式采样，按组交替V1/V2执行顺序，使用msprof目标kernel的`Task Duration(us)`比较，输入生成、State恢复及输出检查不计入。结果中`speedup=V1_us/V2_us`，大于1表示V2更快；CSV保存逐例耗时和两版pipe字段，包括原始无量纲`aiv_vec_ratio`，JSON另存逐输入SHA256及原始CSV行定位。当前TPB均不超过V1上限8，V1的out预置NaN并检查正式输出有限，避免将空返回记录作为有效性能；这不代替正式精度验收。
 
 2026-11-03实测：独立4组烟测通过，正式72/72组对比完成，共144条正式结果、864次目标kernel调用；两版逐组输入SHA256一致，全部正式输出shape及State dtype匹配、输出有限，pipe字段完整，`aiv_vec_ratio`逐值与原始CSV一致。BF16 State的36组均为V2更快，V1/V2为1.134～1.495倍，中位数1.196倍；FP32 State的36组也均为V2更快，比值为1.029～1.601倍，中位数1.148倍。以上为每例一次正式采样的观测值，不表示多轮稳定性统计。受测算子仍为fcf59aff，测试前后包和安装后二进制身份核验一致；本轮只增加性能对比脚本，未修改算子源码。
+
+## vLLM标杆：packed QKV及GPU外部预处理
+
+当前NPU/H20对比使用独立脚本`scripts/benchmark_recurrent_gdn_vllm.py`，GPU入口改为[vLLM的fused_recurrent_gated_delta_rule](https://github.com/vllm-project/vllm/blob/main/vllm/third_party/flash_linear_attention/ops/fused_recurrent.py)。脚本内置BS=32/64/72、HK=16、HV=32/48/128、TOKEN_PER_BATCH=1/2/4/8、K=V=128，BF16和FP32初始State各432例，共864例；四个开关覆盖12种共同合法组合，仍排除NPU接口不接受的`allow_neg_eigval=True && use_beta_sigmoid_in_kernel=False`。历史FLA-org脚本和既有V1/V2对比脚本继续单独保留。
+
+原始Q/K/V使用同一BF16 `mixed_qkv[T,(2*HK+HV)*128]`存储。NPU直接传入非连续Q/K/V视图，token stride为`(2*HK+HV)*128`，不在计时前将其连续化；NPU融合开启的norm/gate/sigmoid操作。GPU在每次计时调用内部重新split/slice QKV，计算开启的预处理，将最终Q/K/V/g/beta连续化后调用vLLM。归一化本身已产生连续张量时，后续`contiguous()`不再复制。传给vLLM的参数中不含这四个开关，其可选内核norm保持默认关闭。
+
+- `use_qk_l2norm_in_kernel=True`：GPU在FP32中计算`x*rsqrt(sum(x*x)+1e-6)`，再转回BF16，保持标杆BF16 Q/K及BF16输出。NPU融合归一化保留FP32中间值，二者存在舍入差异，本脚本不声明精度等价。
+- `use_gate_in_kernel=True`：GPU生成FP32 log gate `-exp(A_log)*softplus(g+dt_bias)`；关闭时直接使用预先生成的FP32 log gate。
+- `use_beta_sigmoid_in_kernel=True`：GPU在FP32中计算sigmoid并保留FP32结果；`allow_neg_eigval=True`时再乘2。关闭sigmoid时使用原始BF16 beta。
+
+两端都使用V-first State并逐token写出checkpoint，保留BF16或FP32 State dtype。NPU使用T个slot、`indices=range(T)`及`[0,L,...,L]`长度表；vLLM将slot 0定义为无效槽，GPU使用T+1个slot、`indices=range(1,T+1).view(BS,L)`及累计`cu_seqlens=[0,L,2L,...,T]`，逻辑slot i映射为GPU slot i+1。GPU使用`inplace_final_state=True`，不再沿用历史标杆仅写最终FP32 State的方式。
+
+```bash
+python benchmark_recurrent_gdn_vllm.py --backend npu --output npu_results
+python benchmark_recurrent_gdn_vllm.py --backend gpu --output gpu_results
+```
+
+脚本可单文件复制，命令在脚本所在目录运行。GPU默认5次预热、20次正式采样，每次CUDA Event区间包含slice/必要的连续化、开启的外部预处理和vLLM算子；每次调用前在同一stream恢复初始State，起始Event排在恢复copy之后，恢复不计时。NPU默认5次预热、1次正式采样，继续自动调用msprof并读取目标`Task Duration(us)`；`--samples`/`--repeat`可以显式覆盖采样数。两种计时范围分别记录，不使用Python wall time。
+
+两端CSV/JSON均保存`mean_ms/median_ms/min_ms/max_ms/samples_ms`及对应`*_us`字段，CSV中的原始样本为JSON数组，`duration_us=mean_us`。NPU保留原始采样CSV行和pipe字段，包括不乘100的`aiv_vec_ratio`；JSON另存packed输入SHA256、实际QKV stride、State slot数及环境/脚本身份。GPU版本、实际函数源码SHA256和CUDA/Triton版本在用户执行时记录。本轮按要求仅在NPU执行，不重新编译或安装算子。
+
+2026-11-03实测：24组CPU预处理公式检查通过，覆盖两种State和12种开关组合；CUDA Event调用边界及统计/CSV/JSON保存逻辑验证通过，未执行GPU。4条NPU烟测使用每例2次正式采样，28次目标kernel调用严格匹配，统计值与原始样本一致。完整864/864条NPU性能执行成功，BF16和FP32 State各432例，5次预热加1次正式采样共5184次V2目标调用；逐例输出shape、State dtype、T个State slot和非连续packed QKV stride全部核验通过。全部pipe字段完整，`aiv_vec_ratio`及统计值均与原始采样一致。BF16的Task Duration范围为105.802～6188.164 us，FP32为102.142～6057.121 us，范围覆盖不同shape和开关。
+
+本轮使用测试开始时已安装的算子，二进制已更新，与历史fcf59aff测试包不同；当前opapi、4份kernel、注册metadata和wrapper的SHA256在测试前后核验一致，4份kernel均无debug编译段，并与现有构建产物对应。本轮没有修改、编译或安装算子，不将当前结果标注为历史包的复测。配套交付件保存本轮受测身份、原始四类msprof CSV、用户提供的vLLM源码参考、CPU逻辑验证记录和独立复现脚本。
