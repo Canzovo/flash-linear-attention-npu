@@ -9,6 +9,8 @@ Examples (no ATK or case JSON dependency):
 NPU: invokes msprof automatically and reads target Task Duration(us).
 GPU: CUDA events include QKV slicing/contiguous copies, external flag
 preprocessing, and vLLM fused_recurrent_gated_delta_rule; warmup 5/repeat 20.
+GPU loads the original definitions from a vLLM source tree with real Triton;
+the vLLM framework and its native extensions are not imported.
 Both: BF16 Q/K/V/beta, FP32 g/A_log/dt_bias, BF16 and FP32 initial State.
 Both write every token checkpoint in State dtype, in [V,K] layout.
 GPU external Q/K normalization computes in FP32 and rounds back to BF16;
@@ -17,18 +19,23 @@ NPU fused normalization retains FP32 intermediates. This is a performance test.
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 from decimal import Decimal
 import hashlib
+import importlib.metadata
+import importlib.util
 import inspect
 import itertools
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import statistics
 import subprocess
 import sys
+import types
 
 
 BATCH_SIZES = (32, 64, 72)
@@ -43,6 +50,64 @@ BASE_SEED = 20261022
 GPU_REFERENCE = "https://github.com/vllm-project/vllm/blob/main/vllm/third_party/flash_linear_attention/ops/fused_recurrent.py"
 PIPE_FIELDS = ("aiv_time(us)", "aiv_vec_time(us)", "aiv_vec_ratio", "aiv_scalar_time(us)",
                "aiv_mte2_time(us)", "aiv_mte3_time(us)")
+
+
+def load_vllm_reference(torch, source: Path | None):
+    """Load the original four definitions without importing vLLM's framework.
+
+    Compile their original AST nodes and line numbers against the real source
+    file, so Triton can inspect the unchanged kernel body for JIT compilation.
+    """
+    import triton
+    import triton.language as tl
+    import triton.language.extra.libdevice as tldevice
+
+    relative = Path("third_party/flash_linear_attention/ops/fused_recurrent.py")
+    if source is None:
+        candidates = [Path.cwd() / "vllm" / relative, Path(__file__).resolve().parent / "vllm" / relative]
+        source = next((path for path in candidates if path.is_file()), None)
+        if source is None:
+            spec = importlib.util.find_spec("vllm")  # Finds the root without importing vllm.
+            if spec is not None and spec.submodule_search_locations:
+                candidates = [Path(root) / relative for root in spec.submodule_search_locations]
+                source = next((path for path in candidates if path.is_file()), None)
+    if source is None or not source.is_file():
+        raise RuntimeError("Cannot locate vLLM fused_recurrent.py; provide --vllm-source /path/to/fused_recurrent.py")
+    source = source.resolve()
+    op_source = source.with_name("op.py")
+    if not op_source.is_file():
+        raise RuntimeError("The original op.py must be beside fused_recurrent.py.")
+    names = {"fused_recurrent_gated_delta_rule_fwd_kernel", "fused_recurrent_gated_delta_rule_fwd",
+             "FusedRecurrentFunction", "fused_recurrent_gated_delta_rule"}
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    selected = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
+    if {node.name for node in selected} != names or len(selected) != len(names):
+        raise RuntimeError("The vLLM source does not contain the four expected original definitions.")
+    # Keep the original exp/log selection, including FLA_USE_FAST_OPS. Do not
+    # import op.py's unrelated framework helpers or change its math aliases.
+    op_tree = ast.parse(op_source.read_text(encoding="utf-8"), filename=str(op_source))
+    math_aliases = [node for node in op_tree.body if isinstance(node, ast.If) and any(
+        isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store) and child.id in ("exp", "log")
+        for child in ast.walk(node))]
+    if len(math_aliases) != 1:
+        raise RuntimeError("Unrecognized exp/log definitions in vLLM op.py; inspect this source version.")
+    namespace = dict(os=os, torch=torch, triton=triton, tl=tl, tldevice=tldevice)
+    exec(compile(ast.Module(body=math_aliases, type_ignores=[]), str(op_source), "exec"), namespace)
+    if "exp" not in namespace or "log" not in namespace:
+        raise RuntimeError("vLLM op.py did not define exp/log.")
+    module_name = "_rgdn_vllm_source_" + hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+    module = types.ModuleType(module_name)
+    module.__file__ = str(source)
+    module.__dict__.update(namespace)
+    sys.modules[module_name] = module
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), module.__dict__)
+    module.reference_identity = dict(loading="original AST definitions; no vLLM package import",
+        fused_recurrent_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        op_sha256=hashlib.sha256(op_source.read_bytes()).hexdigest(),
+        selected_definition_ast_sha256=hashlib.sha256(ast.dump(
+            ast.Module(body=selected, type_ignores=[]), include_attributes=False).encode()).hexdigest(),
+        definitions=sorted(names), fast_ops=os.environ.get("FLA_USE_FAST_OPS", "0"))
+    return module.fused_recurrent_gated_delta_rule, module.reference_identity
 
 
 def matrix(state_dtype: str) -> list[dict]:
@@ -200,18 +265,22 @@ def run_worker(args, cases: list[dict]) -> None:
         operator = ascendc.recurrent_gated_delta_rule
         timing_source = "msprof op_summary Task Duration(us)"
     else:
-        from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
-
         if not torch.cuda.is_available():
             raise RuntimeError("A CUDA GPU and CUDA-enabled PyTorch are required.")
         torch.cuda.set_device(args.device)
         device = torch.device("cuda", args.device)
         accelerator = torch.cuda
-        operator = fused_recurrent_gated_delta_rule
+        import triton
+        from triton.backends import backends
+        if not hasattr(triton, "next_power_of_2") or "nvidia" not in backends:
+            raise RuntimeError("A complete NVIDIA Triton installation is required.")
+        if not backends["nvidia"].driver.is_active():
+            raise RuntimeError("Triton's NVIDIA driver is not active.")
+        operator, reference_identity = load_vllm_reference(torch, args.vllm_source)
         required = {"q", "k", "v", "g", "beta", "initial_state", "inplace_final_state",
                     "cu_seqlens", "ssm_state_indices"}
         if not required.issubset(inspect.signature(operator).parameters):
-            raise RuntimeError("Installed vLLM does not expose the required recurrent GDN API.")
+            raise RuntimeError("The selected vLLM source does not expose the required recurrent GDN API.")
         timing_source = "CUDA event: packed QKV slice/contiguous + external flag preprocessing + vLLM operator"
 
     source = inspect.getsourcefile(operator)
@@ -238,9 +307,12 @@ def run_worker(args, cases: list[dict]) -> None:
                   formal_accuracy_test=False)
     if args.backend == "gpu":
         import triton
-        import vllm
+        try:
+            vllm_version = importlib.metadata.version("vllm")
+        except importlib.metadata.PackageNotFoundError:
+            vllm_version = "source tree; distribution metadata not installed"
         version.update(cuda_version=torch.version.cuda, triton_version=triton.__version__,
-                       vllm_version=vllm.__version__,
+                       vllm_version=vllm_version, gpu_reference_identity=reference_identity,
                        warmup=args.warmups, repeat=args.samples, untimed_prologue_calls=1,
                        duration_statistic="mean", raw_sample_unit="ms")
     else:
@@ -386,6 +458,7 @@ def main() -> None:
     parser.add_argument("--backend", choices=("npu", "gpu"))
     parser.add_argument("--output", type=Path, default=Path("recurrent_gdn_vllm_benchmark"))
     parser.add_argument("--device", type=int, default=0, help="Process-visible device index")
+    parser.add_argument("--vllm-source", type=Path, help="GPU: original fused_recurrent.py in a vLLM source tree")
     parser.add_argument("--state-dtype", choices=(*STATE_DTYPES, "both"), default="both")
     parser.add_argument("--warmups", "--warmup", dest="warmups", type=int, default=5)
     parser.add_argument("--samples", "--repeat", dest="samples", type=int,

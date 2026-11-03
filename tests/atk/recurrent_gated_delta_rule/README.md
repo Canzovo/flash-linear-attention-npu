@@ -322,10 +322,21 @@ python benchmark_recurrent_gdn_vllm.py --backend npu --output npu_results
 python benchmark_recurrent_gdn_vllm.py --backend gpu --output gpu_results
 ```
 
-脚本可单文件复制，命令在脚本所在目录运行。GPU默认5次预热、20次正式采样，每次CUDA Event区间包含slice/必要的连续化、开启的外部预处理和vLLM算子；每次调用前在同一stream恢复初始State，起始Event排在恢复copy之后，恢复不计时。NPU默认5次预热、1次正式采样，继续自动调用msprof并读取目标`Task Duration(us)`；`--samples`/`--repeat`可以显式覆盖采样数。两种计时范围分别记录，不使用Python wall time。
+脚本可单文件复制。GPU在vLLM源码树根目录运行时自动找到标杆源码，也可用`--vllm-source`指定原始`fused_recurrent.py`，其同级须保留原始`op.py`。GPU默认5次预热、20次正式采样，每次CUDA Event区间包含slice/必要的连续化、开启的外部预处理和vLLM算子；每次调用前在同一stream恢复初始State，起始Event排在恢复copy之后，恢复不计时。NPU默认5次预热、1次正式采样，继续自动调用msprof并读取目标`Task Duration(us)`；`--samples`/`--repeat`可以显式覆盖采样数。两种计时范围分别记录，不使用Python wall time。
 
 两端CSV/JSON均保存`mean_ms/median_ms/min_ms/max_ms/samples_ms`及对应`*_us`字段，CSV中的原始样本为JSON数组，`duration_us=mean_us`。NPU保留原始采样CSV行和pipe字段，包括不乘100的`aiv_vec_ratio`；JSON另存packed输入SHA256、实际QKV stride、State slot数及环境/脚本身份。GPU版本、实际函数源码SHA256和CUDA/Triton版本在用户执行时记录。本轮按要求仅在NPU执行，不重新编译或安装算子。
 
 2026-11-03实测：24组CPU预处理公式检查通过，覆盖两种State和12种开关组合；CUDA Event调用边界及统计/CSV/JSON保存逻辑验证通过，未执行GPU。4条NPU烟测使用每例2次正式采样，28次目标kernel调用严格匹配，统计值与原始样本一致。完整864/864条NPU性能执行成功，BF16和FP32 State各432例，5次预热加1次正式采样共5184次V2目标调用；逐例输出shape、State dtype、T个State slot和非连续packed QKV stride全部核验通过。全部pipe字段完整，`aiv_vec_ratio`及统计值均与原始采样一致。BF16的Task Duration范围为105.802～6188.164 us，FP32为102.142～6057.121 us，范围覆盖不同shape和开关。
 
 本轮使用测试开始时已安装的算子，二进制已更新，与历史fcf59aff测试包不同；当前opapi、4份kernel、注册metadata和wrapper的SHA256在测试前后核验一致，4份kernel均无debug编译段，并与现有构建产物对应。本轮没有修改、编译或安装算子，不将当前结果标注为历史包的复测。配套交付件保存本轮受测身份、原始四类msprof CSV、用户提供的vLLM源码参考、CPU逻辑验证记录和独立复现脚本。
+
+## 2026-11-03 GPU源码加载修复
+
+直接导入Triton后端成功时，vLLM仍可能因缺少自身安装元数据而禁用Triton：版本检查抛出的`PackageNotFoundError`属于`ImportError`，被后端检查的同一异常处理捕获，随后使用缺少`next_power_of_2`的占位模块。本脚本改为从用户选择的vLLM源码加载原始kernel、forward、autograd类和公开函数四个定义，保留其AST、装饰器、源码位置及同级`op.py`的exp/log选择，直接使用真实PyTorch/Triton，不导入vLLM框架及其原生扩展。记录两份源码、所选定义AST的SHA256及`FLA_USE_FAST_OPS`，便于核对标杆身份。
+
+该修复只涉及GPU加载方式及环境记录，packed输入、预处理、CUDA Event区间、5次预热和20次采样保持原定义。已验证四个定义与用户参考AST一致、无vLLM框架导入，并完成真实Triton 3.8.0的JIT装饰器/源码解析检查及24组CPU预处理、事件顺序和统计回归；未编译或执行GPU kernel。既有864例NPU实测及其原脚本快照继续保留，本次未重跑NPU性能或重编译算子。
+
+```bash
+python benchmark_recurrent_gdn_vllm.py --backend gpu --output gpu_results_fixed
+# 在源码树根目录之外运行时，额外指定 --vllm-source <vllm源码中的fused_recurrent.py>
+```
