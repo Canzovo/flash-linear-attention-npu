@@ -257,3 +257,27 @@ V1/V2的4个公开函数签名、6个kernel源文件及4个kernel二进制均与
 原生单轮合计448 PASS、52 FAIL、0 ERROR；Attention输出500轮全部通过，52轮失败均涉及State输出的小值域计数判据。已执行ct dual analyze，5个case的MARE/MERE/RMSE三ratio聚合全部通过，官方API返回聚合失败数0。该CT版本不定义小值域计数的聚合判定，保留原生第四项的逐轮结果，不将CT三项聚合通过描述为500轮原生全部通过。
 
 配套交付件保留本轮冻结JSON、每例100轮的原生结果、CT命令日志及官方聚合结果、结构和数值保真核验、同一单算子包与源码快照、复现命令和SHA256清单。本次仅复检上述5例，不重跑性能、确定性或内存检查；后续失败case的数值复检统一采用每例100轮再执行ct dual analyze。
+
+## NPU与H20性能矩阵脚本
+
+`scripts/benchmark_recurrent_gdn.py`可单独复制到NPU或GPU环境，case直接定义在脚本内，不依赖ATK、YAML或外部JSON。GPU调用[上游fused_recurrent_gated_delta_rule](https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/fused_recurrent.py)，NPU调用已安装的`fla_npu.ops.ascendc.recurrent_gated_delta_rule`并核验Stable ABI。
+
+固定矩阵为BS=32/64/72、HK=16、HV=32/48/128、TOKEN_PER_BATCH=1/2/4/8/16/32、K=V=128，分别覆盖BF16和FP32初始State。四个布尔开关为`use_qk_l2norm_in_kernel`、`use_gate_in_kernel`、`use_beta_sigmoid_in_kernel`、`allow_neg_eigval`；排除上游GPU公开入口拒绝的`allow_neg_eigval=True && use_beta_sigmoid_in_kernel=False`，其余12种组合全部保留。因此共54种shape×12种开关×2种State dtype=1296例，按State dtype、BS、HV、TOKEN_PER_BATCH、四开关的固定顺序编号。
+
+Q/K/V/beta为BF16，g/A_log/dt_bias为FP32，scale=1/sqrt(128)。输入在CPU按固定seed生成，两端共享相同数值构造和逐输入SHA256；沿用既有性能输入范围，开关开启时传入对应raw gate或beta logits。NPU采用`T=BS*TOKEN_PER_BATCH`、`block_num=T`、`state_indices=range(T)`，每次调用前恢复所有请求的初始读槽，其余槽由本次调用覆盖，初始State恢复和输入生成不计入目标耗时。
+
+在已加载CANN及匹配的fla_npu/custom包环境下执行NPU版本；GPU使用已安装对应上游FLA、Triton和CUDA版PyTorch的环境：
+
+```bash
+python benchmark_recurrent_gdn.py --list-cases > cases.json
+python benchmark_recurrent_gdn.py --backend npu --output npu_results
+python benchmark_recurrent_gdn.py --backend gpu --output gpu_results
+```
+
+命令从脚本所在目录执行，输出目录应为新目录。默认每例5次预热、1次正式采样；NPU自动调用msprof，按目标kernel的执行顺序严格核验7776次调用，从每组第6次读取`Task Duration(us)`，输出pipe字段和原始CSV行定位。GPU使用CUDA event记录正式调用耗时，单位统一为us。两种计时口径分别保留，不使用Python wall time。`--case-ids 0,11,648,659 --warmups 1`用于两种State的烟测；`--parse-only --backend npu --output npu_results`可重新解析同配置的原始性能数据。
+
+两端State输出契约有差异：NPU按token写出全部checkpoint，GPU只写每个请求的最终FP32 State；BF16场景指初始State dtype，GPU最终State仍为FP32。NPU使用V-first布局；GPU将同一逻辑初始State预先转为上游默认K-first布局，保留该布局的原生调度，转换不计时。输入哈希统一使用V-first逻辑布局，方便两端核对。因此该矩阵测量各自公开接口，不将其描述为State写回量完全相同的比较。
+
+输出包括`results.csv`、`results.json`、`cases.json`、`environment.json`、`summary.json`和逐case输入哈希。GPU版本由用户另行执行；本次只执行NPU性能测试，不作为精度、确定性或内存检测结论。
+
+2026-11-03实测：4条性能烟测通过，完整1296/1296条NPU性能执行成功；严格核对7776次V2目标kernel调用，每例正式输出shape及State dtype匹配，全部pipe字段完整。BF16初始State的648条Task Duration为116.677～26398.133 us，FP32初始State的648条为113.137～26936.002 us；范围覆盖全部shape和开关，不作为固定shape的性能差异。受测算子仍为fcf59aff，测试前后包及安装后二进制身份一致，算子源码未修改。原始四类msprof CSV、逐例耗时、输入哈希和复现脚本随配套交付件保存，GPU未执行。
