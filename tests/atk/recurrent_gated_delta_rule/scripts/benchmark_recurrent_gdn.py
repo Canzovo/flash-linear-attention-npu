@@ -33,14 +33,14 @@ import sys
 BATCH_SIZES = (32, 64, 72)
 KEY_HEADS = 16
 VALUE_HEADS = (32, 48, 128)
-TOKENS_PER_BATCH = (1, 2, 4, 8, 16, 32)
+TOKENS_PER_BATCH = (1, 2, 4, 8)
 HEAD_DIM = 128
 STATE_DTYPES = ("bf16", "fp32")
 FLAG_NAMES = ("use_qk_l2norm_in_kernel", "use_gate_in_kernel",
               "use_beta_sigmoid_in_kernel", "allow_neg_eigval")
 BASE_SEED = 20261022
 GPU_REFERENCE = "https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/fused_recurrent.py"
-PIPE_FIELDS = ("aiv_time(us)", "aiv_vec_time(us)", "aiv_scalar_time(us)",
+PIPE_FIELDS = ("aiv_time(us)", "aiv_vec_time(us)", "aiv_vec_ratio", "aiv_scalar_time(us)",
                "aiv_mte2_time(us)", "aiv_mte3_time(us)")
 
 

@@ -262,7 +262,7 @@ V1/V2的4个公开函数签名、6个kernel源文件及4个kernel二进制均与
 
 `scripts/benchmark_recurrent_gdn.py`可单独复制到NPU或GPU环境，case直接定义在脚本内，不依赖ATK、YAML或外部JSON。GPU调用[上游fused_recurrent_gated_delta_rule](https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/fused_recurrent.py)，NPU调用已安装的`fla_npu.ops.ascendc.recurrent_gated_delta_rule`并核验Stable ABI。
 
-固定矩阵为BS=32/64/72、HK=16、HV=32/48/128、TOKEN_PER_BATCH=1/2/4/8/16/32、K=V=128，分别覆盖BF16和FP32初始State。四个布尔开关为`use_qk_l2norm_in_kernel`、`use_gate_in_kernel`、`use_beta_sigmoid_in_kernel`、`allow_neg_eigval`；排除上游GPU公开入口拒绝的`allow_neg_eigval=True && use_beta_sigmoid_in_kernel=False`，其余12种组合全部保留。因此共54种shape×12种开关×2种State dtype=1296例，按State dtype、BS、HV、TOKEN_PER_BATCH、四开关的固定顺序编号。
+当前固定矩阵为BS=32/64/72、HK=16、HV=32/48/128、TOKEN_PER_BATCH=1/2/4/8、K=V=128，分别覆盖BF16和FP32初始State。四个布尔开关为`use_qk_l2norm_in_kernel`、`use_gate_in_kernel`、`use_beta_sigmoid_in_kernel`、`allow_neg_eigval`；排除上游GPU公开入口拒绝的`allow_neg_eigval=True && use_beta_sigmoid_in_kernel=False`，其余12种组合全部保留。因此共36种shape×12种开关×2种State dtype=864例，按State dtype、BS、HV、TOKEN_PER_BATCH、四开关的固定顺序重新编号；BF16为case 0～431，FP32为432～863。较早的1296例记录包含TOKEN_PER_BATCH=16/32，作为历史结果单独保存。
 
 Q/K/V/beta为BF16，g/A_log/dt_bias为FP32，scale=1/sqrt(128)。输入在CPU按固定seed生成，两端共享相同数值构造和逐输入SHA256；沿用既有性能输入范围，开关开启时传入对应raw gate或beta logits。NPU采用`T=BS*TOKEN_PER_BATCH`、`block_num=T`、`state_indices=range(T)`，每次调用前恢复所有请求的初始读槽，其余槽由本次调用覆盖，初始State恢复和输入生成不计入目标耗时。
 
@@ -275,9 +275,11 @@ python benchmark_recurrent_gdn.py --backend gpu --output gpu_results
 python benchmark_recurrent_gdn.py --backend gpu --warmup 5 --repeat 20 --output gpu_results_20
 ```
 
-命令从脚本所在目录执行，输出目录应为新目录。NPU默认每例5次预热、1次正式采样，自动调用msprof，按目标kernel的执行顺序严格核验7776次调用，从每组第6次读取`Task Duration(us)`，输出pipe字段和原始CSV行定位。GPU按用户提供的KDA脚本使用CUDA Event：默认连续预热5次，统一同步后正式采样20次；每次按start event、算子调用、end event、CUDA synchronize、elapsed_time的顺序记录毫秒耗时，不调用msprof。`--warmup`与`--warmups`等价，`--repeat`与`--samples`等价，显式值覆盖各后端默认值。`--case-ids 0,11,648,659 --warmups 1`用于两种State的烟测；`--parse-only --backend npu --output npu_results`可重新解析同配置的原始性能数据。
+命令从脚本所在目录执行，输出目录应为新目录。NPU默认每例5次预热、1次正式采样，自动调用msprof，按目标kernel的执行顺序严格核验5184次调用，从每组第6次读取`Task Duration(us)`，输出pipe字段和原始CSV行定位。GPU按用户提供的KDA脚本使用CUDA Event：默认连续预热5次，统一同步后正式采样20次；每次按start event、算子调用、end event、CUDA synchronize、elapsed_time的顺序记录毫秒耗时，不调用msprof。`--warmup`与`--warmups`等价，`--repeat`与`--samples`等价，显式值覆盖各后端默认值。`--case-ids 0,11,432,443 --warmups 1`用于两种State的烟测；`--parse-only --backend npu --output npu_results`可重新解析同配置的原始性能数据。
 
 GPU每例先做一次不计时的接口/输出shape检查，随后在no_grad下计时。CSV和JSON保存`mean_ms`、`median_ms`、`min_ms`、`max_ms`、原始`samples_ms`；同时保留对应微秒统计和`samples_us`，其中`duration_us=mean_ms*1000`，方便与NPU结果按同一列读取。终端也显示四项毫秒统计。输入构造、GPU视图准备和布局转换均在计时外。两种计时来源分别保留，不使用Python wall time；GPU的CUDA Event区间与NPU的单kernel Task Duration口径不同。
+
+NPU的`PIPE_FIELDS`同时导出`aiv_vec_ratio`，在CSV和JSON保留msprof的原始无量纲占比，不作为us耗时，也不额外乘100。已有原始采集包含该字段时，使用`--parse-only`重新解析即可补齐结果，无需重新采集；采集脚本快照与解析脚本身份分别保留。
 
 两端State输出契约有差异：NPU按token写出全部checkpoint，GPU只写每个请求的最终FP32 State；BF16场景指初始State dtype，GPU最终State仍为FP32。NPU使用V-first布局；GPU将同一逻辑初始State预先转为上游默认K-first布局，保留该布局的原生调度，转换不计时。输入哈希统一使用V-first逻辑布局，方便两端核对。因此该矩阵测量各自公开接口，不将其描述为State写回量完全相同的比较。
 
@@ -286,3 +288,7 @@ GPU每例先做一次不计时的接口/输出shape检查，随后在no_grad下�
 2026-11-03实测：4条性能烟测通过，完整1296/1296条NPU性能执行成功；严格核对7776次V2目标kernel调用，每例正式输出shape及State dtype匹配，全部pipe字段完整。BF16初始State的648条Task Duration为116.677～26398.133 us，FP32初始State的648条为113.137～26936.002 us；范围覆盖全部shape和开关，不作为固定shape的性能差异。受测算子仍为fcf59aff，测试前后包及安装后二进制身份一致，算子源码未修改。原始四类msprof CSV、逐例耗时、输入哈希和复现脚本随配套交付件保存，GPU未执行。
 
 2026-11-03 GPU统计更新：计时调用顺序与用户参考脚本逐事件对照一致，毫秒统计、微秒换算、原始样本及CSV/JSON字段验证通过；GPU入口验证不会查找或调用msprof。1296条case与原矩阵完全一致，NPU默认仍为5次预热、1次采样。补跑4条NPU性能烟测全部通过，24次目标kernel调用严格匹配，pipe字段完整，受测包在开始和结束时身份核验通过。本次未重跑1296条全矩阵，未在真实GPU执行，不将上述逻辑验证描述为GPU性能实测。
+
+2026-11-03 TOKEN_PER_BATCH调整为1/2/4/8后重新测试：864/864条NPU性能执行成功，BF16和FP32初始State各432条；每例5次预热、1次正式采样，5184次目标V2 kernel调用严格匹配。逐例输出shape、State dtype及原始CSV行定位核验通过，pipe字段全部完整。BF16的Task Duration为117.662～6667.973 us，FP32为113.782～6796.396 us；这些范围覆盖全部shape和开关，不作为固定shape之间的性能比较。受测算子仍为fcf59aff，测试前后包及安装后二进制身份一致。
+
+本轮CSV和JSON已补充`aiv_vec_ratio`，864例逐值与原始msprof占比核对一致，范围为0.539～0.839，未作单位转换。该字段在采集完成后通过更新后的`PIPE_FIELDS`重新解析得到，未追加性能采样；归档分别记录采集脚本快照与解析脚本SHA256，两者除该字段外的AST一致。新矩阵重新编号，seed按当前shape顺序生成，不能直接按历史1296例的case ID比较输入。原始四类msprof CSV及新矩阵脚本另行归档；GPU未执行。
