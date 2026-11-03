@@ -4,10 +4,11 @@
 Examples (no ATK or case JSON dependency):
   python benchmark_recurrent_gdn.py --backend npu --output npu_results
   python benchmark_recurrent_gdn.py --backend gpu --output gpu_results
+  python benchmark_recurrent_gdn.py --backend gpu --warmup 5 --repeat 20 --output gpu_results
   python benchmark_recurrent_gdn.py --list-cases > cases.json
 
 NPU: invokes msprof automatically and reads target Task Duration(us).
-GPU: calls fla.ops.gated_delta_rule.fused_recurrent directly; CUDA event timing.
+GPU: CUDA events, warmup 5/repeat 20; mean/median/min/max and every sample.
 Both: BF16 Q/K/V/beta, FP32 g/A_log/dt_bias, BF16 and FP32 initial State.
 NPU writes every token checkpoint; upstream GPU writes only final FP32 State.
 The results describe those public interfaces, with different State write volumes.
@@ -119,6 +120,32 @@ def input_hashes(hashes: dict, case: dict) -> dict:
     return {name: hashes[name] for name in names}
 
 
+def time_gpu_calls(torch, fn, warmup: int, repeat: int) -> list[float]:
+    """Match the supplied KDA benchmark's time_calls; samples are milliseconds."""
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    samples = []
+    for _ in range(repeat):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        samples.append(start.elapsed_time(end))
+    return samples
+
+
+def summarize_gpu_times(samples_ms: list[float]) -> dict:
+    result = dict(mean_ms=statistics.mean(samples_ms), median_ms=statistics.median(samples_ms),
+                  min_ms=min(samples_ms), max_ms=max(samples_ms), samples_ms=samples_ms)
+    result.update({name.replace("_ms", "_us"): value * 1000.0
+                   for name, value in result.copy().items() if name != "samples_ms"})
+    result.update(duration_us=result["mean_us"], samples_us=[value * 1000.0 for value in samples_ms])
+    return result
+
+
 def run_worker(args, cases: list[dict]) -> None:
     import torch
 
@@ -144,7 +171,7 @@ def run_worker(args, cases: list[dict]) -> None:
         required = set(FLAG_NAMES) | {"state_v_first", "output_final_state", "initial_state"}
         if not required.issubset(inspect.signature(operator).parameters):
             raise RuntimeError("Installed FLA does not expose the required upstream API; update FLA.")
-        timing_source = "CUDA event elapsed_time * 1000"
+        timing_source = "CUDA event per-call samples; duration_us=mean_ms*1000"
 
     source = inspect.getsourcefile(operator)
     package_file = Path(sys.modules[operator.__module__].__file__)
@@ -164,7 +191,9 @@ def run_worker(args, cases: list[dict]) -> None:
                   formal_accuracy_test=False)
     if args.backend == "gpu":
         import triton
-        version.update(cuda_version=torch.version.cuda, triton_version=triton.__version__)
+        version.update(cuda_version=torch.version.cuda, triton_version=triton.__version__,
+                       warmup=args.warmups, repeat=args.samples, untimed_prologue_calls=1,
+                       duration_statistic="mean", raw_sample_unit="ms")
     else:
         version["torch_npu_version"] = torch_npu.__version__
     write_json(args.output / "environment.json", version)
@@ -186,54 +215,55 @@ def run_worker(args, cases: list[dict]) -> None:
                 alog = data["A_log"] if case["use_gate_in_kernel"] else None
                 bias = data["dt_bias"] if case["use_gate_in_kernel"] else None
                 bs, length, hv, dim = case["BS"], case["TOKEN_PER_BATCH"], case["HV"], case["K"]
+                if args.backend == "gpu":
+                    # Prepare views and kwargs outside the event interval.
+                    gpu_inputs = dict(q=data["q"].view(bs, length, case["HK"], dim),
+                        k=data["k"].view(bs, length, case["HK"], dim),
+                        v=data["v"].view(bs, length, hv, dim), beta=beta.view(bs, length, hv),
+                        g=gate.view(bs, length, hv), A_log=alog, dt_bias=bias,
+                        scale=case["scale"], initial_state=data["initial_state"],
+                        output_final_state=True, state_v_first=False, **flags)
 
                 def launch():
                     if args.backend == "npu":
                         return operator(data["q"], data["k"], data["v"], data["state"],
                             beta=beta, g=gate, A_log=alog, dt_bias=bias, scale=case["scale"],
                             actual_seq_lengths=data["lengths"], ssm_state_indices=data["indices"], **flags)
-                    return operator(q=data["q"].view(bs, length, case["HK"], dim),
-                        k=data["k"].view(bs, length, case["HK"], dim),
-                        v=data["v"].view(bs, length, hv, dim),
-                        beta=beta.view(bs, length, hv), g=gate.view(bs, length, hv),
-                        A_log=alog, dt_bias=bias, scale=case["scale"],
-                        initial_state=data["initial_state"], output_final_state=True,
-                        state_v_first=False, **flags)
+                    return operator(**gpu_inputs)
 
-                timings = []
-                for iteration in range(args.warmups + args.samples):
-                    if args.backend == "npu":
+                timing = dict(duration_us=None, samples_us=[])
+                if args.backend == "gpu":
+                    result = launch()  # Untimed API/output check, as in the reference prologue.
+                    if tuple(result[0].shape) != (bs, length, hv, dim) or result[0].dtype != torch.bfloat16:
+                        raise RuntimeError(f"Unexpected public output for case {case['case_id']}")
+                    del result
+                    timing = summarize_gpu_times(time_gpu_calls(torch, launch, args.warmups, args.samples))
+                    timing["repeat"] = args.samples
+                else:
+                    for _ in range(args.warmups + args.samples):
                         # Restore all read slots. All other slots are written by
                         # this invocation and never used as its initial states.
                         data["state"][::length].copy_(data["initial_state"])
-                    accelerator.synchronize()
-                    if args.backend == "gpu" and iteration >= args.warmups:
-                        start = torch.cuda.Event(enable_timing=True)
-                        end = torch.cuda.Event(enable_timing=True)
-                        start.record()
-                        result = launch()
-                        end.record()
-                        end.synchronize()
-                        timings.append(start.elapsed_time(end) * 1000.0)
-                    else:
+                        accelerator.synchronize()
                         result = launch()
                         accelerator.synchronize()
-                    output = result if args.backend == "npu" else result[0]
-                    expected_shape = (case["T"], hv, dim) if args.backend == "npu" else (bs, length, hv, dim)
-                    if tuple(output.shape) != expected_shape or output.dtype != torch.bfloat16:
-                        raise RuntimeError(f"Unexpected public output for case {case['case_id']}")
-                    del result, output
+                        if tuple(result.shape) != (case["T"], hv, dim) or result.dtype != torch.bfloat16:
+                            raise RuntimeError(f"Unexpected public output for case {case['case_id']}")
+                        del result
                 if args.backend == "npu" and ascendc.BACKENDS.get("npu_recurrent_gated_delta_rule") != "stable":
                     raise RuntimeError("NPU benchmark must use the installed Stable ABI V2 operator.")
                 record = dict(case, backend=args.backend, status="PASS", warmups=args.warmups,
                               samples=args.samples, input_sha256=input_hashes(hashes, case),
-                              duration_us=statistics.mean(timings) if timings else None,
-                              samples_us=timings, timing_source=timing_source)
+                              timing_source=timing_source, **timing)
                 records.append(record)
                 progress.write(json.dumps(record) + "\n")
                 progress.flush()
-                print(f"[{index + 1}/{len(cases)}] case={case['case_id']} "
-                      f"State={case['state_dtype']} BS={bs} HV={hv} TPB={length}", flush=True)
+                label = (f"[{index + 1}/{len(cases)}] case={case['case_id']} "
+                         f"State={case['state_dtype']} BS={bs} HV={hv} TPB={length}")
+                if args.backend == "gpu":
+                    label += (f" mean={record['mean_ms']:.6f} ms median={record['median_ms']:.6f} ms"
+                              f" min={record['min_ms']:.6f} ms max={record['max_ms']:.6f} ms")
+                print(label, flush=True)
     write_json(args.output / "launches.json", records)
     if args.backend == "gpu":
         save_results(args.output, records)
@@ -276,6 +306,9 @@ def save_results(output: Path, records: list[dict]) -> None:
     fields = ["case_id", "backend", "status", "BS", "HK", "HV", "TOKEN_PER_BATCH", "T", "K", "V",
               "state_dtype", "qkv_dtype", "beta_dtype", "g_dtype", *FLAG_NAMES, "scale", "seed",
               "warmups", "samples", "duration_us", "timing_source", *PIPE_FIELDS, "pipe_fields_complete"]
+    if records[0]["backend"] == "gpu":
+        fields += ["repeat", "mean_ms", "median_ms", "min_ms", "max_ms", "samples_ms",
+                   "mean_us", "median_us", "min_us", "max_us"]
     with (output / "results.csv").open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -295,8 +328,9 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("recurrent_gdn_benchmark"))
     parser.add_argument("--device", type=int, default=0, help="Process-visible device index")
     parser.add_argument("--state-dtype", choices=(*STATE_DTYPES, "both"), default="both")
-    parser.add_argument("--warmups", type=int, default=5)
-    parser.add_argument("--samples", type=int, default=1)
+    parser.add_argument("--warmups", "--warmup", dest="warmups", type=int, default=5)
+    parser.add_argument("--samples", "--repeat", dest="samples", type=int,
+                        help="Timed calls per case (default: GPU 20, NPU 1)")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--case-ids", help="Optional comma-separated IDs for smoke or diagnosis")
     parser.add_argument("--list-cases", action="store_true", help="Print embedded matrix without importing torch")
@@ -314,6 +348,8 @@ def main() -> None:
         return
     if args.backend is None:
         parser.error("--backend npu or --backend gpu is required")
+    if args.samples is None:
+        args.samples = 20 if args.backend == "gpu" else 1
     if args.warmups < 1 or args.samples < 1 or args.threads < 1:
         parser.error("warmups, samples and threads must be positive")
     args.output = args.output.resolve()

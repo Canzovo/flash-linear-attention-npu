@@ -272,12 +272,17 @@ Q/K/V/beta为BF16，g/A_log/dt_bias为FP32，scale=1/sqrt(128)。输入在CPU按
 python benchmark_recurrent_gdn.py --list-cases > cases.json
 python benchmark_recurrent_gdn.py --backend npu --output npu_results
 python benchmark_recurrent_gdn.py --backend gpu --output gpu_results
+python benchmark_recurrent_gdn.py --backend gpu --warmup 5 --repeat 20 --output gpu_results_20
 ```
 
-命令从脚本所在目录执行，输出目录应为新目录。默认每例5次预热、1次正式采样；NPU自动调用msprof，按目标kernel的执行顺序严格核验7776次调用，从每组第6次读取`Task Duration(us)`，输出pipe字段和原始CSV行定位。GPU使用CUDA event记录正式调用耗时，单位统一为us。两种计时口径分别保留，不使用Python wall time。`--case-ids 0,11,648,659 --warmups 1`用于两种State的烟测；`--parse-only --backend npu --output npu_results`可重新解析同配置的原始性能数据。
+命令从脚本所在目录执行，输出目录应为新目录。NPU默认每例5次预热、1次正式采样，自动调用msprof，按目标kernel的执行顺序严格核验7776次调用，从每组第6次读取`Task Duration(us)`，输出pipe字段和原始CSV行定位。GPU按用户提供的KDA脚本使用CUDA Event：默认连续预热5次，统一同步后正式采样20次；每次按start event、算子调用、end event、CUDA synchronize、elapsed_time的顺序记录毫秒耗时，不调用msprof。`--warmup`与`--warmups`等价，`--repeat`与`--samples`等价，显式值覆盖各后端默认值。`--case-ids 0,11,648,659 --warmups 1`用于两种State的烟测；`--parse-only --backend npu --output npu_results`可重新解析同配置的原始性能数据。
+
+GPU每例先做一次不计时的接口/输出shape检查，随后在no_grad下计时。CSV和JSON保存`mean_ms`、`median_ms`、`min_ms`、`max_ms`、原始`samples_ms`；同时保留对应微秒统计和`samples_us`，其中`duration_us=mean_ms*1000`，方便与NPU结果按同一列读取。终端也显示四项毫秒统计。输入构造、GPU视图准备和布局转换均在计时外。两种计时来源分别保留，不使用Python wall time；GPU的CUDA Event区间与NPU的单kernel Task Duration口径不同。
 
 两端State输出契约有差异：NPU按token写出全部checkpoint，GPU只写每个请求的最终FP32 State；BF16场景指初始State dtype，GPU最终State仍为FP32。NPU使用V-first布局；GPU将同一逻辑初始State预先转为上游默认K-first布局，保留该布局的原生调度，转换不计时。输入哈希统一使用V-first逻辑布局，方便两端核对。因此该矩阵测量各自公开接口，不将其描述为State写回量完全相同的比较。
 
 输出包括`results.csv`、`results.json`、`cases.json`、`environment.json`、`summary.json`和逐case输入哈希。GPU版本由用户另行执行；本次只执行NPU性能测试，不作为精度、确定性或内存检测结论。
 
 2026-11-03实测：4条性能烟测通过，完整1296/1296条NPU性能执行成功；严格核对7776次V2目标kernel调用，每例正式输出shape及State dtype匹配，全部pipe字段完整。BF16初始State的648条Task Duration为116.677～26398.133 us，FP32初始State的648条为113.137～26936.002 us；范围覆盖全部shape和开关，不作为固定shape的性能差异。受测算子仍为fcf59aff，测试前后包及安装后二进制身份一致，算子源码未修改。原始四类msprof CSV、逐例耗时、输入哈希和复现脚本随配套交付件保存，GPU未执行。
+
+2026-11-03 GPU统计更新：计时调用顺序与用户参考脚本逐事件对照一致，毫秒统计、微秒换算、原始样本及CSV/JSON字段验证通过；GPU入口验证不会查找或调用msprof。1296条case与原矩阵完全一致，NPU默认仍为5次预热、1次采样。补跑4条NPU性能烟测全部通过，24次目标kernel调用严格匹配，pipe字段完整，受测包在开始和结束时身份核验通过。本次未重跑1296条全矩阵，未在真实GPU执行，不将上述逻辑验证描述为GPU性能实测。
