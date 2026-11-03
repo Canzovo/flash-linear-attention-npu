@@ -292,3 +292,15 @@ NPU的`PIPE_FIELDS`同时导出`aiv_vec_ratio`，在CSV和JSON保留msprof的原
 2026-11-03 TOKEN_PER_BATCH调整为1/2/4/8后重新测试：864/864条NPU性能执行成功，BF16和FP32初始State各432条；每例5次预热、1次正式采样，5184次目标V2 kernel调用严格匹配。逐例输出shape、State dtype及原始CSV行定位核验通过，pipe字段全部完整。BF16的Task Duration为117.662～6667.973 us，FP32为113.782～6796.396 us；这些范围覆盖全部shape和开关，不作为固定shape之间的性能比较。受测算子仍为fcf59aff，测试前后包及安装后二进制身份一致。
 
 本轮CSV和JSON已补充`aiv_vec_ratio`，864例逐值与原始msprof占比核对一致，范围为0.539～0.839，未作单位转换。该字段在采集完成后通过更新后的`PIPE_FIELDS`重新解析得到，未追加性能采样；归档分别记录采集脚本快照与解析脚本SHA256，两者除该字段外的AST一致。新矩阵重新编号，seed按当前shape顺序生成，不能直接按历史1296例的case ID比较输入。原始四类msprof CSV及新矩阵脚本另行归档；GPU未执行。
+
+## 四个开关全False的V1/V2性能对比
+
+`scripts/compare_recurrent_gdn_v1_v2.py`筛选当前性能矩阵中四个开关全部为False的72例，保留原case ID；BS=32/64/72、HK=16、HV=32/48/128、TOKEN_PER_BATCH=1/2/4/8、K=V=128，BF16和FP32初始State各36例。V1显式调用原有`aclnnRecurrentGatedDeltaRule`，V2调用公开Python入口并检查Stable ABI，版本选择由不同接口完成。两版直接使用同一组BF16 Q/K/V/beta及FP32 log gate，不增加CPU融合预处理；每次调用前恢复相同初始State，两版都写出逐token checkpoint。四个开关按`use_qk_l2norm_in_kernel`、`use_gate_in_kernel`、`use_beta_sigmoid_in_kernel`、`allow_neg_eigval`顺序全部为False。
+
+```bash
+python scripts/compare_recurrent_gdn_v1_v2.py --output v1_v2_false_results
+```
+
+脚本与`benchmark_recurrent_gdn.py`应放在同一目录。默认每版每例5次预热、1次正式采样，按组交替V1/V2执行顺序，使用msprof目标kernel的`Task Duration(us)`比较，输入生成、State恢复及输出检查不计入。结果中`speedup=V1_us/V2_us`，大于1表示V2更快；CSV保存逐例耗时和两版pipe字段，包括原始无量纲`aiv_vec_ratio`，JSON另存逐输入SHA256及原始CSV行定位。当前TPB均不超过V1上限8，V1的out预置NaN并检查正式输出有限，避免将空返回记录作为有效性能；这不代替正式精度验收。
+
+2026-11-03实测：独立4组烟测通过，正式72/72组对比完成，共144条正式结果、864次目标kernel调用；两版逐组输入SHA256一致，全部正式输出shape及State dtype匹配、输出有限，pipe字段完整，`aiv_vec_ratio`逐值与原始CSV一致。BF16 State的36组均为V2更快，V1/V2为1.134～1.495倍，中位数1.196倍；FP32 State的36组也均为V2更快，比值为1.029～1.601倍，中位数1.148倍。以上为每例一次正式采样的观测值，不表示多轮稳定性统计。受测算子仍为fcf59aff，测试前后包和安装后二进制身份核验一致；本轮只增加性能对比脚本，未修改算子源码。
