@@ -58,7 +58,8 @@ void RecurrentGatedDeltaRuleTiling::InitCompileInfo()
     }
     const auto &ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
-    compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
+    // compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
+    compileInfo_.aivNum = 1;
     compileInfo_.isA5 = ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
 
     if (compileInfo_.aivNum <= 0) {

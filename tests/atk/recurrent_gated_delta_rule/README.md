@@ -305,6 +305,16 @@ python scripts/compare_recurrent_gdn_v1_v2.py --output v1_v2_false_results
 
 2026-11-03实测：独立4组烟测通过，正式72/72组对比完成，共144条正式结果、864次目标kernel调用；两版逐组输入SHA256一致，全部正式输出shape及State dtype匹配、输出有限，pipe字段完整，`aiv_vec_ratio`逐值与原始CSV一致。BF16 State的36组均为V2更快，V1/V2为1.134～1.495倍，中位数1.196倍；FP32 State的36组也均为V2更快，比值为1.029～1.601倍，中位数1.148倍。以上为每例一次正式采样的观测值，不表示多轮稳定性统计。受测算子仍为fcf59aff，测试前后包和安装后二进制身份核验一致；本轮只增加性能对比脚本，未修改算子源码。
 
+## 2026-11-03 constexpr 与 pending 简化
+
+Q/K/V 搬运输入改用模板参数和 if constexpr；首窗、后续窗口以及首两个 token、稳态 token 分别实例化。删除 rawPending_、statePending_、outPending_ 三组数组，State 复用等待位置按 BF16/FP32 在编译期选择，尾部按最后使用的槽位回收事件。运行时融合开关和长度判断保留普通 if。计算公式、输入范围、阈值和 tilingKey 不变，自动同步仍为 off。
+
+单算子编译和安装通过，4 份 kernel 均已更新，源码、构建复制目录及安装后二进制身份核验通过。原始用例池中选取的 22 条边界补充精度全部通过，覆盖 dtype、1/2-token、跨窗口、空请求、奇偶起点及多任务复用；未改动原用例。随机 20 条原生双标杆结果为 19 PASS、1 FAIL、0 ERROR，失败 case 726 涉及 FP32 State 的小值域错误计数。已保存三路输出并用 CT 检查，未见结构异常；同一固定输入在改动前也失败，改动前后两种输出均逐值完全一致。
+
+case 726 按工作规范执行 50 轮数值复检，结构及输入范围保持不变，结果为 37 PASS、13 FAIL、0 ERROR；Attention 50 轮全部通过，失败仍涉及 State 小值域错误计数。CT 的 MARE/MERE/RMSE 三项聚合通过，当前 CT 不定义小值域计数的聚合验收，不能据此声明原生精度全部通过。该既有精度限制仍保留。
+
+固定前 10 条融合性能执行成功，逐例 msprof Task Duration 与本轮修改前基线对齐，pipe 字段完整；耗时降低比例为 -0.95%～0.73%，中位数 -0.04%，负值表示变慢。两轮均为每例一次正式采样，不作为稳定性统计；该矩阵为 BF16 State，不据此声明 FP32 State 收益。1 条 GM 内存检测通过，目标 kernel 开始和无错误结束各 1 次，不代表 UB 或竞争检测全覆盖。本轮不执行确定性或 906 条全量精度。
+
 ## vLLM标杆：packed QKV及GPU外部预处理
 
 当前NPU/H20对比使用独立脚本`scripts/benchmark_recurrent_gdn_vllm.py`，GPU入口改为[vLLM的fused_recurrent_gated_delta_rule](https://github.com/vllm-project/vllm/blob/main/vllm/third_party/flash_linear_attention/ops/fused_recurrent.py)。脚本内置BS=32/64/72、HK=16、HV=32/48/128、TOKEN_PER_BATCH=1/2/4/8、K=V=128，BF16和FP32初始State各432例，共864例；四个开关覆盖12种共同合法组合，仍排除NPU接口不接受的`allow_neg_eigval=True && use_beta_sigmoid_in_kernel=False`。历史FLA-org脚本和既有V1/V2对比脚本继续单独保留。
@@ -340,3 +350,9 @@ python benchmark_recurrent_gdn_vllm.py --backend gpu --output gpu_results
 python benchmark_recurrent_gdn_vllm.py --backend gpu --output gpu_results_fixed
 # 在源码树根目录之外运行时，额外指定 --vllm-source <vllm源码中的fused_recurrent.py>
 ```
+
+## 当前分支的单核流水调试配置
+
+本分支按当前调试源码保留 `compileInfo_.aivNum = 1`，用于单核流水分析。
+已完成单算子 debug 编译、安装、调用烟测，以及 B=2、每请求 8 token、HK=HV=2、四个融合开关全开的流水采集。
+该配置和带 `-g` 的 debug 产物仅用于流水分析，不能将上文多核 release 性能结果视为当前配置的性能结论。
